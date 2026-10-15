@@ -238,10 +238,10 @@ function realistic(seed: number, perShape: number): { shape: string; secret: str
 }
 const WRAPS = [(s: string) => s, (s: string) => `word/${s}.xml`, (s: string) => `https://h.example/${s}`, (s: string) => `../${s}/x.exe`, (s: string) => `Macros/VBA/${s}`, (s: string) => `/C/Users/x/${s}`];
 // The measured residue of the `/` rules (the changelog states the same numbers): the share of secrets printed whole, and the share of
-// which some nine characters are printed, over these shapes. Measured on 7,000 of each (seeded): whole 1.4% (AWS), 2.4% (16 bytes),
-// 1.6% (20), 3.4% (24), 0.1% (32); nine characters 2.9%, 2.5%, 1.8%, 4.1%, 1.9%. The bounds here leave room for the sample's spread.
+// which some nine characters are printed, over these shapes. Measured on 7,000 of each (seeded): whole 1.2% (AWS), 1.4% (16 bytes),
+// 0.7% (20), 2.9% (24), 0.1% (32); nine characters 1.7%, 1.5%, 0.8%, 3.2%, 0.8%. The bounds here leave room for the sample's spread.
 const RESIDUE: Record<string, { whole: number; nine: number }> = {
-  aws40: { whole: 0.025, nine: 0.05 }, b64_16: { whole: 0.04, nine: 0.045 }, b64_20: { whole: 0.03, nine: 0.035 }, b64_24: { whole: 0.045, nine: 0.06 }, b64_32: { whole: 0.01, nine: 0.035 },
+  aws40: { whole: 0.025, nine: 0.03 }, b64_16: { whole: 0.03, nine: 0.03 }, b64_20: { whole: 0.02, nine: 0.02 }, b64_24: { whole: 0.045, nine: 0.05 }, b64_32: { whole: 0.01, nine: 0.02 },
 };
 
 test("P1-1 random real-shaped secrets holding `/` (AWS secret keys, base64 of 16 to 32 bytes), 400 of each in six places, in every copy: printed at no more than the measured residue", () => {
@@ -396,13 +396,18 @@ test("the sanitiser's output is a fixed point also for text with hidden characte
   }
 });
 
-test("a piece of a key next to a piece withheld alone is withheld with it (the growth across `/`), and a key glued to a token keeps no piece", () => {
+test("a piece of a key next to a piece withheld alone is withheld with it (the growth across `/`, also after a `\\`), a key holding `//` is read across it, and a space other than U+0020 does not end a user-info", () => {
   const cases: [string, string][] = [
     ["ehbmtdzvALrzIy/kzvaretHImjWVidK6ccSkU1kG.pdf", "<token-shaped text withheld 40 characters>.pdf"],
     ["iWVgTdB+Maj9AtILVHX58weguemi/2acrXHHBpsh", "<token-shaped text withheld 40 characters>"],
     ["tXCWPlepyJcdP+D/GFHMqaDni2BBVndGWULOwK8r", "<token-shaped text withheld 40 characters>"],
     ["ghp_Q7wErTy9uIoP3aSdF6gHjK2lZxC5vBnM8qW1k4BREtyo2fBeI0cHYq+wBchO/FsOL3gu00I1Hd/G", "<token-shaped text withheld 78 characters>/G"],
     ["Documents/" + "ghp_Ab3dEf5hIj7lMn9pQr1tUv3xYz5bCd7fGh9j" + "/Invoices", "Documents/<token-shaped text withheld 40 characters>/Invoices"],
+    ["\\\\srv\\13IYrtjICzAx/kzvaretHImjWVidK6ccSkU1kG", "\\\\srv\\<token-shaped text withheld 38 characters>"],
+    ["3Ze2Shi//ZX/omccMcR74A==", "<token-shaped text withheld 24 characters>"],
+    ["word/3Ze2Shi//ZX/omccMcR74A==.xml", "word/<token-shaped text withheld 24 characters>.xml"],
+    ["C://Users//JohnSmith//Documents", "C://Users//JohnSmith//Documents"],
+    ["https://u:Secr3t\u3000Pass@h.example/p", "<token-shaped text withheld 33 characters>"],
   ];
   for (const path of COPIES) {
     const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", cases.map((c) => c[0]));

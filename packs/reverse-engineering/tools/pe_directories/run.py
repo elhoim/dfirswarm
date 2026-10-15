@@ -412,6 +412,9 @@ SLASH_DENSITY = 0.45
 PLAIN_PIECE = re.compile(r"[A-Z]?[a-z]{3,}|(?=.{8})(?:[A-Z][a-z]{3,}){2,}(?:[A-Z]?[0-9]{1,4})?|(?=.{8})[A-Z]?[a-z]{3,}[0-9]{1,4}")
 
 
+_CLASS_RUNS = re.compile(r"[A-Z]+|[a-z]+|[0-9]+")           # a piece's runs of one character class (`+` is not counted)
+
+
 def _char_class(ch):
     return 0 if "A" <= ch <= "Z" else 1 if "a" <= ch <= "z" else 2 if "0" <= ch <= "9" else 3
 
@@ -435,14 +438,16 @@ def _slash_spans(text):
         run = m.group()
         if "/" not in run.strip("/"):
             continue
-        # each piece is read once: its start and end, whether it can be in a window (not empty, not a plain word; `==` alone can), the class of its first
+        # each piece is read once: its start and end, whether it can be in a window (not a plain word; an empty piece, as `//` makes, and
+        # `==` alone can be inside one, though no window begins or ends with either), the class of its first
         # and last counted character, its class changes, its counted characters and whether one is a digit (`+` and `=` not counted)
         pieces, at = [], m.start()
         for piece in run.split("/"):
             core = piece.rstrip("=")
-            cls = [_char_class(ch) for ch in core if ch != "+"]
-            pieces.append((at, at + len(piece), not piece or bool(PLAIN_PIECE.fullmatch(core)), cls[0] if cls else None, cls[-1] if cls else None,
-                           sum(1 for x, y in zip(cls, cls[1:]) if x != y), len(cls), 2 in cls, len(core)))
+            runs = _CLASS_RUNS.findall(core.replace("+", "")) if "+" in core else _CLASS_RUNS.findall(core)
+            counted = sum(len(r) for r in runs)
+            pieces.append((at, at + len(piece), bool(PLAIN_PIECE.fullmatch(core)), _char_class(runs[0][0]) if runs else None,
+                           _char_class(runs[-1][0]) if runs else None, max(0, len(runs) - 1), counted, any(r[0].isdigit() for r in runs), len(core)))
             at += len(piece) + 1
         n = len(pieces)
         if run.endswith("="):
@@ -454,7 +459,7 @@ def _slash_spans(text):
                 clear[i] = clear[i + 1] and not pieces[i][2]
             for i in range(n - 1):
                 length = m.end() - pieces[i][0]
-                if clear[i] and 16 <= length <= 64 and length % 4 == 0:
+                if clear[i] and pieces[i][8] and 16 <= length <= 64 and length % 4 == 0:
                     spans.append((pieces[i][0], m.end()))
                     break
         # prefix sums, so that a window costs a few additions: class changes inside pieces, at the `/` between two pieces (the last
@@ -511,7 +516,8 @@ def _slash_spans(text):
 # \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
 _HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 _MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
-_NO_BREAK = {0xA0: None, 0x2007: None, 0x202F: None}      # no-break spaces, which NFKD would make plain spaces that end a user-info
+# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info
+_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)}
 
 
 def unhidden(text):
@@ -574,6 +580,7 @@ def _shown_pass(out):
 _MARK_END = re.compile(r"<token-shaped text withheld (\d+) characters>$")
 _MARK_START = re.compile(r"<token-shaped text withheld (\d+) characters>")
 _PIECE = re.compile(r"[A-Za-z0-9_+%-]+={0,2}")
+_PIECE_END = re.compile(r"[A-Za-z0-9_+%-]+={0,2}$")
 
 
 def _grow(out):
@@ -581,18 +588,21 @@ def _grow(out):
     pass does not see): a piece of a key next to a piece withheld alone is not left printed."""
     if "/" not in out or "withheld" not in out:
         return out
+    # the run of name characters a part begins or ends with is the piece taken, as the shared block's growth takes it (`\\srv\<piece>/`)
     res = []
     for part in out.split("/"):
         m = _MARK_END.search(res[-1]) if res else None
-        if m and _PIECE.fullmatch(part) and _randomish(part):
-            res[-1] = res[-1][:m.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names")
+        piece = _PIECE.match(part) if m else None
+        if piece and _randomish(piece.group()):
+            res[-1] = res[-1][:m.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + piece.end(), "names") + part[piece.end():]
         else:
             res.append(part)
     out = []
     for part in reversed(res):
         m = _MARK_START.match(out[-1]) if out else None
-        if m and _PIECE.fullmatch(part) and _randomish(part):
-            out[-1] = _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names") + out[-1][m.end():]
+        piece = _PIECE_END.search(part) if m else None
+        if piece and _randomish(piece.group()):
+            out[-1] = part[:piece.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + len(piece.group()), "names") + out[-1][m.end():]
         else:
             out.append(part)
     return "/".join(reversed(out))
