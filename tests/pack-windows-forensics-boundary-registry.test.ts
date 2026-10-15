@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runPy, withCwd } from "./tool-library-harness.ts";
 import { WIN, body, everyFileUnder, failed, tool } from "./windows-pack-harness.ts";
-import { VARIANTS, type Node } from "./windows-stub-regipy.ts";
+import { VARIANTS, type Node, type Val } from "./windows-stub-regipy.ts";
 import { SHAPES, leaked, plant, type Canary, type Shape } from "./windows-canary.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -50,7 +50,7 @@ for (const shape of shapes) {
   test(`regkv: ${shape.name} in a value's data, a value name, a key name and binary data`, async () => {
     const canaries = plant(shape, N, 21);
     await withCwd(async (cwd) => {
-      const data: Node[] = canaries.map((c, i) => ({ name: `v${i}`, type: "sz" as const, value: c.text.replace(/\u0000/g, "") }));
+      const data: Val[] = canaries.map((c, i) => ({ name: `v${i}`, type: "sz" as const, value: c.text.replace(/\u0000/g, "") }));
       const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Data", values: data, children: nameOk(shape) ? canaries.map((c, i) => ({ name: `${i}_${c.text}`.slice(0, 200) })) : [] }] });
       const run = await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Data", limit: 5 }, env);
       const out = body<Answer>(run);
@@ -58,14 +58,14 @@ for (const shape of shapes) {
       check(shape, rate(canaries, [run.stdout, run.stderr, ...(await reachable(cwd))]), "a value's data or a key name");
       // value names
       if (nameOk(shape)) {
-        const names: Node[] = canaries.map((c, i) => ({ name: `${i}_${c.text}`.slice(0, 200), type: "dword" as const, value: i }));
+        const names: Val[] = canaries.map((c, i) => ({ name: `${i}_${c.text}`.slice(0, 200), type: "dword" as const, value: i }));
         const env2 = await V.write(cwd, "work/SYSTEM", { name: "HIVE", children: [{ name: "Names", values: names }] });
         const r2 = await tool("regkv", cwd, { hive: "work/SYSTEM", key: "Names" }, env2);
         check(shape, rate(canaries, [r2.stdout, r2.stderr]), "a value name");
       }
       // binary data: the canary written as Latin-1 bytes (the cases a registry holds binary data that is text)
       if (textOk(shape)) {
-        const bin: Node[] = canaries.map((c, i) => ({ name: `b${i}`, type: "binary" as const, value: Buffer.concat([Buffer.from([1, 2, 3]), Buffer.from(c.text.replace(/[^\x20-\x7e]/g, ""), "latin1"), Buffer.from([4, 5])]) }));
+        const bin: Val[] = canaries.map((c, i) => ({ name: `b${i}`, type: "binary" as const, value: Buffer.concat([Buffer.from([1, 2, 3]), Buffer.from(c.text.replace(/[^\x20-\x7e]/g, ""), "latin1"), Buffer.from([4, 5])]) }));
         const env3 = await V.write(cwd, "work/DEFAULT", { name: "HIVE", children: [{ name: "Bin", values: bin }] });
         const r3 = await tool("regkv", cwd, { hive: "work/DEFAULT", key: "Bin" }, env3);
         const ascii = canaries.map((c) => ({ text: c.text, cores: c.cores.filter((core) => /^[\x20-\x7e]+$/.test(core)) })).filter((c) => c.cores.length);
@@ -84,7 +84,7 @@ for (const shape of shapes.filter((s) => s.name !== "zw_split" && s.name !== "nu
     const canaries = plant(shape, N, 22).map((c) => ({ ...c, text: c.text.replace(/[^\x20-\x7e]/g, "") })).filter((c) => c.text.length >= 4);
     await withCwd(async (cwd) => {
       const item = (text: string): Buffer => { const content = Buffer.concat([Buffer.from([0x4e, 0x00]), Buffer.from(text, "latin1"), Buffer.from([0])]); const size = Buffer.alloc(2); size.writeUInt16LE(content.length + 2); return Buffer.concat([size, content]); };
-      const values: Node[] = canaries.map((c, i) => ({ name: String(i), type: "binary" as const, value: item(c.text) }));
+      const values: Val[] = canaries.map((c, i) => ({ name: String(i), type: "binary" as const, value: item(c.text) }));
       const bag: Node = { name: "BagMRU", values, children: canaries.map((_, i) => ({ name: String(i) })) };
       const env = await V.write(cwd, "work/UsrClass.dat", { name: "HIVE", children: [{ name: "Local Settings", children: [{ name: "Software", children: [{ name: "Microsoft", children: [{ name: "Windows", children: [{ name: "Shell", children: [bag] }] }] }] }] }] });
       const run = await tool("shellbags", cwd, { hive: "work/UsrClass.dat", limit: 5 }, env);
@@ -119,7 +119,7 @@ test("regkv, shellbags and amcache_apps: with the sanitiser taken out the backst
       await writeFile(join(cwd, "copy", name, "run.py"), src);
       for (const shape of shapes.filter((s) => families.includes(s.family) && textOk(s) && s.name !== "userinfo_at")) {
         const canaries = plant(shape, 120, 7);
-        const data: Node[] = canaries.map((c, i) => ({ name: `v${i}`, type: "sz" as const, value: c.text }));
+        const data: Val[] = canaries.map((c, i) => ({ name: `v${i}`, type: "sz" as const, value: c.text }));
         const rows: Node[] = canaries.map((c, i) => ({ name: `${i}`, values: [{ name: "LowerCaseLongPath", type: "sz" as const, value: c.text }] }));
         const hive = name === "regkv" ? { name: "HIVE", children: [{ name: "Data", values: data }] } : { name: "HIVE", children: [{ name: "Root", children: [{ name: "InventoryApplicationFile", children: rows }] }] };
         const env = await V.write(cwd, `work/${name}.dat`, hive);
@@ -173,7 +173,7 @@ const READABLE_DATA = [
 
 test("regkv: names and data an examiner must be able to read come through unchanged", async () => {
   await withCwd(async (cwd) => {
-    const values: Node[] = READABLE_DATA.map((t, i) => ({ name: READABLE_NAMES[i % READABLE_NAMES.length] + (i >= READABLE_NAMES.length ? "_" + i : ""), type: "sz" as const, value: t }));
+    const values: Val[] = READABLE_DATA.map((t, i) => ({ name: READABLE_NAMES[i % READABLE_NAMES.length] + (i >= READABLE_NAMES.length ? "_" + i : ""), type: "sz" as const, value: t }));
     const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Readable", values, children: READABLE_NAMES.filter((n) => !n.includes("\\")).map((name) => ({ name })) }] });
     const out = body<Answer>(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Readable" }, env));
     assert.deepEqual(Object.values(out.values), READABLE_DATA);
