@@ -395,3 +395,60 @@ test("floss with a string kind whose analysis its own flags say was off (a .NET-
     assert.equal((await coverage(out2)).engines.floss.status, "complete");
   });
 });
+
+// --- the fourth review ------------------------------------------------------------------------------------------------------------
+
+test("the backstop's count is of this receipt's fields: with the sanitiser of engine text taken out, two planted version lines are two, not one per rewrite of the receipt", async () => {
+  await withCwd(async (cwd, bin) => {
+    const t1 = "ghp_" + "Ab3dEf5hIj7lMn9pQr1tUv3xYz5bCd7fGh9j", t2 = "ghp_" + "Zz9yXw8vUt7sRq6pOn5mLk4jIh3gFe2dCb1a";
+    const ver = (tok: string, json: string): string => `if [ "$1" = "--version" ]; then echo "${tok}"; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+    await engines(bin, { capa: ver(t1, CAPA_JSON), floss: ver(t2, FLOSS_JSON) });
+    await sample(cwd);
+    const out = join(cwd, "catalog");
+    const code = ["import importlib.util, sys", "spec = importlib.util.spec_from_file_location('r', sys.argv[1])", "m = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(m)", "m.shown_text = lambda text, keep: m.cell(text)[:keep]", "sys.exit(m.main(['run.py'] + sys.argv[2:]))"].join("\n");
+    const r = spawnSync(PYTHON, ["-c", code, CAPA_FLOSS, "run", "--target", JSON.stringify({ paths: ["inputs/s.exe"] }), "--out", out], { cwd, encoding: "utf8", env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` } });
+    assert.doesNotMatch(r.stderr, /Traceback/, r.stderr);
+    const raw = await readFile(join(out, "coverage.json"), "utf8");
+    const c = JSON.parse(raw) as Json;
+    assert.equal((raw.match(/<withheld by the final check: /g) ?? []).length, 2, raw);
+    assert.equal(c.withheld_by_final_check, 2);
+    assert.equal(c.status, "partial");
+    for (const tok of [t1, t2]) assert.ok(!raw.includes(tok.slice(4, 13)), "a token reached the receipt");
+  });
+});
+
+test("an --out that cannot be written is a JSON failure, not a traceback", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    await sample(cwd);
+    await put(cwd, "ro/.keep", "");
+    const { chmod } = await import("node:fs/promises");
+    await chmod(join(cwd, "ro"), 0o500);
+    try {
+      const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", join(cwd, "ro", "catalog")]);
+      if (process.getuid?.() === 0) return; // root writes anywhere: nothing to test
+      assert.doesNotMatch(r.stderr, /Traceback/, r.stderr);
+      const o = JSON.parse(r.stdout) as Json;
+      assert.equal(o.ok, false);
+      assert.match(o.error, /the output directory cannot be written/);
+    } finally {
+      await chmod(join(cwd, "ro"), 0o700);
+    }
+  });
+});
+
+test("an engine's JSON larger than the recipe reads (32 MiB: parsed JSON takes about twelve times its size) is kept whole and the engine is partial, not read", async () => {
+  await withCwd(async (cwd, bin) => {
+    const big = `if [ "$1" = "--version" ]; then echo "stand-in"; exit 0; fi\n${PYTHON} -c "import sys; sys.stdout.write('{\\"rules\\": {}, \\"pad\\": \\"' + 'a' * (33 << 20) + '\\"}')"\n`;
+    await engines(bin, { capa: big });
+    await sample(cwd);
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.doesNotMatch(r.stderr, /Traceback/, r.stderr);
+    const c = await coverage(out);
+    assert.equal(c.engines.capa.status, "partial", JSON.stringify(c.engines.capa));
+    assert.match(c.engines.capa.reason, /larger than 33554432 bytes: kept whole, not read here/);
+    assert.ok(c.engines.capa.bytes > 33 << 20);
+  });
+});

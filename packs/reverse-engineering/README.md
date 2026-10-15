@@ -60,6 +60,11 @@ and no key is tried. `pe_directories` reads the PE directories `pe_info` only
 declares: exports, delay-load imports, TLS callbacks, the resource tree with the
 version information and manifest, the CLR header and metadata root, the debug
 directory and the Rich header. Neither verifies a signature or says what code does.
+Both withhold what they print by shape only: user-info, secret-named values and
+token-shaped text are withheld; a secret of another shape (a plain password, a
+token family the rules do not name, a token split across two fields) is printed,
+and some keys of a covered shape are too (the changelog gives the measured rates).
+A file whose secrets matter is read in a job with `secret_output: true`.
 
 **Two catalogue recipes.** `static-binary` recognises PE, ELF and Mach-O files
 by magic and structure and writes the parser's structure (long tables kept

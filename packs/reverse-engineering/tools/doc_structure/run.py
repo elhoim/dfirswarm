@@ -11,7 +11,8 @@ its format lets a standard-library reader go, and for each structure the answer 
                         EncryptionInfo stream, the Word FIB flags, the Excel FILEPASS record, the PowerPoint
                         header token); Excel sheet kinds from the BOUNDSHEET records
     OOXML / ZIP         the central directory, [Content_Types].xml, the document and workbook protection
-                        elements, and each vbaProject.bin read as an OLE compound file
+                        elements, and the VBA project (by content type, relationship, name or compound file
+                        signature) read as an OLE compound file
     PDF                 the cross-reference chain (tables and streams, hybrid files, every revision), the objects
                         with their stream filters, object streams, the trailer's encryption dictionary read, the
                         catalog's actions and the way they are triggered, embedded files, the page tree
@@ -32,10 +33,13 @@ import io
 import json
 import mmap
 import os
+import posixpath
 import re
 import struct
 import sys
 import time
+import unicodedata
+import urllib.parse
 import xml.parsers.expat
 import zipfile
 import zlib
@@ -356,7 +360,7 @@ def redact_target(url):
 
 def describe(exc):
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)), "text")
+    return shown_path("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def in_job():
@@ -369,33 +373,180 @@ VALUES = [None]    # the values file of this call, once it exists: an answer tha
 # BEGIN SHARED ONE WAY OUT
 # The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
 # Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
-# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
-# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
-# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
-# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
-# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
+# below, by shape only: what is printed is what no rule here recognises, and a secret of another shape (a plain password, a token
+# family the rules do not name, a token split across two fields) is printed. It reads the WHOLE text for what only the whole shows (a
+# user-info whose `//` or host a split would remove, a `Basic`/`Bearer` credential, base64 joined by `/`), then each `/` component (a
+# path is not one token), and a copy of the text without the characters that can split a token unseen (NUL, other control characters
+# and their \xNN escapes, zero-width, soft hyphen, bidi and combining marks; NFKD folds full-width forms): a text whose copy holds a
+# token is withheld whole. final_check is the backstop: every key and every value of what the tool is about to print or write is
+# tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
+# long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
+# the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
 MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
-# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
-KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
-                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
+# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
+# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
+# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
+                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
-# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
-# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has, and twelve
-# characters, or four where the string or a path component ends (a name cut by a declared length ends there). The GitHub and
-# Slack prefixes are matched in any case: a resource compiler upper-cases a string resource name, and `XOXB-<digits>-...` keeps the digits.
-TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
-                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))|eyJ[A-Za-z0-9_-]{6,}")
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
+# prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
+# where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
+# first twelve characters, as a random key has, and twelve characters, or four where the string or a path component ends (a name cut
+# by a declared length ends there). The GitHub and Slack prefixes are matched in any case: a resource compiler upper-cases a string
+# resource name, and `XOXB-<digits>-...` keeps the digits. A JWT's head takes the `.`-joined segments after it (a JWT glued to another
+# token loses its own head to that token's match, and its signature would be left).
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}"
+                        r"|(?<![A-Za-z0-9])(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{20,}"
+                        r"|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
+                        r"|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){0,2}")
 # The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
 # as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
 PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
+GLUED = re.compile(r"(?:%s)[A-Za-z0-9_+%%-]*" % _PREFIXED.pattern)
+JWT_TAIL = re.compile(r"(?<![A-Za-z0-9_+/-])eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){1,2}")
 LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+# Base64 joined by `/` (the AWS secret access key shape; a 16-, 20- or 32-byte value encoded): the pieces between two `/` are often too
+# short to look like a token alone (the shared block's `/` rule wants three random-looking pieces), so whole pieces are read together.
+# Random base64 changes character class (capital, small letter, digit) at about 0.64 of its characters; words, CamelCase names,
+# versions and dated folders at 0.15 to 0.3. Every window of two or more whole pieces, 16 to 64 characters with its `/`, that holds a
+# digit and no piece that is a plain word (`Outlook`, `Temp`, `FinalDraftV2`, `scan0042`: a random folder name next to a word is a
+# cache directory, not a key), and that changes class at SLASH_DENSITY of its characters or more, is withheld; so is padded base64
+# across `/` (below). A drive letter, a UNC host and a file name's extension are never in a window (a `.` or `:` ends the run). This
+# is a shape rule with a measured residue, which the changelog states in numbers. The shared block's own `/` rule (three random-looking
+# pieces) is kept, counting no plain word: the published example key, whose `EXAMPLEKEY` tail is not random, is caught by it.
+SLASH_RUN = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+SLASH_DENSITY = 0.45
+PLAIN_PIECE = re.compile(r"[A-Z]?[a-z]{3,}|(?=.{8})(?:[A-Z][a-z]{3,}){2,}(?:[A-Z]?[0-9]{1,4})?|(?=.{8})[A-Z]?[a-z]{3,}[0-9]{1,4}")
+
+
+def _char_class(ch):
+    return 0 if "A" <= ch <= "Z" else 1 if "a" <= ch <= "z" else 2 if "0" <= ch <= "9" else 3
+
+
+def _slash_spans(text):
+    spans = []
+    # the shared block's `/` rule (three random-looking pieces, 30 characters, a digit), read as three such pieces in a row, none a plain word
+    for m in _SLASHED.finditer(text):
+        if "/" not in m.group():
+            continue
+        group, at = [], m.start()
+        for piece in m.group().split("/") + [""]:
+            if piece and _randomish(piece) and not PLAIN_PIECE.fullmatch(piece.rstrip("=")):
+                group.append((at, at + len(piece)))
+            else:
+                if len(group) >= 3 and group[-1][1] - group[0][0] >= 30 and re.search(r"[0-9+]", text[group[0][0]:group[-1][1]]):
+                    spans.append((group[0][0], group[-1][1]))
+                group = []
+            at += len(piece) + 1
+    for m in SLASH_RUN.finditer(text):
+        run = m.group()
+        if "/" not in run.strip("/"):
+            continue
+        # each piece is read once: its start and end, whether it can be in a window (not empty, not a plain word; `==` alone can), the class of its first
+        # and last counted character, its class changes, its counted characters and whether one is a digit (`+` and `=` not counted)
+        pieces, at = [], m.start()
+        for piece in run.split("/"):
+            core = piece.rstrip("=")
+            cls = [_char_class(ch) for ch in core if ch != "+"]
+            pieces.append((at, at + len(piece), not piece or bool(PLAIN_PIECE.fullmatch(core)), cls[0] if cls else None, cls[-1] if cls else None,
+                           sum(1 for x, y in zip(cls, cls[1:]) if x != y), len(cls), 2 in cls, len(core)))
+            at += len(piece) + 1
+        n = len(pieces)
+        if run.endswith("="):
+            # padded base64 (RFC 4648 section 4): the longest window of whole pieces that ends the run, holds a `/` and no plain word,
+            # and is a multiple of four characters long, as an encoding with its padding is: the shared block's own `==` rule, across `/`
+            clear = [False] * (n + 1)
+            clear[n] = True
+            for i in range(n - 1, -1, -1):
+                clear[i] = clear[i + 1] and not pieces[i][2]
+            for i in range(n - 1):
+                length = m.end() - pieces[i][0]
+                if clear[i] and 16 <= length <= 64 and length % 4 == 0:
+                    spans.append((pieces[i][0], m.end()))
+                    break
+        # prefix sums, so that a window costs a few additions: class changes inside pieces, at the `/` between two pieces (the last
+        # counted character of the one before and the first of the next), counted characters, digits, and pieces a window cannot hold
+        inner_sum, join_sum, char_sum, digit_sum, block_sum = [0], [0], [0], [0], [0]
+        join, next_counted, last = [0] * n, [n] * (n + 1), None
+        for k, (start, end, blocked, first, tail, inner, count, digit, core_len) in enumerate(pieces):
+            join[k] = 1 if last is not None and first is not None and first != last else 0
+            last = tail if tail is not None else last
+            inner_sum.append(inner_sum[-1] + inner)
+            join_sum.append(join_sum[-1] + join[k])
+            char_sum.append(char_sum[-1] + count)
+            digit_sum.append(digit_sum[-1] + (1 if digit else 0))
+            block_sum.append(block_sum[-1] + (1 if blocked else 0))
+        for k in range(n - 1, -1, -1):
+            next_counted[k] = k if pieces[k][6] else next_counted[k + 1]
+        far = 0
+        for i in range(n):
+            if pieces[i][2] or pieces[i][8] < 3:
+                continue
+            # the last piece a window from i can reach: within 64 characters and before a piece a window cannot hold
+            far = max(far, i)
+            while far + 1 < n and pieces[far + 1][1] - pieces[i][0] <= 64 and not pieces[far + 1][2]:
+                far += 1
+            while far > i and pieces[far][1] - pieces[i][0] > 64:
+                far -= 1
+            if far == i or digit_sum[far + 1] == digit_sum[i]:
+                continue
+            f = next_counted[i]
+            # the longest window from i that is withheld: one span per start. A window neither begins nor ends with a piece of one or two
+            # characters (a file name `s` after a withheld folder is not taken into it; such a piece of a key, left out, is two at most)
+            for j in range(far, i, -1):
+                end = pieces[j][1]
+                if end - pieces[i][0] < 16:
+                    break
+                chars = char_sum[j + 1] - char_sum[i]
+                if pieces[j][8] < 3 or chars < 14 or digit_sum[j + 1] == digit_sum[i]:
+                    continue
+                changes = inner_sum[j + 1] - inner_sum[i] + join_sum[j + 1] - join_sum[i + 1] - (join[f] if i < f <= j else 0)
+                if changes >= SLASH_DENSITY * (chars - 1):
+                    spans.append((pieces[i][0], end))
+                    break
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# What can split a token without being seen: control characters (NUL between the bytes of UTF-16 read as 8-bit text), their \xNN and
+# \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
+_HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
+_MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
+_NO_BREAK = {0xA0: None, 0x2007: None, 0x202F: None}      # no-break spaces, which NFKD would make plain spaces that end a user-info
+
+
+def unhidden(text):
+    """The text without what can split a token unseen (a copy that is tested, never printed)."""
+    if not _MAYBE_HIDDEN.search(text):
+        return text
+    text = _HIDDEN_ESCAPE.sub("", text).translate(_NO_BREAK)
+    # NFKD, so that a mark a composition would fold into its letter (L and U+0301 compose to U+0139) is a mark that is dropped
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
+
+
+def _whole_withheld(m, kind="names"):
+    return _withheld("token-shaped text", len(m.group()), kind)
 
 
 def _shown_pass(out):
@@ -404,29 +555,118 @@ def _shown_pass(out):
     if ":" in out:
         out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
-    if "=" in out:
-        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
-    out = scrub(out, "names")
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out or ":" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
+                                  m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
+    # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
+        # what only the whole text shows, found in the same text and withheld together (one rule's match never hides another's): base64
+        # joined by `/`, a prefixed token (a JWT, `Basic`/`Bearer` holding `/`) with the run it ends inside, a user-info whose `//` or
+        # host a split would remove; then each component alone
+        found = [(s, e, "token-shaped text") for s, e in _slash_spans(out)]
+        found += [(m.start(), m.end(), "token-shaped text") for rule in (GLUED, JWT_TAIL) for m in rule.finditer(out)]
+        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO) for m in rule.finditer(out)]
+        if found:
+            found.sort()
+            merged = []
+            for s, e, what in found:
+                if merged and s < merged[-1][1]:
+                    ps, pe, pw = merged[-1]
+                    merged[-1] = (ps, max(pe, e), "token-shaped text" if "token" in pw + what else pw)
+                else:
+                    merged.append((s, e, what))
+            parts, last = [], 0
+            for s, e, what in merged:
+                parts.append(out[last:s])
+                parts.append(_withheld(what, e - s, "urls" if what == "userinfo" else "names"))
+                last = e
+            parts.append(out[last:])
+            out = "".join(parts)
         out = "/".join(scrub(part, "names") for part in out.split("/"))
-    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
+    else:
+        if "eyJ" in out:
+            out = JWT_TAIL.sub(_whole_withheld, out)
+        out = scrub(GLUED.sub(_whole_withheld, out), "names")
+    return _grow(TOKEN_HEAD.sub(_whole_withheld, out))
 
 
-def shown_path(text):
-    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
-    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
-    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
-    is what final_check tests."""
-    if not isinstance(text, str):
-        return text
-    if text in _CLEAN:
-        return text
+_MARK_END = re.compile(r"<token-shaped text withheld (\d+) characters>$")
+_MARK_START = re.compile(r"<token-shaped text withheld (\d+) characters>")
+_PIECE = re.compile(r"[A-Za-z0-9_+%-]+={0,2}")
+
+
+def _grow(out):
+    """A withheld token takes the random-looking pieces joined to it by `/` (the shared block's growth across `/`, which the component
+    pass does not see): a piece of a key next to a piece withheld alone is not left printed."""
+    if "/" not in out or "withheld" not in out:
+        return out
+    res = []
+    for part in out.split("/"):
+        m = _MARK_END.search(res[-1]) if res else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            res[-1] = res[-1][:m.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names")
+        else:
+            res.append(part)
+    out = []
+    for part in reversed(res):
+        m = _MARK_START.match(out[-1]) if out else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            out[-1] = _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names") + out[-1][m.end():]
+        else:
+            out.append(part)
+    return "/".join(reversed(out))
+
+
+_ONE_CLEAN = set()                  # pieces of text between escapes known to pass _shown_one unchanged
+
+
+def _shown_one(text):
+    if text in _ONE_CLEAN:
+        return text, 1
     out = _shown_pass(text)
     passes = 1
     while out != text and passes < 4:
         text, out = out, _shown_pass(out)
         passes += 1
+    if passes == 1 and len(out) <= 256 and len(_ONE_CLEAN) < 200000:
+        _ONE_CLEAN.add(out)
+    return out, passes
+
+
+# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
+# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
+# tested joined by unhidden.
+_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+
+
+def _shown(text):
+    if "\\" not in text:
+        return _shown_one(text)
+    parts, passes = _ESCAPE.split(text), 1
+    for k in range(0, len(parts), 2):
+        parts[k], n = _shown_one(parts[k])
+        passes = max(passes, n)
+    return "".join(parts), passes
+
+
+def shown_path(text):
+    """A string as it may be printed: user-info, a secret-named value, a token-shaped run of the whole text and of each `/` component,
+    every token head, withheld; and the whole text withheld when its copy without hidden characters (unhidden) holds any of these.
+    A pass that withheld something is run again on its own result (a marker it wrote can leave a new edge in front of a user-info), up
+    to four times, so that the result is a fixed point: shown_path of it is itself, which is what final_check tests."""
+    if not isinstance(text, str):
+        return text
+    if text in _CLEAN:
+        return text
+    bare = unhidden(text)
+    if bare != text and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
+    out, passes = _shown(text)
+    bare = unhidden(out)
+    if bare != out and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
     if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
         _CLEAN.add(out)
     return out
@@ -1009,7 +1249,7 @@ def stream_member(archive, info, budget):
             try:
                 chunk = fh.read(PAGE)
             except Exception as exc:
-                raise Unreadable("failed", "the member could not be read to its end (%s: %s)" % (type(exc).__name__, scrub(str(exc))))
+                raise Unreadable("failed", "the member could not be read to its end (%s: %s)" % (type(exc).__name__, shown_path(str(exc))))
             if not chunk:
                 return
             read += len(chunk)
@@ -1049,12 +1289,13 @@ def member_name(name, ctx, kind="part_name"):
 
 
 def text_of(value, ctx=None, kind="text"):
-    """A string out of a document, as it may be printed: control characters escaped, anything token-shaped withheld, and one longer than
-    SHOWN_TARGET given by its length only."""
+    """A string out of a document, as it may be printed: control characters escaped, then the sanitiser (shown_path) over the whole, and
+    one longer than SHOWN_TARGET given by its length only. (The shared block's scrub alone, first, would leave a marker where a
+    user-info's user name was token-shaped, and no rule after it would read `<marker>:password@` as a user-info.)"""
     text = value if isinstance(value, str) else str(value)
     if len(text) > SHOWN_TARGET:
         return long_text(text, "a string")
-    return scrub(cell(text), kind)
+    return shown_path(cell(text))
 
 
 def key_of(value):
@@ -1066,7 +1307,7 @@ def key_of(value):
     text = value if isinstance(value, str) else str(value)
     if len(text) > SHOWN_TARGET:
         return long_text(text, "a key")
-    return shown_path(scrub(cell(text).replace("<", "\\x3c"), "names"))
+    return shown_path(cell(text).replace("<", "\\x3c"))
 
 
 class KeyedCounts:
@@ -1128,13 +1369,13 @@ class Ctx:
         if len(self.problems) >= MAX_PROBLEMS:
             self.problems_dropped += 1
             return
-        text = scrub(text)
+        text = shown_path(text)
         if text in self.problems:
             return
         self.problems.append(text)
 
     def limit_hit(self, text):
-        text = scrub(text)
+        text = shown_path(text)
         if text not in self.limits:
             self.limits.append(text)
 
@@ -1173,15 +1414,22 @@ def iso_filetime(value):
 
 
 GUID_TEXT = re.compile(rb"[A-Za-z0-9_+/=-]{9,}")
+GUID_CHARS = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+/=-")
+
+
+def guid_is_text(raw):
+    """Sixteen bytes that hold a run of nine token characters, or ten such characters in all (text split by a NUL every few bytes, so that
+    no run is nine long), are text placed where an identifier goes. Uniform random bytes reach ten about once in 420 ids (a class id
+    of the Office formats, mostly zero bytes, never does): such an id is withheld, by its length."""
+    return bool(GUID_TEXT.search(raw)) or sum(1 for b in raw if b in GUID_CHARS) >= 10
 
 
 def guid(raw):
-    """A class id as a GUID. Sixteen bytes that hold a run of nine or more token characters are text placed where an identifier goes, not
-    an identifier (for random bytes, about one in twenty-five thousand), and their hex would print the text: such a field is given
-    as withheld, by its length."""
+    """A class id as a GUID. Sixteen bytes that read as text (guid_is_text) are text placed where an identifier goes, not an identifier,
+    and their hex would print the text: such a field is given as withheld, by its length."""
     if len(raw) != 16 or not any(raw):
         return None
-    if GUID_TEXT.search(raw):
+    if guid_is_text(raw):
         return "<16 bytes that read as text, withheld>"
     d1, d2, d3 = struct.unpack_from("<IHH", raw)
     return made("%08X-%04X-%04X-%s-%s" % (d1, d2, d3, raw[8:10].hex().upper(), raw[10:16].hex().upper()))
@@ -1371,6 +1619,10 @@ def cfb_key(name):
     out = []
     for c in name:
         u = c.upper()
+        if len(u) != 1:
+            # Python upper-cases by the full mapping; where that gives more than one character, the simple mapping is the title case
+            # when that is one character (U+1FB3 to U+1FBC), and none otherwise (U+00DF stays itself)
+            u = c.title()
         out.append(u if len(u) == 1 else c)
     return "".join(out)
 
@@ -2352,56 +2604,90 @@ def _probe_ole_body(cfb, ctx, extractor, label, source, out, page, extra):
         if e.reachable and e.parts is not None and len(e.parts) == 1:
             at_root.setdefault(cfb_key(e.name), []).append(e)
 
-    def root_stream(low):
+    def root_streams(low):
         found = at_root.get(cfb_key(low), [])
         for e in found:
             if e.kind != 2:
                 ctx.problem("%sthe root entry %s is of type %s, not a stream: it is not read as one" % (prefix, cell(shown_path(e.name)), ENTRY_TYPES.get(e.kind, "type %d" % e.kind)))
         streams = [e for e in found if e.kind == 2]
         if len(streams) > 1:
-            ctx.problem("%sthe root holds %d streams named %s: the first is read" % (prefix, len(streams), cell(shown_path(streams[0].name))))
-        return streams[0] if streams else None
+            ctx.problem("%sthe root holds %d streams named %s (directory entries %s): every copy is read, the first under its own key and the others "
+                        "under `other_copies`, each with its directory entry's sid, and `ole:` extracts every copy"
+                        % (prefix, len(streams), cell(shown_path(streams[0].name)), ", ".join(str(e.sid) for e in streams)))
+        return streams
 
-    streams_at_root = {low: root_stream(low) for low in ("worddocument", "workbook", "book", "powerpoint document", "current user", "encryptioninfo", "encryptedpackage")}
-    names = {low for low, e in streams_at_root.items() if e is not None}
+    streams_at_root = {low: root_streams(low) for low in ("worddocument", "workbook", "book", "powerpoint document", "current user", "encryptioninfo", "encryptedpackage")}
+    names = {low for low, e in streams_at_root.items() if e}
+
+    def each_copy(streams, read):
+        """read(stream) for every copy: the first's result, with the others' (each with its sid) under other_copies."""
+        first = None
+        for e in streams:
+            got = read(e)
+            got["sid"] = e.sid
+            if first is None:
+                first = got
+            else:
+                first.setdefault("other_copies", []).append(got)
+        return first
+
     if "worddocument" in names:
         apps.append("Word binary document")
-        w = {"container": "Word"}
-        word_findings(cfb, ctx, streams_at_root["worddocument"], w)
-        if w.get("scheme"):
-            enc["items"].append({"where": "WordDocument FIB", **{k: w[k] for k in ("scheme", "version", "fib") if k in w}})
-        out["word"] = w
+
+        def word(e):
+            w = {"container": "Word"}
+            word_findings(cfb, ctx, e, w)
+            if w.get("scheme"):
+                enc["items"].append({"where": "WordDocument FIB", "sid": e.sid, **{k: w[k] for k in ("scheme", "version", "fib") if k in w}})
+            return w
+        out["word"] = each_copy(streams_at_root["worddocument"], word)
     for key in ("workbook", "book"):
         if key in names:
             apps.append("Excel workbook (BIFF)")
-            x = {"stream": cell(key), "container": "Excel"}
-            excel_findings(cfb, ctx, streams_at_root[key], x)
-            if x.get("filepass"):
-                enc["items"].append({"where": "Excel FILEPASS record", **x["filepass"]})
-            out["excel"] = x
-            macro = [s for s in x.get("sheets", []) if s["kind"] == "Excel 4.0 macro sheet"]
-            if macro:
-                protection.append({"kind": "macro_sheets", "count": len(macro), "note": "Excel 4.0 macro sheets are formula-language macros: not VBA, not read by a VBA reader"})
+
+            def excel(e, key=key):
+                x = {"stream": cell(key), "container": "Excel"}
+                excel_findings(cfb, ctx, e, x)
+                if x.get("filepass"):
+                    enc["items"].append({"where": "Excel FILEPASS record", "sid": e.sid, **x["filepass"]})
+                macro = [s for s in x.get("sheets", []) if s["kind"] == "Excel 4.0 macro sheet"]
+                if macro:
+                    protection.append({"kind": "macro_sheets", "count": len(macro), "sid": e.sid,
+                                       "note": "Excel 4.0 macro sheets are formula-language macros: not VBA, not read by a VBA reader"})
+                return x
+            out["excel"] = each_copy(streams_at_root[key], excel)
             break
     if "powerpoint document" in names:
         apps.append("PowerPoint binary presentation")
-        p = {"container": "PowerPoint"}
-        powerpoint_findings(cfb, ctx, p, streams_at_root["current user"])
-        if "encrypted" in p.get("scheme", "") and not p["scheme"].startswith("not"):
-            enc["items"].append({"where": "PowerPoint Current User stream", "scheme": p["scheme"], "header_token": p.get("current_user_header_token")})
-        out["powerpoint"] = p
+
+        def powerpoint(e):
+            p = {"container": "PowerPoint"}
+            powerpoint_findings(cfb, ctx, p, e)
+            if "encrypted" in p.get("scheme", "") and not p["scheme"].startswith("not"):
+                enc["items"].append({"where": "PowerPoint Current User stream", "sid": e.sid if e is not None else None, "scheme": p["scheme"],
+                                     "header_token": p.get("current_user_header_token")})
+            return p
+        out["powerpoint"] = each_copy(streams_at_root["current user"], powerpoint) if streams_at_root["current user"] else powerpoint(None)
     if "encryptioninfo" in names and "encryptedpackage" in names:
         apps.append("encrypted OOXML package in an OLE wrapper")
-        info = encryption_info(cfb, ctx, streams_at_root["encryptioninfo"])
-        pkg = streams_at_root["encryptedpackage"]
-        if pkg is not None and pkg.size >= 8:
-            try:
-                declared = struct.unpack("<Q", cfb.head(pkg, 8))[0]
-                info["encrypted_package_declared_size"] = declared
-                info["encrypted_package_stream_bytes"] = pkg.size
-            except (Unreadable, Over):
-                pass
-        enc["items"].append({"where": "EncryptionInfo and EncryptedPackage streams", **info})
+        packages = []
+        for pkg in streams_at_root["encryptedpackage"]:
+            row = {"sid": pkg.sid, "stream_bytes": pkg.size}
+            if pkg.size >= 8:
+                try:
+                    row["declared_size"] = struct.unpack("<Q", cfb.head(pkg, 8))[0]
+                except (Unreadable, Over):
+                    pass
+            packages.append(row)
+        for k, e in enumerate(streams_at_root["encryptioninfo"]):
+            info = encryption_info(cfb, ctx, e)
+            info["sid"] = e.sid
+            if packages and "declared_size" in packages[0]:
+                info["encrypted_package_declared_size"] = packages[0]["declared_size"]
+                info["encrypted_package_stream_bytes"] = packages[0]["stream_bytes"]
+            if len(packages) > 1 and k == 0:
+                info["encrypted_package_copies"] = packages
+            enc["items"].append({"where": "EncryptionInfo and EncryptedPackage streams", **info})
     elif "encryptedpackage" in names or "encryptioninfo" in names:
         ctx.problem("only one of EncryptionInfo and EncryptedPackage is in the root: an encrypted OOXML package needs both")
     ds = [e for e in cfb.entries if e.reachable and e.parts and e.parts[0] == "\x06DataSpaces" and len(e.parts) > 1]
@@ -2423,10 +2709,11 @@ def _probe_ole_body(cfb, ctx, extractor, label, source, out, page, extra):
     if extractor is not None:
         for sel_path in extractor.wanted_args("ole"):
             parts = [p for p in sel_path.split("/") if p != ""]
-            entry = cfb.find(*parts) if parts else None
-            if entry is None or entry.kind != 2:
-                continue
-            extractor.write("ole", sel_path, where + "/".join(entry.parts), cfb.chunks(entry), "OLE stream, byte for byte")
+            copies = [e for e in (cfb.find_all(*parts) if parts else []) if e.kind == 2]
+            for entry in copies:
+                # two entries of one path (MS-CFB 2.6.4 forbids it; a reader takes one) are each written, the locator naming the sid
+                locator = where + "/".join(entry.parts) + (" (directory entry %d)" % entry.sid if len(copies) > 1 else "")
+                extractor.write("ole", sel_path, locator, cfb.chunks(entry), "OLE stream, byte for byte")
     # Embedded OLE 1.0 / Package payloads are listed, not opened.
 
 
@@ -2435,9 +2722,11 @@ def _probe_ole_body(cfb, ctx, extractor, label, source, out, page, extra):
 ZIP_READ = ["the ZIP central directory: member names, sizes, DOS times, flags",
             "[Content_Types].xml: the content types the package declares",
             "the document, workbook and presentation protection elements, by attribute name (a hash, salt or password attribute is reported by length only)",
-            "every vbaProject.bin member, read as an OLE compound file (see the VBA project and OLE entries)"]
+            "the VBA project, read as an OLE compound file (see the VBA project and OLE entries): every member the content types or a vbaProject "
+            "relationship declare as one, every member named vbaProject.bin, and every other member that begins with the compound file signature and holds a VBA storage",
+            "the relationship parts (*.rels), for the relationships of type vbaProject only"]
 ZIP_NOT_READ = ["the contents of any other part (document.xml, shared strings, sheets, embedded objects under embeddings/)",
-                "relationship targets (doc_probe reads *.rels parts)", "compiled VBA (p-code), Excel 4.0 macro sheet formulas and ActiveX binaries",
+                "relationship targets other than the VBA project's (doc_probe reads *.rels parts)", "compiled VBA (p-code), Excel 4.0 macro sheet formulas and ActiveX binaries",
                 "digital-signature parts", "encryption of the whole package: an encrypted OOXML package is an OLE compound file, not a ZIP"]
 OLE_READ = ["the compound file header, FAT, mini FAT and directory (every entry, reachable or not), stream sizes and times",
             "the VBA project: the dir stream, each module's stream and the size of its compressed source (source is written only with extract)",
@@ -2448,7 +2737,37 @@ OLE_NOT_READ = ["stream contents other than those named above (document text, wo
                 "OLE 1.0 and Package payloads in \\x01Ole10Native streams: listed, not opened", "whether any password, empty or otherwise, opens the file: no key is tried"]
 PROTECTION_ELEMENTS = {"documentProtection", "writeProtection", "workbookProtection", "fileSharing", "modifyVerifier"}
 SECRETISH = re.compile(r"hash|salt|password|digest|verifier", re.I)
+VBA_CONTENT_TYPE = "application/vnd.ms-office.vbaproject"
+VBA_RELS = re.compile(r"(?:^|/)_rels/[^/]*\.rels$", re.I)
 NOTABLE_CONTENT_TYPES = ("vbaProject", "macroEnabled", "macrosheet", "activeX", "oleObject", "vbaProjectSignature", "vbaData")
+
+
+class _Quiet:
+    """The context, with a compound file's problems kept to itself: a member read only to see whether it holds a VBA storage."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    def problem(self, text):
+        pass
+
+    def limit_hit(self, text):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+
+def cfb_has_vba(blob, ctx):
+    """Does this compound file hold a VBA storage (a stream `dir` beside a stream `_VBA_PROJECT`, [MS-OVBA] 2.2)?"""
+    try:
+        cfb = Cfb(blob, _Quiet(ctx))
+        cfb.read_directory(ctx.cfg["max_entries"])
+        cfb.walk(ctx.cfg["max_depth"])
+    except (CfbError, Over, ValueError, IndexError, struct.error):
+        return False
+    streams = {(tuple(cfb_key(p) for p in e.parts[:-1]), cfb_key(e.parts[-1])) for e in cfb.entries if e.reachable and e.parts and e.kind == 2}
+    return any(name == "DIR" and (parent, "_VBA_PROJECT") in streams for parent, name in streams)
 
 
 def read_member(archive, info, ctx):
@@ -2508,20 +2827,46 @@ def _probe_zip(path, size, ctx, extractor, out):
             return out
         # A name the directory marks UTF-8 (flag bit 11) that is not UTF-8 would stop the standard library's reader for the whole archive:
         # that member's flag is shown to the reader without the bit, so its name is read as CP437, every other member is listed, and it is said.
-        patches, not_utf8 = {}, 0
+        # A Unicode Path extra field (0x7075, APPNOTE 4.6.9) names a member a second time: Python 3.12 and later take that name (and stop at
+        # one that is not UTF-8, losing the whole archive), 3.11 ignores it. Its tag is hidden from the reader, so that every version lists
+        # every member by its central directory name; this tool reads the field itself, shows the second name beside the first, and says so.
+        patches, not_utf8, unicode_paths = {}, 0, {}
         fh.seek(end["cd_off"])
         cd = fh.read(min(end["cd_size"], MAX_DIRECTORY_BYTES))
-        at = 0
+        at = index = 0
         while at + 46 <= len(cd) and cd[at:at + 4] == b"PK\x01\x02":
             flags = struct.unpack_from("<H", cd, at + 8)[0]
             nlen, xlen, clen = struct.unpack_from("<HHH", cd, at + 28)
+            raw_name = cd[at + 46:at + 46 + nlen]
             if flags & 0x800:
                 try:
-                    cd[at + 46:at + 46 + nlen].decode("utf-8")
+                    raw_name.decode("utf-8")
                 except UnicodeDecodeError:
                     patches[end["cd_off"] + at + 9] = (flags & ~0x800) >> 8
                     not_utf8 += 1
+            x = at + 46 + nlen
+            x_end = min(x + xlen, len(cd))
+            while x + 4 <= x_end:
+                tag, ln = struct.unpack_from("<HH", cd, x)
+                if x + 4 + ln > x_end:
+                    break
+                if tag == 0x7075:
+                    data = cd[x + 4:x + 4 + ln]
+                    patches[end["cd_off"] + x] = 0
+                    patches[end["cd_off"] + x + 1] = 0
+                    found = {"version": data[0] if data else None}
+                    if len(data) >= 5:
+                        found["names_this_name"] = struct.unpack_from("<I", data, 1)[0] == zlib.crc32(raw_name)
+                        try:
+                            found["name"] = data[5:].decode("utf-8")
+                        except UnicodeDecodeError:
+                            found["name"] = data[5:].decode("cp437")
+                            found["not_utf8"] = True
+                    found["central_as_utf8"] = raw_name.decode("utf-8", "replace")
+                    unicode_paths.setdefault(index, found)
+                x += 4 + ln
             at += 46 + nlen + xlen + clen
+            index += 1
         if not_utf8:
             ctx.problem("%d member name%s marked UTF-8 (general purpose flag bit 11) %s not UTF-8: read as CP437, so the name shown is not the one a "
                         "UTF-8 reader shows" % (not_utf8, "" if not_utf8 == 1 else "s", "is" if not_utf8 == 1 else "are"))
@@ -2529,10 +2874,10 @@ def _probe_zip(path, size, ctx, extractor, out):
         try:
             archive = zipfile.ZipFile(io.BufferedReader(window))
         except Exception as exc:
-            raise Stop("the archive will not open (%s: %s)" % (type(exc).__name__, scrub(str(exc))), out)
+            raise Stop("the archive will not open (%s: %s)" % (type(exc).__name__, shown_path(str(exc))), out)
         # Part names compare case-insensitively (ECMA-376-2 9.1.1.1.2): every member is kept under its lower-case name, so that two
         # spellings of one part are a duplicate, and every copy of a part this tool reads is read.
-        by_name, by_lower, local_mismatch = {}, {}, []
+        by_name, by_lower, local_mismatch, aliases, renamed = {}, {}, [], {}, []
         with archive:
             infos = archive.infolist()
             # Part names compare without case (ECMA-376-2 9.1.1.1.2): every spelling of a name is that name, so when one spelling is withheld
@@ -2569,6 +2914,15 @@ def _probe_zip(path, size, ctx, extractor, out):
                        "modified": "%04d-%02d-%02dT%02d:%02d:%02d" % info.date_time}
                 if shown != name:
                     row["name_withheld"] = True
+                up = unicode_paths.get(index)
+                if up is not None:
+                    alias = up.get("name")
+                    row["unicode_path_field"] = {"name": member_name(alias, ctx) if alias else None, "version": up["version"],
+                                                 "crc_names_this_name": up.get("names_this_name"), "utf8": not up.get("not_utf8")}
+                    if alias:
+                        aliases[name] = alias
+                    if up.get("not_utf8") or (up.get("names_this_name") and alias and alias not in (name, up["central_as_utf8"])):
+                        renamed.append(shown)
                 if info.flag_bits & 0x1:
                     row["encrypted"] = True
                     members["flagged_encrypted"] += 1
@@ -2577,6 +2931,12 @@ def _probe_zip(path, size, ctx, extractor, out):
                     row["local_header_differs"] = differs
                     local_mismatch.append((shown, differs))
                 parts.add(row)
+            if renamed:
+                ctx.problem("%d member(s) carry a Unicode Path extra field (0x7075) that names them otherwise or is not UTF-8 (%s): a reader that honours "
+                            "the field (Python 3.12 and later, Info-ZIP) lists the second name, or fails on one that is not UTF-8, and one that ignores it "
+                            "(Python 3.11) lists the central directory's; this tool lists and reads each member by the central directory's name, shows "
+                            "the second as unicode_path_field, and reads a member as the VBA project when either name says it is one"
+                            % (len(renamed), "; ".join(renamed[:5]) + ("; and %d more" % (len(renamed) - 5) if len(renamed) > 5 else "")))
             if local_mismatch:
                 out["local_headers_that_differ"] = len(local_mismatch)
                 ctx.problem("%d member(s) have a local header that disagrees with the central directory (%s): a reader that walks the local headers (a "
@@ -2602,6 +2962,9 @@ def _probe_zip(path, size, ctx, extractor, out):
             out["opc_markers"] = {"[Content_Types].xml": "[content_types].xml" in names, "_rels/.rels": "_rels/.rels" in names}
             # [Content_Types].xml
             ct = by_name.get("[content_types].xml")
+            vba_declared = {}                # lower-case part name -> how the package declares it its VBA project
+            vba_extensions = set()
+            overridden = set()               # every part an Override names: its own content type wins over the Default of its extension
             if ct is not None:
                 overrides, defaults, notable = ctx.page("content_types"), 0, []
 
@@ -2618,6 +2981,13 @@ def _probe_zip(path, size, ctx, extractor, out):
                                "content_type": text_of(kind, None, "names")}
                     else:
                         return
+                    if local == "Override":
+                        overridden.add(attrs.get("PartName", "").lstrip("/").lower())
+                    if kind.strip().lower() == VBA_CONTENT_TYPE:
+                        if local == "Default":
+                            vba_extensions.add(attrs.get("Extension", "").lower())
+                        else:
+                            vba_declared.setdefault(attrs.get("PartName", "").lstrip("/").lower(), set()).add("content_type")
                     overrides.add(row)
                     if any(k in kind for k in NOTABLE_CONTENT_TYPES) and len(notable) < 50 and row not in notable:
                         notable.append(row)
@@ -2657,14 +3027,86 @@ def _probe_zip(path, size, ctx, extractor, out):
                     ctx.problem("%s declares an encoding the XML reader cannot decode (%s): it was not parsed" % (part, type(exc).__name__))
                 for row in found:
                     out["protection_items"].append({"where": part, **row, "note": "an editing restriction, not encryption: the content is readable without a password"})
-            # embedded VBA projects
+            # The VBA project: every member the package declares as one (an Override or Default content type, a vbaProject relationship
+            # in any relationship part), every member named vbaProject.bin (by either name a Unicode Path field gives it), and every other
+            # member that begins with the compound file signature and holds a VBA storage. A declared one that is absent or not read is
+            # a problem: the answer is partial.
+            listed = infos[:members["listed"]]
+            for rels in [info for info in listed if VBA_RELS.search(info.filename)]:
+                if ctx.expired("the relationship parts"):
+                    break
+                base = rels.filename[:VBA_RELS.search(rels.filename).start()]
+
+                def rel(local, _ns, attrs, base=base):
+                    kind = attrs.get("Type", "")
+                    if local == "Relationship" and kind.rstrip("/").rpartition("/")[2].lower() == "vbaproject" and attrs.get("TargetMode", "").lower() != "external":
+                        target = urllib.parse.unquote(attrs.get("Target", ""))
+                        target = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(base, target))
+                        vba_declared.setdefault(target.lower(), set()).add("relationship")
+                try:
+                    xml_elements(stream_member(archive, rels, ctx.budget), rel)
+                    members["read"] += 1
+                except Unreadable as exc:
+                    zip_unreadable(ctx, members, zname(rels.filename, False), exc)
+                except DoctypeRefused:
+                    ctx.problem("%s contains a DOCTYPE, which is refused: it was not parsed" % zname(rels.filename, False))
+                except xml.parsers.expat.ExpatError as exc:
+                    ctx.problem("%s is not well-formed XML (%s): the relationships before the error are read" % (zname(rels.filename, False), xml.parsers.expat.ErrorString(exc.code)))
+                except (LookupError, ValueError) as exc:
+                    ctx.problem("%s declares an encoding the XML reader cannot decode (%s): it was not parsed" % (zname(rels.filename, False), type(exc).__name__))
+            vba_parts, chosen = [], set()
+            for info in listed:
+                names = {info.filename.lower()} | ({aliases[info.filename].lower()} if info.filename in aliases else set())
+                why = set()
+                for n in names:
+                    why |= vba_declared.get(n, set())
+                    if n.endswith("vbaproject.bin"):
+                        why.add("name")
+                    if n.rpartition(".")[2] in vba_extensions and "." in n and n not in overridden:
+                        why.add("content_type")
+                if why:
+                    vba_parts.append((info, sorted(why)))
+                    chosen |= names
+            missing = sorted(n for n in vba_declared if n not in chosen)
+            for n in missing:
+                ctx.problem("the package declares %s its VBA project (%s), and no member of that name is listed: the project is not read"
+                            % (shown_name(n), " and ".join(sorted(vba_declared[n]))))
+            for info in listed:
+                if any(info is i for i, _ in vba_parts) or info.flag_bits & 0x1 or info.compress_type not in METHODS_READ:
+                    continue
+                if ctx.expired("the compound file signature check"):
+                    break
+                try:
+                    with archive.open(info) as fh_member:
+                        head = fh_member.read(8)
+                except Exception:
+                    continue
+                if head == CFB_MAGIC:
+                    vba_parts.append((info, ["cfb_signature"]))
             projects = []
-            vba_parts = [info for info in infos[:members["listed"]] if info.filename.lower().endswith("vbaproject.bin")]
-            for k, info in enumerate(vba_parts):
-                if ctx.expired("the vbaProject.bin parts"):
+            for k, (info, why) in enumerate(vba_parts):
+                if ctx.expired("the VBA project parts"):
                     members["not_attempted"] += len(vba_parts) - k
+                    if any(w != "cfb_signature" for _, ws in vba_parts[k:] for w in ws):
+                        ctx.problem("the clock ended before every member the package declares as its VBA project was read")
                     break
                 shown = zname(info.filename)
+                if why == ["cfb_signature"]:
+                    try:
+                        blob = read_member(archive, info, ctx)
+                    except Unreadable:
+                        continue
+                    if not cfb_has_vba(blob, ctx):
+                        continue
+                    members["read"] += 1
+                else:
+                    try:
+                        blob = read_member(archive, info, ctx)
+                    except Unreadable as exc:
+                        zip_unreadable(ctx, members, shown, exc)
+                        ctx.problem("%s is declared as the VBA project (%s) and was not read" % (shown, ", ".join(why)))
+                        continue
+                    members["read"] += 1
                 try:
                     blob = read_member(archive, info, ctx)
                 except Unreadable as exc:
@@ -2676,7 +3118,10 @@ def _probe_zip(path, size, ctx, extractor, out):
                 except CfbError as exc:
                     ctx.problem("%s is not read as a compound file: %s" % (shown, exc))
                     continue
-                part = {"part": shown, "vba_projects": body.get("vba_projects", []), "orphan_entries": body["orphan_entries"], "cfb": body["cfb"], "directory": body.get("directory")}
+                part = {"part": shown, "selected_by": why, "vba_projects": body.get("vba_projects", []), "orphan_entries": body["orphan_entries"], "cfb": body["cfb"],
+                        "directory": body.get("directory")}
+                if why == ["cfb_signature"]:
+                    part["note"] = "a compound file holding a VBA storage that no content type, relationship or vbaProject.bin name declares as the package's VBA project"
                 if "vba_projects_summary" in body:
                     part["vba_projects_summary"] = body["vba_projects_summary"]
                 projects.append(part)
@@ -2715,10 +3160,21 @@ DIRECT_LENGTH = re.compile(rb"/Length[\x00\t\n\x0c\r ]+([0-9]+)(?![0-9]|[\x00\t\
 MAX_OBJECT_WINDOW = 32 << 20
 MAX_ITEMS = 250_000                 # values one parse may read (a PDF object and all it holds): past it, a bound of the parser, named
 # What the PDF reader keeps of what it parsed, by an estimate of the memory it takes: ITEM_BYTES for each value (a name, a number, an empty
-# array costs 50 to 70 bytes of heap; the input costs 2 or 3), plus the bytes of every string and name. A parsed value costs 20 to 30
+# array costs 50 to 70 bytes of heap; the input costs 2 or 3), plus the bytes of every string and name as held (a name's characters at one,
+# two or four bytes each, by its widest character, and a dictionary key twice). A parsed value costs 20 to 30
 # times its input, so the scan budgets, which count input, do not bound it: these do, and none of them loses anything (an object that
 # is not kept is read again when it is needed, under the same clock and budgets).
 ITEM_BYTES = 80
+
+
+def str_bytes(text):
+    """The bytes a Python string's characters take: one, two or four each, by its widest character (PEP 393). A name of the file is held
+    as a string, and one character past U+FFFF makes every character of it take four bytes."""
+    if not text:
+        return 0
+    widest = max(text)
+    return len(text) * (4 if widest > "\uffff" else 2 if widest > "\xff" else 1)
+PARSE_BYTES = 64 << 20              # what one parse (an object and all it holds) may take in memory, estimated so: past it, a bound, named
 CACHE_BYTES = 96 << 20              # the parsed objects the reader keeps for the next lookup, oldest out first
 CACHE_OBJECT_BYTES = 8 << 20        # an object larger than this is not kept in that cache at all
 CACHE_OBJECTS = 4000
@@ -2874,6 +3330,8 @@ class Lexer:
             raise ParseBound("an object of more than %d values in one parse" % self.max_items)
         if not self.items & 255:
             self.meter.charge(0)
+            if self.cost() > PARSE_BYTES:
+                raise ParseBound("an object whose parsed values take more than %d bytes of memory (estimated) in one parse" % PARSE_BYTES)
 
     def eof(self):
         if self.final:
@@ -2917,7 +3375,7 @@ class Lexer:
                 name = LongName("<a name of %d bytes at offset %d>" % (length, self.pos))
             else:
                 name = Name(unescape_name(buf[self.pos + 1:end]))
-            self.held += len(name)
+            self.held += str_bytes(name)
             self.pos = end
             return name
         if c == 0x3C:
@@ -2975,6 +3433,7 @@ class Lexer:
             if not isinstance(key, Name):
                 raise PdfError("a dictionary key that is not a name, at offset %d" % at)
             out[str(key)] = self.parse(depth + 1)
+            self.held += str_bytes(key)      # the key is held a second time, as the plain string the dictionary is keyed by
             if len(out) > MAX_ITEMS:
                 raise PdfError("a dictionary of more than %d entries" % MAX_ITEMS)
 
@@ -4237,12 +4696,15 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
     page = ctx.page("pdf_actions")
     files = ctx.page("pdf_embedded_files")
     max_depth = pdf.cfg["max_depth"]
-    if not isinstance(catalog, dict):
-        ctx.problem("no catalog could be found: actions, pages and embedded files were not traced")
-        out["actions"] = {"count": 0, "table": "pdf_actions", "traced": False}
-        return out
+    traced = isinstance(catalog, dict)
+    if not traced:
+        # no catalog to trace from: every action object and embedded file read is still listed below, as reached from no catalog
+        ctx.problem("no catalog could be found: actions, pages and embedded files were not traced from one; every action object read is listed, "
+                    "with reached_from_catalog false")
+        catalog = {}
     keys = sorted(text_of(k, None, "names") for k in catalog)
-    out["catalog"] = {"object": cnum, "keys": keys[:40], "keys_total": len(keys)}
+    if traced:
+        out["catalog"] = {"object": cnum, "keys": keys[:40], "keys_total": len(keys)}
     if len(keys) > 40:
         ctx.limit_hit("the catalog holds %d keys: the first 40 (sorted) are listed by name; every key that reaches an action is traced" % len(keys))
     budget = [pdf.cfg["max_objects"]]
@@ -4267,6 +4729,14 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
             row["ciphertext"] = True
             return None
         return text_string(raw)
+
+    def held_by(where):
+        """A direct action's place as the answer gives it: the number of the object that holds it and the key path in that object."""
+        path = []
+        while isinstance(where, tuple):
+            where, rest = where[0], where[1:]
+            path[:0] = [("[%d]" % k) if isinstance(k, int) else "/" + str(k) for k in rest]
+        return {"object": where if isinstance(where, int) else None, "path": "".join(path)}
 
     def describe_action(value, num, trigger, reached=True, extra=None):
         s = value.get("S")
@@ -4359,7 +4829,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                 if key in seen_actions:
                     continue
                 seen_actions.add(key)
-                describe_action(d, ident, trig)
+                describe_action(d, ident, trig, extra=None if ident is not None else {"held_by": held_by(where)})
                 here = ident if ident is not None else where
                 link = (mark, parent)
                 nxt, _ = pdf.deref(d.get("Next")) if isinstance(d.get("Next"), Ref) else (d.get("Next"), None)
@@ -4524,12 +4994,13 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                 leaves += 1
                 if "AA" in d:
                     aa(d["AA"], "Page", (here, "AA"))
-                an, _ = pdf.deref(d.get("Annots"))
+                an, an_num = pdf.deref(d.get("Annots"))
                 if isinstance(an, list):
                     for i, a in enumerate(an):
                         tick()
                         ad, anum = pdf.deref(a)
-                        ahere = anum if anum is not None else (here, "Annots", i)
+                        # a direct annotation's place is the array that holds it: an /Annots array two pages share is one place
+                        ahere = anum if anum is not None else (an_num, i) if an_num is not None else (here, "Annots", i)
                         if not isinstance(ad, dict):
                             continue
                         st = ad.get("Subtype")
@@ -4606,7 +5077,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
     counts = {}
     for a in actions:
         counts[a["action"] or "?"] = counts.get(a["action"] or "?", 0) + 1
-    out["actions"] = {"count": len(actions), "by_type": counts, "unreached_from_catalog": unreached, "outside_chain": outside_counts, "table": "pdf_actions",
+    out["actions"] = {"count": len(actions), "by_type": counts, "unreached_from_catalog": unreached, "outside_chain": outside_counts, "table": "pdf_actions", "traced": traced,
                       "note": "an action dictionary and the key that reaches it are different facts: a trigger is where the reader is asked to run it, and whether it runs depends on the reader"}
     if ciphertext:
         out["actions"]["ciphertext_note"] = ("the file is encrypted and no key is tried: the action dictionaries of objects outside object streams are read, and every target string "
@@ -4733,19 +5204,29 @@ def ole1_header(raw):
     version, fmt = struct.unpack_from("<II", raw, 0)
     if version != 0x00000501:
         return None
-    pos, names = 8, []
-    for _ in range(3):
+    pos, names, utf16 = 8, [], False
+    for k in range(3):
         if pos + 4 > len(raw):
             return {"ole_version": "0x%08X" % version, "format_id": fmt, "header_truncated": True}
         n = struct.unpack_from("<I", raw, pos)[0]
         pos += 4
         if n > 4096 or pos + n > len(raw):
             return {"ole_version": "0x%08X" % version, "format_id": fmt, "header_truncated": True}
-        names.append(raw[pos:pos + n].rstrip(b"\x00").decode("latin-1"))
+        field = raw[pos:pos + n].rstrip(b"\x00")
+        # the strings are ANSI; one whose every other byte is NUL is UTF-16LE written there, read as such (as 8-bit text, its NULs
+        # would sit between the characters of whatever it spells)
+        if len(field) >= 3 and not any(field[1::2]) and all(field[0::2]):
+            names.append((field + b"\x00").decode("utf-16-le"))
+            utf16 = utf16 or k == 0
+        else:
+            names.append(field.decode("latin-1"))
         pos += n
     native = struct.unpack_from("<I", raw, pos)[0] if pos + 4 <= len(raw) else None
-    return {"ole_version": "0x%08X" % version, "format_id": fmt, "format": {1: "linked", 2: "embedded"}.get(fmt, "other"), "class_name": names[0],
-            "native_data_bytes": native, "native_data_offset": pos + 4}
+    out = {"ole_version": "0x%08X" % version, "format_id": fmt, "format": {1: "linked", 2: "embedded"}.get(fmt, "other"), "class_name": names[0],
+           "native_data_bytes": native, "native_data_offset": pos + 4}
+    if utf16:
+        out["class_name_encoding"] = "UTF-16LE in a field MS-OLEDS 2.2.4 makes an ANSI string"
+    return out
 
 
 MAX_CAPTURES = 8                    # field instructions and templates open inside one another that are each kept as a row
@@ -4800,6 +5281,7 @@ def _probe_rtf(blob, ctx, extractor, out):
     captures_not_kept = [0]         # field instructions or templates opened inside MAX_CAPTURES others: counted, not kept
     kept = [0, 0]                   # bytes kept in captures, captures cut
     cur_obj_stack = []              # indexes into objects of the open \object groups
+    uc, uc_skip = [1], [0]          # the \uc count in force, and the fallback characters after a \uN still to drop
     last_end = 0
     pos_after_last_close = None
     tokens = 0
@@ -4808,11 +5290,19 @@ def _probe_rtf(blob, ctx, extractor, out):
 
     def room(cap):
         bound = CAPTURE_LIMIT if cap[0] in ("objclass", "objname") else cfg["max_stream_bytes"]
-        return max(0, min(bound - len(cap[1]), cfg["max_total_bytes"] - kept[0]))
+        return max(0, min(bound - len(cap[1]) // 2, cfg["max_total_bytes"] - kept[0]))
 
     def keep(piece):
         """Add text between two tokens (or a decoded symbol) to every open text capture, each as far as its bound goes: what is past it is
-        counted, and the capture is marked cut. A capture inside object data keeps nothing (the data is hex, not text)."""
+        counted, and the capture is marked cut. A capture inside object data keeps nothing (the data is hex, not text). A capture holds
+        characters (as UTF-16LE): a byte of the file is the character of that code (ISO 8859-1), a \\uN control word the character N, and
+        the fallback characters after a \\uN (\\ucN of them, 1 by default) are dropped, as a reader of Unicode RTF drops them."""
+        if isinstance(piece, (bytes, bytearray)):
+            piece = piece.decode("latin-1")
+        if uc_skip[0] and piece:
+            drop = min(uc_skip[0], len(piece))
+            uc_skip[0] -= drop
+            piece = piece[drop:]
         if not captures or any(c[0] == "objdata" for c in captures):
             return
         for cap in captures:
@@ -4822,7 +5312,7 @@ def _probe_rtf(blob, ctx, extractor, out):
                 cap[6] = True
             take = min(len(piece), r)
             if take:
-                cap[1] += piece[:take]
+                cap[1] += piece[:take].encode("utf-16-le", "surrogatepass")
                 kept[0] += take
 
     def text_between(a, b):
@@ -4832,13 +5322,13 @@ def _probe_rtf(blob, ctx, extractor, out):
 
     def finish_capture():
         kind, buf, _d, owner, off, seen, cut, nested = captures.pop()
-        text = bytes(buf)
+        text = bytes(buf).decode("utf-16-le", "surrogatepass")
         kept[1] += 1 if cut else 0
         if kind == "objclass" and owner is not None:
-            objects[owner]["class_name_raw"] = text.strip().decode("latin-1")
+            objects[owner]["class_name_raw"] = text.strip()
             objects[owner]["class_name_cut"] = cut
         elif kind == "objname" and owner is not None:
-            objects[owner]["name_raw"] = text.strip().decode("latin-1")
+            objects[owner]["name_raw"] = text.strip()
             objects[owner]["name_cut"] = cut
         elif kind == "fldinst":
             if len(fields) < MAX_FIELDS:
@@ -4866,9 +5356,10 @@ def _probe_rtf(blob, ctx, extractor, out):
         if lead == b"{":
             groups += 1
             depth += 1
+            uc_skip[0] = 0
             max_depth_seen = max(max_depth_seen, depth)
             if len(stack) < max_depth:
-                stack.append([None, False, s])
+                stack.append([None, False, s, uc[0]])
             else:
                 over += 1
             continue
@@ -4877,10 +5368,11 @@ def _probe_rtf(blob, ctx, extractor, out):
                 unbalanced_close += 1
                 continue
             depth -= 1
+            uc_skip[0] = 0
             if over:
                 over -= 1
             else:
-                dest, _ign, gs = stack.pop()
+                dest, _ign, gs, uc[0] = stack.pop()
                 if captures and captures[-1][2] == len(stack) + 1:
                     if captures[-1][0] == "objdata":
                         objects[captures[-1][3]]["data_end"] = s
@@ -4899,11 +5391,21 @@ def _probe_rtf(blob, ctx, extractor, out):
                     keep(sym[1:2])
                 elif sym[:2] == b"\\'":
                     keep(bytes.fromhex(sym[2:4].decode("ascii")))
+            elif uc_skip[0] and tok.group()[:2] == b"\\'":
+                uc_skip[0] -= 1
             if tok.group()[:2] == b"\\*" and stack:
                 stack[-1][1] = True
             continue
         name = word.decode("ascii")
         param = int(tok.group(2)) if tok.group(2) else None
+        if name == "uc" and param is not None:
+            uc[0] = max(0, min(param, 16))
+        elif name == "u" and param is not None:
+            uc_skip[0] = 0
+            keep(chr((param + 65536 if param < 0 else param) & 0xFFFF))
+            uc_skip[0] = uc[0]
+        else:
+            uc_skip[0] = 0
         if rtf_word(name) is None:
             odd_words["occurrences"] += 1
             if len(odd_words["distinct"]) < MAX_WORDS:
@@ -5069,7 +5571,7 @@ def _probe_rtf(blob, ctx, extractor, out):
     out["fields"] = {"count": len(fields) + fields_over[0], "table": "rtf_fields", "listed": field_rows,
                      "listed_note": "the first 200 fields; every field read is a row of the rtf_fields table, a field inside another's instruction included"}
     for text, off, seen, cut, nested in fields:
-        clean = text.decode("latin-1").strip()
+        clean = text.strip()
         finding = ctx.next_finding("F")
         row = {"finding_id": finding, "offset": off, "instruction_word": field_word(clean), "instruction_length": len(clean)}
         if nested:
@@ -5088,7 +5590,7 @@ def _probe_rtf(blob, ctx, extractor, out):
     out["templates"] = tmpl_rows
     out["templates_table"] = "rtf_templates"
     for text, off, seen, cut, nested in templates:
-        clean = text.decode("latin-1").strip()
+        clean = text.strip()
         finding = ctx.next_finding("T")
         row = {"finding_id": finding, "offset": off, "target": shown_target(clean), "target_length": len(clean)}
         if nested:
@@ -5299,8 +5801,10 @@ def main():
     if ctx.problems_dropped:
         result["problems_not_listed"] = ctx.problems_dropped
     if values.enabled or COUNTS["urls"] or COUNTS["names"] or COUNTS["text"]:
-        result["withheld_note"] = ("Credentials and token-shaped text in a URL or a name are withheld from this answer; the length is kept. "
-                                   "The whole target is in the values file when write_values was asked for in a secret_output job.")
+        result["withheld_note"] = ("Text is withheld by its shape only: user-info, the value of a secret-named key and token-shaped text are withheld "
+                                   "from this answer, each by its length. A secret of another shape (a plain password, a token family the rules do "
+                                   "not name, a token split across two fields) is printed. The whole string is in the values file when write_values "
+                                   "was asked for in a secret_output job: read a file whose secrets matter in such a job.")
     emit(result, spill)
 
 
@@ -5310,4 +5814,4 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # never a traceback and never a clean answer for a failure
-        fail("unexpected failure: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, scrub(str(exc)))))
+        fail("unexpected failure: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, shown_path(str(exc)))))

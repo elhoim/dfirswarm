@@ -35,6 +35,7 @@ import stat
 import struct
 import sys
 import time
+import unicodedata
 import xml.parsers.expat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,14 @@ MAX_STREAM_HEADERS = 4096
 MAX_VERSION_STRINGS = 4096
 OVERLAP_LOOK_BACK = 64
 GUID_TEXT = re.compile(rb"[A-Za-z0-9_+/=-]{9,}")
+GUID_CHARS = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+/=-")
+
+
+def guid_is_text(raw):
+    """Sixteen bytes that hold a run of nine token characters, or ten such characters in all (text split by a NUL every few bytes, so that
+    no run is nine long), are text placed where an identifier goes. Uniform random bytes reach ten about once in 420 ids (a class id
+    of the Office formats, mostly zero bytes, never does): such an id is withheld, by its length."""
+    return bool(GUID_TEXT.search(raw)) or sum(1 for b in raw if b in GUID_CHARS) >= 10
 MAX_EXTRACT = 64
 SPILL_FLOOR = 100                   # no list in the answer is longer than the larger of `limit` and this: a longer one is in a file, whole
 HEAD_BYTES = 1024
@@ -330,7 +339,7 @@ SHOWN_TARGET = 2048                 # characters of a string out of the file the
 
 def describe(exc):
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)), "text")
+    return shown_path("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def in_job():
@@ -343,33 +352,180 @@ VALUES = [None]    # the values file of this call, once it exists: an answer tha
 # BEGIN SHARED ONE WAY OUT
 # The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
 # Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
-# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
-# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
-# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
-# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
-# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
+# below, by shape only: what is printed is what no rule here recognises, and a secret of another shape (a plain password, a token
+# family the rules do not name, a token split across two fields) is printed. It reads the WHOLE text for what only the whole shows (a
+# user-info whose `//` or host a split would remove, a `Basic`/`Bearer` credential, base64 joined by `/`), then each `/` component (a
+# path is not one token), and a copy of the text without the characters that can split a token unseen (NUL, other control characters
+# and their \xNN escapes, zero-width, soft hyphen, bidi and combining marks; NFKD folds full-width forms): a text whose copy holds a
+# token is withheld whole. final_check is the backstop: every key and every value of what the tool is about to print or write is
+# tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
+# long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
+# the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
 MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
-# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
-KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
-                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
+# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
+# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
+# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
+                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
-# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
-# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has, and twelve
-# characters, or four where the string or a path component ends (a name cut by a declared length ends there). The GitHub and
-# Slack prefixes are matched in any case: a resource compiler upper-cases a string resource name, and `XOXB-<digits>-...` keeps the digits.
-TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
-                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))|eyJ[A-Za-z0-9_-]{6,}")
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
+# prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
+# where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
+# first twelve characters, as a random key has, and twelve characters, or four where the string or a path component ends (a name cut
+# by a declared length ends there). The GitHub and Slack prefixes are matched in any case: a resource compiler upper-cases a string
+# resource name, and `XOXB-<digits>-...` keeps the digits. A JWT's head takes the `.`-joined segments after it (a JWT glued to another
+# token loses its own head to that token's match, and its signature would be left).
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}"
+                        r"|(?<![A-Za-z0-9])(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{20,}"
+                        r"|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
+                        r"|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){0,2}")
 # The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
 # as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
 PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
+GLUED = re.compile(r"(?:%s)[A-Za-z0-9_+%%-]*" % _PREFIXED.pattern)
+JWT_TAIL = re.compile(r"(?<![A-Za-z0-9_+/-])eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){1,2}")
 LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+# Base64 joined by `/` (the AWS secret access key shape; a 16-, 20- or 32-byte value encoded): the pieces between two `/` are often too
+# short to look like a token alone (the shared block's `/` rule wants three random-looking pieces), so whole pieces are read together.
+# Random base64 changes character class (capital, small letter, digit) at about 0.64 of its characters; words, CamelCase names,
+# versions and dated folders at 0.15 to 0.3. Every window of two or more whole pieces, 16 to 64 characters with its `/`, that holds a
+# digit and no piece that is a plain word (`Outlook`, `Temp`, `FinalDraftV2`, `scan0042`: a random folder name next to a word is a
+# cache directory, not a key), and that changes class at SLASH_DENSITY of its characters or more, is withheld; so is padded base64
+# across `/` (below). A drive letter, a UNC host and a file name's extension are never in a window (a `.` or `:` ends the run). This
+# is a shape rule with a measured residue, which the changelog states in numbers. The shared block's own `/` rule (three random-looking
+# pieces) is kept, counting no plain word: the published example key, whose `EXAMPLEKEY` tail is not random, is caught by it.
+SLASH_RUN = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+SLASH_DENSITY = 0.45
+PLAIN_PIECE = re.compile(r"[A-Z]?[a-z]{3,}|(?=.{8})(?:[A-Z][a-z]{3,}){2,}(?:[A-Z]?[0-9]{1,4})?|(?=.{8})[A-Z]?[a-z]{3,}[0-9]{1,4}")
+
+
+def _char_class(ch):
+    return 0 if "A" <= ch <= "Z" else 1 if "a" <= ch <= "z" else 2 if "0" <= ch <= "9" else 3
+
+
+def _slash_spans(text):
+    spans = []
+    # the shared block's `/` rule (three random-looking pieces, 30 characters, a digit), read as three such pieces in a row, none a plain word
+    for m in _SLASHED.finditer(text):
+        if "/" not in m.group():
+            continue
+        group, at = [], m.start()
+        for piece in m.group().split("/") + [""]:
+            if piece and _randomish(piece) and not PLAIN_PIECE.fullmatch(piece.rstrip("=")):
+                group.append((at, at + len(piece)))
+            else:
+                if len(group) >= 3 and group[-1][1] - group[0][0] >= 30 and re.search(r"[0-9+]", text[group[0][0]:group[-1][1]]):
+                    spans.append((group[0][0], group[-1][1]))
+                group = []
+            at += len(piece) + 1
+    for m in SLASH_RUN.finditer(text):
+        run = m.group()
+        if "/" not in run.strip("/"):
+            continue
+        # each piece is read once: its start and end, whether it can be in a window (not empty, not a plain word; `==` alone can), the class of its first
+        # and last counted character, its class changes, its counted characters and whether one is a digit (`+` and `=` not counted)
+        pieces, at = [], m.start()
+        for piece in run.split("/"):
+            core = piece.rstrip("=")
+            cls = [_char_class(ch) for ch in core if ch != "+"]
+            pieces.append((at, at + len(piece), not piece or bool(PLAIN_PIECE.fullmatch(core)), cls[0] if cls else None, cls[-1] if cls else None,
+                           sum(1 for x, y in zip(cls, cls[1:]) if x != y), len(cls), 2 in cls, len(core)))
+            at += len(piece) + 1
+        n = len(pieces)
+        if run.endswith("="):
+            # padded base64 (RFC 4648 section 4): the longest window of whole pieces that ends the run, holds a `/` and no plain word,
+            # and is a multiple of four characters long, as an encoding with its padding is: the shared block's own `==` rule, across `/`
+            clear = [False] * (n + 1)
+            clear[n] = True
+            for i in range(n - 1, -1, -1):
+                clear[i] = clear[i + 1] and not pieces[i][2]
+            for i in range(n - 1):
+                length = m.end() - pieces[i][0]
+                if clear[i] and 16 <= length <= 64 and length % 4 == 0:
+                    spans.append((pieces[i][0], m.end()))
+                    break
+        # prefix sums, so that a window costs a few additions: class changes inside pieces, at the `/` between two pieces (the last
+        # counted character of the one before and the first of the next), counted characters, digits, and pieces a window cannot hold
+        inner_sum, join_sum, char_sum, digit_sum, block_sum = [0], [0], [0], [0], [0]
+        join, next_counted, last = [0] * n, [n] * (n + 1), None
+        for k, (start, end, blocked, first, tail, inner, count, digit, core_len) in enumerate(pieces):
+            join[k] = 1 if last is not None and first is not None and first != last else 0
+            last = tail if tail is not None else last
+            inner_sum.append(inner_sum[-1] + inner)
+            join_sum.append(join_sum[-1] + join[k])
+            char_sum.append(char_sum[-1] + count)
+            digit_sum.append(digit_sum[-1] + (1 if digit else 0))
+            block_sum.append(block_sum[-1] + (1 if blocked else 0))
+        for k in range(n - 1, -1, -1):
+            next_counted[k] = k if pieces[k][6] else next_counted[k + 1]
+        far = 0
+        for i in range(n):
+            if pieces[i][2] or pieces[i][8] < 3:
+                continue
+            # the last piece a window from i can reach: within 64 characters and before a piece a window cannot hold
+            far = max(far, i)
+            while far + 1 < n and pieces[far + 1][1] - pieces[i][0] <= 64 and not pieces[far + 1][2]:
+                far += 1
+            while far > i and pieces[far][1] - pieces[i][0] > 64:
+                far -= 1
+            if far == i or digit_sum[far + 1] == digit_sum[i]:
+                continue
+            f = next_counted[i]
+            # the longest window from i that is withheld: one span per start. A window neither begins nor ends with a piece of one or two
+            # characters (a file name `s` after a withheld folder is not taken into it; such a piece of a key, left out, is two at most)
+            for j in range(far, i, -1):
+                end = pieces[j][1]
+                if end - pieces[i][0] < 16:
+                    break
+                chars = char_sum[j + 1] - char_sum[i]
+                if pieces[j][8] < 3 or chars < 14 or digit_sum[j + 1] == digit_sum[i]:
+                    continue
+                changes = inner_sum[j + 1] - inner_sum[i] + join_sum[j + 1] - join_sum[i + 1] - (join[f] if i < f <= j else 0)
+                if changes >= SLASH_DENSITY * (chars - 1):
+                    spans.append((pieces[i][0], end))
+                    break
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# What can split a token without being seen: control characters (NUL between the bytes of UTF-16 read as 8-bit text), their \xNN and
+# \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
+_HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
+_MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
+_NO_BREAK = {0xA0: None, 0x2007: None, 0x202F: None}      # no-break spaces, which NFKD would make plain spaces that end a user-info
+
+
+def unhidden(text):
+    """The text without what can split a token unseen (a copy that is tested, never printed)."""
+    if not _MAYBE_HIDDEN.search(text):
+        return text
+    text = _HIDDEN_ESCAPE.sub("", text).translate(_NO_BREAK)
+    # NFKD, so that a mark a composition would fold into its letter (L and U+0301 compose to U+0139) is a mark that is dropped
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
+
+
+def _whole_withheld(m, kind="names"):
+    return _withheld("token-shaped text", len(m.group()), kind)
 
 
 def _shown_pass(out):
@@ -378,29 +534,118 @@ def _shown_pass(out):
     if ":" in out:
         out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
-    if "=" in out:
-        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
-    out = scrub(out, "names")
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out or ":" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
+                                  m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
+    # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
+        # what only the whole text shows, found in the same text and withheld together (one rule's match never hides another's): base64
+        # joined by `/`, a prefixed token (a JWT, `Basic`/`Bearer` holding `/`) with the run it ends inside, a user-info whose `//` or
+        # host a split would remove; then each component alone
+        found = [(s, e, "token-shaped text") for s, e in _slash_spans(out)]
+        found += [(m.start(), m.end(), "token-shaped text") for rule in (GLUED, JWT_TAIL) for m in rule.finditer(out)]
+        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO) for m in rule.finditer(out)]
+        if found:
+            found.sort()
+            merged = []
+            for s, e, what in found:
+                if merged and s < merged[-1][1]:
+                    ps, pe, pw = merged[-1]
+                    merged[-1] = (ps, max(pe, e), "token-shaped text" if "token" in pw + what else pw)
+                else:
+                    merged.append((s, e, what))
+            parts, last = [], 0
+            for s, e, what in merged:
+                parts.append(out[last:s])
+                parts.append(_withheld(what, e - s, "urls" if what == "userinfo" else "names"))
+                last = e
+            parts.append(out[last:])
+            out = "".join(parts)
         out = "/".join(scrub(part, "names") for part in out.split("/"))
-    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
+    else:
+        if "eyJ" in out:
+            out = JWT_TAIL.sub(_whole_withheld, out)
+        out = scrub(GLUED.sub(_whole_withheld, out), "names")
+    return _grow(TOKEN_HEAD.sub(_whole_withheld, out))
 
 
-def shown_path(text):
-    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
-    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
-    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
-    is what final_check tests."""
-    if not isinstance(text, str):
-        return text
-    if text in _CLEAN:
-        return text
+_MARK_END = re.compile(r"<token-shaped text withheld (\d+) characters>$")
+_MARK_START = re.compile(r"<token-shaped text withheld (\d+) characters>")
+_PIECE = re.compile(r"[A-Za-z0-9_+%-]+={0,2}")
+
+
+def _grow(out):
+    """A withheld token takes the random-looking pieces joined to it by `/` (the shared block's growth across `/`, which the component
+    pass does not see): a piece of a key next to a piece withheld alone is not left printed."""
+    if "/" not in out or "withheld" not in out:
+        return out
+    res = []
+    for part in out.split("/"):
+        m = _MARK_END.search(res[-1]) if res else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            res[-1] = res[-1][:m.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names")
+        else:
+            res.append(part)
+    out = []
+    for part in reversed(res):
+        m = _MARK_START.match(out[-1]) if out else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            out[-1] = _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names") + out[-1][m.end():]
+        else:
+            out.append(part)
+    return "/".join(reversed(out))
+
+
+_ONE_CLEAN = set()                  # pieces of text between escapes known to pass _shown_one unchanged
+
+
+def _shown_one(text):
+    if text in _ONE_CLEAN:
+        return text, 1
     out = _shown_pass(text)
     passes = 1
     while out != text and passes < 4:
         text, out = out, _shown_pass(out)
         passes += 1
+    if passes == 1 and len(out) <= 256 and len(_ONE_CLEAN) < 200000:
+        _ONE_CLEAN.add(out)
+    return out, passes
+
+
+# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
+# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
+# tested joined by unhidden.
+_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+
+
+def _shown(text):
+    if "\\" not in text:
+        return _shown_one(text)
+    parts, passes = _ESCAPE.split(text), 1
+    for k in range(0, len(parts), 2):
+        parts[k], n = _shown_one(parts[k])
+        passes = max(passes, n)
+    return "".join(parts), passes
+
+
+def shown_path(text):
+    """A string as it may be printed: user-info, a secret-named value, a token-shaped run of the whole text and of each `/` component,
+    every token head, withheld; and the whole text withheld when its copy without hidden characters (unhidden) holds any of these.
+    A pass that withheld something is run again on its own result (a marker it wrote can leave a new edge in front of a user-info), up
+    to four times, so that the result is a fixed point: shown_path of it is itself, which is what final_check tests."""
+    if not isinstance(text, str):
+        return text
+    if text in _CLEAN:
+        return text
+    bare = unhidden(text)
+    if bare != text and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
+    out, passes = _shown(text)
+    bare = unhidden(out)
+    if bare != out and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
     if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
         _CLEAN.add(out)
     return out
@@ -848,12 +1093,13 @@ class Short(Exception):
 
 
 def text_of(value, kind="text"):
-    """A string out of a file, as it may be printed: control characters escaped, anything token-shaped withheld, and one longer than
-    SHOWN_TARGET given by its length only."""
+    """A string out of a file, as it may be printed: control characters escaped, then the sanitiser (shown_path) over the whole, and one
+    longer than SHOWN_TARGET given by its length only. (The shared block's scrub alone, first, would leave a marker where a user-info's
+    user name was token-shaped, and no rule after it would read `<marker>:password@` as a user-info.)"""
     text = value if isinstance(value, str) else str(value)
     if len(text) > SHOWN_TARGET:
         return long_text(text, "a string")
-    return scrub(cell(text), kind)
+    return shown_path(cell(text))
 
 
 class Ctx:
@@ -885,13 +1131,13 @@ class Ctx:
         if len(self.problems) >= MAX_PROBLEMS:
             self.problems_dropped += 1
             return
-        text = scrub(text)
+        text = shown_path(text)
         if text in self.problems:
             return
         self.problems.append(text)
 
     def limit_hit(self, text):
-        text = scrub(text)
+        text = shown_path(text)
         if text not in self.limits:
             self.limits.append(text)
 
@@ -933,15 +1179,27 @@ def run_before(img, at, utf16=False):
 
 def shown_at(ctx, text, at, utf16=False, kind="names"):
     """A string the file holds at offset `at`, as it may be printed. A string whose address points into the middle of a run of token
-    characters (a name read a byte or a field late) is the tail of that run: the run is tested whole, and the string's leading run is
-    withheld when the whole is shaped like a token."""
+    characters (a name read a byte or a field late) is the tail of that run: the run is tested whole, and when the whole is shaped like a
+    token the string's head (its leading run, with the random-looking pieces joined to it by `/`: the shared block's growth across `/`)
+    is withheld. The string itself always goes through the sanitiser whole, head included (so that `<head>:password@host` is still a
+    user-info and a JWT still a JWT); what of the head the sanitiser left as it is, is then withheld."""
     shown = text_of(text, kind)
     img = getattr(ctx, "img", None)
     lead = LEADING_RUN.match(text) if text else None
-    if img is not None and lead and at is not None and 0 < at <= img.size:
+    if img is not None and lead and at is not None and 0 < at <= img.size and len(text) <= SHOWN_TARGET:
         before = run_before(img, at, utf16)
         if before and (token_shaped(before + lead.group()) or TOKEN_HEAD.search(before + lead.group())):
-            shown = _withheld("token-shaped text", len(lead.group()), kind) + text_of(text[lead.end():], kind)
+            end = lead.end()
+            while end < len(text) - 1 and text[end] == "/":
+                piece = re.match(r"[A-Za-z0-9_+%-]+={0,2}", text[end + 1:])
+                if not piece or not _randomish(piece.group()):
+                    break
+                end += 1 + piece.end()
+            k = 0
+            while k < min(len(shown), end) and shown[k] == text[k]:
+                k += 1
+            if k:
+                shown = _withheld("token-shaped text", k, kind) + shown[k:]
     return shown
 
 
@@ -1792,7 +2050,7 @@ def read_debug(img, pe, ctx, out):
                 d1, d2, d3 = struct.unpack_from("<IHH", g)
                 # Sixteen bytes that hold a run of nine or more token characters are text placed where the GUID goes, and their hex would print
                 # the text: such a field is given as withheld (for random bytes, about one in twenty-five thousand).
-                shown_guid = ("<16 bytes that read as text, withheld>" if GUID_TEXT.search(g) else
+                shown_guid = ("<16 bytes that read as text, withheld>" if guid_is_text(g) else
                               made("%08X-%04X-%04X-%s-%s" % (d1, d2, d3, g[8:10].hex().upper(), g[10:16].hex().upper())))
                 row["codeview"] = {"signature": "RSDS", "guid": shown_guid, "age": age}
                 if raw is not None:
@@ -2013,8 +2271,10 @@ def main():
     if ctx.problems_dropped:
         result["problems_not_listed"] = ctx.problems_dropped
     if values.enabled or COUNTS["urls"] or COUNTS["names"] or COUNTS["text"]:
-        result["withheld_note"] = ("Token-shaped text in a name, a path or a string is withheld from this answer; its length is kept. "
-                                   "The whole string is in the values file when write_values was asked for in a secret_output job.")
+        result["withheld_note"] = ("Text is withheld by its shape only: user-info, the value of a secret-named key and token-shaped text are withheld "
+                                   "from this answer, each by its length. A secret of another shape (a plain password, a token family the rules do "
+                                   "not name, a token split across two fields) is printed. The whole string is in the values file when write_values "
+                                   "was asked for in a secret_output job: read a file whose secrets matter in such a job.")
     emit(result, spill)
 
 
@@ -2024,4 +2284,4 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # never a traceback and never a clean answer for a failure
-        fail("unexpected failure: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, scrub(str(exc)))))
+        fail("unexpected failure: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, shown_path(str(exc)))))
