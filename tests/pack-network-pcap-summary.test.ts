@@ -497,8 +497,19 @@ test("a block the tool does not decode is measured, never read, however long it 
     await drop(cwd, "work/big.pcapng", Buffer.concat([ngSection(), ngInterface(), big, ngPacket({ ticks: ticks(1_700_000_000, 0, 6), frame })]));
     const wrapper = `import atexit, resource, runpy, sys
 def report():
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    sys.stderr.write("MAXRSS_MB %d\\n" % (peak // (1024 * 1024) if sys.platform == "darwin" else peak // 1024))
+    # On Linux ru_maxrss carries the peak of the process image that was replaced by exec: a parent holding the 160 MB
+    # capture in memory (this test does) would be counted against the tool. VmHWM is the new image's own peak.
+    peak = None
+    try:
+        for line in open("/proc/self/status"):
+            if line.startswith("VmHWM:"):
+                peak = int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    if peak is None:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak = raw // (1024 * 1024) if sys.platform == "darwin" else raw // 1024
+    sys.stderr.write("MAXRSS_MB %d\\n" % peak)
 atexit.register(report)
 runpy.run_path(sys.argv[1], run_name="__main__")
 `;
