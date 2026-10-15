@@ -45,7 +45,7 @@ def run_tool(name, args, cwd, path_dirs=(), env=None, timeout=120, raw_input=Non
     `path_dirs` go in front of PATH; `only_path` replaces PATH altogether."""
     e = dict(os.environ)
     e["PATH"] = only_path if only_path is not None else os.pathsep.join(list(path_dirs) + [e.get("PATH", "")])
-    for k in ("JOB_ID", "OUT", "AGENT_ID"):
+    for k in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT"):
         e.pop(k, None)
     e.update(env or {})
     data = raw_input if raw_input is not None else json.dumps(args)
