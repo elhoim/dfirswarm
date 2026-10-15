@@ -339,7 +339,7 @@ test("the review's wording fixes are in the leaves and the goal, and the goal's 
   assert.match(text("rules/authoring"), /A hit on the specimen a rule was written from is not corroboration/);
   assert.match(text("rules/authoring"), /file names, header timestamps, absolute addresses, library strings/);
   // The goal: the definition of done asks for inspected evidence, not an address or an import; the question about strings
-  // bounds the negative; the checks are the eight they were, the event minimum included (flagged for the owner, not changed).
+  // bounds the negative; the checks are the seven that remain once the numeric event minimum is gone (the owner removed it: completion is judged by the answer dispositions).
   const goal = await readFile(join(RE, "goals", "sample-triage.md"), "utf8");
   const done = goal.slice(goal.indexOf("## Definition of done"), goal.indexOf("## Checks")).replace(/\s+/g, " ");
   assert.match(done, /Every material capability inference cites inspected code or structured feature evidence with its locator and limitations; an import alone supports only a dependency observation\./);
@@ -347,8 +347,9 @@ test("the review's wording fixes are in the leaves and the goal, and the goal's 
   assert.match(goal.replace(/\s+/g, " "), /which analysis recovered no reference to it \(a bounded negative: function discovery, indirect addressing and decoding limit it\)/);
   assert.doesNotMatch(goal, /a plain statement that nothing references it/);
   const checks = goal.slice(goal.indexOf("## Checks")).split("\n").filter((l) => l.startsWith("- `"));
-  assert.equal(checks.length, 8);
-  assert.ok(checks.some((c) => c.includes('-ge 3')), "the event minimum is still there");
+  assert.equal(checks.length, 7);
+  assert.ok(checks.every((c) => !c.includes('"kind":"event"') && !/-ge \d/.test(c)), "no event-count minimum");
+  assert.ok(checks.some((c) => c.includes("check-answers.ts")), "the answer dispositions are still what judges completion");
   // The counts outside the pack follow the pack.
   for (const file of ["docs/packs.md", "README.md"]) {
     const doc = await readFile(join(RE, "..", "..", file), "utf8");

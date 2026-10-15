@@ -76,7 +76,11 @@ panes and no key is possible with the scripted provider
   `tests/<name>.test.ts` or `tests/<name>.test.sh` runs by its name: nothing
   lists the suites (`scripts/test-node.ts`, `scripts/test-bash.sh`), and the
   few node suites `npm test` must leave out are in `tests/node-tests.skip`,
-  each with its reason. `npm test` gives each test five minutes, so a test
+  each with its reason. A new shell suite needs no registration; if it takes
+  more than about 20 s on the macOS runner, add `<stem> <seconds>` to
+  `tests/shell-suites.weights` so the two macOS shell shards stay level (a
+  missing line is never an error; a line naming a deleted suite is).
+  `npm test` gives each test five minutes, so a test
   that waits forever fails by name instead of hanging CI; a wait in a test is
   set up before the event it waits for can happen (listen for a child's
   `exit` when it is spawned, not after). A change to the

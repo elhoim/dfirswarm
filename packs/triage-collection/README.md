@@ -8,7 +8,7 @@ introduces the problem. This pack is the work.
 
 ## What it carries
 
-**Fourteen skills**: five decision-rule skills, `identify/collector`, `verify/manifests`,
+**Fifteen skills**: the pack's router, `triage/router` (at most 400 tokens: it names the other fourteen by the question each answers, holds no rule, and is the one line a run shows for the pack when its skills index is over budget), five decision-rule skills, `identify/collector`, `verify/manifests`,
 `normalise/layout`, `gaps/what-is-missing` and `plan/what-to-collect`, and nine
 second-level skills they point to when a case needs them (`identify/collector-clues`,
 `identify/acquisition-mode`, `verify/target-outcomes`, `verify/time-layers`,

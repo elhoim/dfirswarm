@@ -1,7 +1,7 @@
 ---
 id: artifacts/shellbags
-title: Reading ShellBags and recent-document keys
-when: You read BagMRU, RecentDocs or OpenSavePidlMRU for folders and files a shell showed.
+title: ShellBags
+when: Read BagMRU, RecentDocs, OpenSavePidlMRU.
 needs: [artifacts/shell]
 tools: [shellbags, regkv]
 requires_host: []

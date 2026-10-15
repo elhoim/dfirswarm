@@ -51,7 +51,6 @@ has recorded `attest` or `dispute` on each answer, saying what they verified.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'snap length|snaplen' work/report.md`
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 4`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

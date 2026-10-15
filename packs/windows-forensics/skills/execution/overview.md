@@ -1,7 +1,7 @@
 ---
 id: execution/overview
-title: Assessing evidence of program execution
-when: You are about to cite an execution artefact or must choose among them.
+title: Execution evidence
+when: Cite one, or choose among them.
 needs: []
 tools: []
 requires_host: []

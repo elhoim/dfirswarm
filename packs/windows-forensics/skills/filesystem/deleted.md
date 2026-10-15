@@ -1,7 +1,7 @@
 ---
 id: filesystem/deleted
-title: Deleted content and what was recovered
-when: Files are missing, or you must say whether their content is recoverable from what was acquired.
+title: Deleted content
+when: Missing files: recoverable here?
 needs: []
 tools: [mft_records, icat_extract, sig_carve, file_carver]
 requires_host: [fls, istat, tsk_recover]

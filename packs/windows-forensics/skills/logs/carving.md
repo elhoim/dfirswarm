@@ -1,7 +1,7 @@
 ---
 id: logs/carving
-title: Running and citing an evtx_carve sweep
-when: You run evtx_carve over a blob, or quote a record it carved.
+title: Carved event records
+when: Run or quote an evtx_carve sweep.
 needs: [logs/recovery]
 tools: [evtx_carve]
 requires_host: []
