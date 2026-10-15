@@ -1,0 +1,73 @@
+# Seconds each shell suite takes on the hosted macOS runner (the mean of three
+# CI runs on main, 2026-10-14), which scripts/test-bash.sh --shard I/N uses to
+# deal the suites into shards of about equal time. Only a balance: a suite
+# missing here counts as 20 s, and tests/ci-shards.test.ts holds the shards
+# to cover every suite exactly once whatever these numbers say.
+# One line per suite: <stem> <seconds>
+microvm-flags 335
+dfir-flags 144
+inputs 117
+swarm-preflight 83
+pack-local 82
+run-safety 67
+model-teams 60
+goal-frontmatter 56
+recipe 56
+netguard 53
+collector-keeper 48
+await-done 46
+resume 44
+net-kickoff 42
+case-contract 36
+stop 35
+model-caps 33
+stop-policy 29
+calibration-cases 28
+evidence-image 28
+provider-pause 28
+idle-nudge 27
+kickoff-goldens 27
+release 23
+pack-recipes 22
+kickoff-options 21
+package-sign 20
+review 19
+signer-isolation 19
+start-check 19
+pack-tools 18
+tool-supply 18
+question-cli 16
+herdr-seal 13
+notify 13
+packs 13
+until-solved 13
+finish-lock 10
+lifecycle 10
+metrics-cli 10
+pack-links 10
+evidence-catalog 8
+redact 8
+kickoff-guards 7
+netguard-sidecar 7
+skill-budgets 7
+merge-prep 6
+render-contract 6
+retention 6
+symbols 6
+image-build-failures 5
+subscription-caps 5
+toolbox 4
+lead-cli 3
+reap 3
+table-lock 2
+contract-programs 1
+hub-dir 1
+inputs-copy 1
+inputs-manifest 1
+pack-parsers 1
+write-guard 1
+catalog-bind 1
+catalog-signatures 1
+goal-checks-bind 1
+trace-gate 1
+trace-stdin 1
