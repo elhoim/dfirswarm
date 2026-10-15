@@ -257,7 +257,7 @@ test("an identifier field shows a plain name, a path, a device id and a content 
   const FIELD: Record<string, string> = { name: "name", path: "file", id: "uid", simple: "version" };
   const withheld: [string, string][] = [
     ["name", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"], ["name", "AKIAIOSFODNN7EXAMPLE"], ["name", "web01 vncPassword=Q7fZxLmRkTvbnwcy"], ["name", "svc:Pa55w0rd@nas01"], ["name", "a".repeat(161)],
-    ["name", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["path", "/var/lib/libvirt/images/web01.qcow2?rootPassword=hJaXeuQzWpLmNbVc/x"], ["path", "https://svc:Pa55w0rdQ7fZ@nas01/share"],
+    ["name", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["path", "/var/lib/libvirt/images/web01.qcow2?rootPassword=hJaXeuQzWpLmNbVc/x"], ["path", "https://svc:Pa55w0rdQ7fZ@nas01/share"], ["path", "pass:OfmHIEuiuW9NBS1"], ["path", "vm-Snapshot99130122398bae6eecece52413628fd183c188c7.vmsn"], ["path", "auth:abc"],
     ["id", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"], ["id", "d41d8cd98f00b204e9800998ecf8427e5ca9d41d8cd98f00b204e9800998ecf8"], ["simple", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["simple", "x=1"],
   ];
   for (const [label, script] of TOOLS) {
@@ -342,7 +342,7 @@ test("a token split by a bidi isolate, a variation selector, a tag character, a 
 
 test("a secret name glued to a letter or written in CamelCase (adminPassword=, vncPassword=, accessToken:, SecretAccessKey:, PWD=, pass=, credential=, PGPASSWORD=, MYSQL_PWD=, --password x, sig=, cipassword:) hides its value in free text, and a name field holding one is withheld whole", async () => {
   const value = "hJaXeuQzWpLmNbVc3";
-  const lines = ["web01 vncPassword=", "vm-1 adminPassword=", "repo accessToken: ", "SecretAccessKey: ", "Server=db1;UID=sa;PWD=", "x pass=", "a pw=", "credential=", "x auth=", "PGPASSWORD=", "MYSQL_PWD=", "cipassword: ", "https://h/x?sig=", "mysql --password ", "dbpass=", "apikey: ", "AccountKey="];
+  const lines = ['["rootPassword=\\"', '["token=\\"', "web01 vncPassword=", "vm-1 adminPassword=", "repo accessToken: ", "SecretAccessKey: ", "Server=db1;UID=sa;PWD=", "x pass=", "a pw=", "credential=", "x auth=", "PGPASSWORD=", "MYSQL_PWD=", "cipassword: ", "https://h/x?sig=", "mysql --password ", "dbpass=", "apikey: ", "AccountKey="];
   const items: [string | null, string][] = lines.map((l) => [null, `${l}${value}`]);
   for (const [label, script] of TOOLS) {
     const got = await host(script, { op: "judge", items: [...items, ...lines.map((l): [string, string] => ["name", `${l}${value}`])] });
