@@ -435,7 +435,7 @@ KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|se
                              r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
 # prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
 # where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
@@ -998,9 +998,9 @@ class LosslessPage:
                 for kept in self.page:
                     self._write(kept)
                 return
-            self.not_written = "ninety-nine files of this name already exist in %s" % self.dir
+            self.not_written = "ninety-nine files of this name already exist in %s" % shown_path(str(self.dir))
         except OSError as exc:
-            self.not_written = "the file could not be created in %s (%s)" % (self.dir, describe(exc))
+            self.not_written = "the file could not be created in %s (%s)" % (shown_path(str(self.dir)), describe(exc))
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
@@ -1034,7 +1034,7 @@ class LosslessPage:
                 result["all_results"] = self.shown
                 result["all_results_format"] = "JSON Lines, one complete row per line"
         if self.not_written:
-            result["not_written"] = self.not_written
+            result["not_written"] = shown_path(cell(self.not_written))
         return result
 
 
@@ -1079,9 +1079,9 @@ class SecretValues:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
-            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+            raise SecretValuesRefused("the values file already exists: %s" % shown_path(str(self.path)))
         except OSError as exc:
-            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (shown_path(str(self.path)), describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id, locator, value):
@@ -1219,10 +1219,14 @@ class Ctx:
         self.counter = [0]
         self.finding = [0]
         self.used = 0
+        self.timed_out = set()
 
     def expired(self, where):
         if time.monotonic() <= self.deadline:
             return False
+        if where in self.timed_out:
+            return True
+        self.timed_out.add(where)
         self.limit_hit("time: %s stopped at max_seconds (%d); what was read is reported, and the counts are lower bounds" % (where, self.seconds))
         return True
 
@@ -1303,9 +1307,18 @@ def shown_at(ctx, text, at, utf16=False, kind="names"):
     return shown
 
 
+NAME_SHOWN = 512                    # characters of an export, forwarder or delay-load name the answer shows; a longer one is given by its length
+NAME_KINDS = {"export_image_name", "export_forwarder", "export_name", "delay_import_library", "delay_import_function"}
+
+
 def show(ctx, what, text, at, finding=None):
-    """A string out of the file as it may be printed (shown_at); the whole goes to the values file when it was asked for."""
-    shown = shown_at(ctx, text, at)
+    """A string out of the file as it may be printed (shown_at); the whole goes to the values file when it was asked for. A name of the
+    export and delay-load tables longer than NAME_SHOWN is given by its length only (no linker writes one that long, and a file that
+    holds thousands of them must not cost the sanitiser a pass over each)."""
+    if what in NAME_KINDS and len(text) > NAME_SHOWN:
+        shown = "<a name of %d characters: longer than the %d shown, so not shown>" % (len(text), NAME_SHOWN)
+    else:
+        shown = shown_at(ctx, text, at)
     if shown != cell(text):
         ctx.names.add(text, shown, what)
     if finding is not None:
@@ -1613,7 +1626,7 @@ def read_exports(img, pe, ctx, out):
             ctx.problem("the export name or ordinal table (%d names) is not wholly backed by file bytes: names are listed as far as they are" % nnames)
             nnames = 0 if nmap is None or omap is None else min(nnames, max(0, (nmap[1] - nmap[0]) // 4), max(0, (omap[1] - omap[0]) // 2))
         for j in range(nnames):
-            if j % 4096 == 0 and ctx.expired("the export names"):
+            if ctx.expired("the export names"):
                 break
             (nrva,) = struct.unpack_from("<I", img.mm, nmap[0] + 4 * j)
             (idx,) = struct.unpack_from("<H", img.mm, omap[0] + 2 * j)
@@ -1628,7 +1641,7 @@ def read_exports(img, pe, ctx, out):
             names_for[idx] = (raw.decode("utf-8", "replace"), at)
     listed = forwarders = unnamed = 0
     for i in range(nfunc):
-        if i % 4096 == 0 and ctx.expired("the export table"):
+        if ctx.expired("the export table"):
             break
         (frva,) = struct.unpack_from("<I", img.mm, fmap[0] + 4 * i)
         if frva == 0:
@@ -1737,7 +1750,7 @@ def read_delay_imports(img, pe, ctx, out):
                                "function": show(ctx, "delay_import_function", raw.decode("utf-8", "replace"), nat) if raw is not None else None})
                 functions += 1
                 lib["functions"] += 1
-                if k % 4096 == 0 and ctx.expired("the delay-load names"):
+                if ctx.expired("the delay-load names"):
                     break
             bisect.insort(walked, (thunks[0], max(p, thunks[0] + 1), d))
         libs.append(lib)
@@ -1834,6 +1847,8 @@ def read_resources(img, pe, ctx, out, extractor):
             total = max(0, (limit - at - 16) // 8)
         children = []
         for k in range(total):
+            if ctx.expired("the resource tree"):
+                break
             name_or_id, target = struct.unpack_from("<II", img.mm, at + 16 + 8 * k)
             if name_or_id & 0x80000000:
                 nm = utf16_name(img, root_off, name_or_id & 0x7FFFFFFF, limit)
@@ -1971,6 +1986,8 @@ def read_version(img, row, ctx):
                 table = {}
                 spos, count = tval, 0
                 while spos < tend:
+                    if ctx.expired("the version strings"):
+                        break
                     if count >= MAX_VERSION_STRINGS:
                         info["status"] = "partial"
                         ctx.limit_hit("resource row %d: a version string table holds more than %d strings: the first %d were read" % (row["row"], MAX_VERSION_STRINGS, MAX_VERSION_STRINGS))

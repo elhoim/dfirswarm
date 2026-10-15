@@ -458,7 +458,7 @@ KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|se
                              r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
 # prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
 # where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
@@ -1021,9 +1021,9 @@ class LosslessPage:
                 for kept in self.page:
                     self._write(kept)
                 return
-            self.not_written = "ninety-nine files of this name already exist in %s" % self.dir
+            self.not_written = "ninety-nine files of this name already exist in %s" % shown_path(str(self.dir))
         except OSError as exc:
-            self.not_written = "the file could not be created in %s (%s)" % (self.dir, describe(exc))
+            self.not_written = "the file could not be created in %s (%s)" % (shown_path(str(self.dir)), describe(exc))
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
@@ -1059,7 +1059,7 @@ class LosslessPage:
                 result["all_results"] = self.shown
                 result["all_results_format"] = "JSON Lines, one complete row per line"
         if self.not_written:
-            result["not_written"] = self.not_written
+            result["not_written"] = shown_path(cell(self.not_written))
         return result
 
 
@@ -1104,9 +1104,9 @@ class SecretValues:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
-            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+            raise SecretValuesRefused("the values file already exists: %s" % shown_path(str(self.path)))
         except OSError as exc:
-            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (shown_path(str(self.path)), describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id, locator, value):
@@ -1946,8 +1946,9 @@ class Cfb:
                     for e in same:
                         e.duplicate = True
                     self.warn("directory entries %s share the name %s in one storage ([MS-CFB] 2.6.4: names in a storage are unique, compared in upper "
-                              "case): readers differ on which one they take; each is listed, every copy of a VBA storage's dir and module streams is read, and of any "
-                              "other the first is read"
+                              "case): readers differ on which one they take; each is listed, every copy of a VBA storage's dir and module streams is read, and so is every copy of a root WordDocument, "
+                              "Workbook, Book, PowerPoint Document, Current User, EncryptionInfo or EncryptedPackage stream (the others under other_copies); of any "
+                              "other stream the first is read"
                               % (", ".join(str(e.sid) for e in same), cell(shown_path("/".join(same[0].parts)))))
 
     def find(self, *parts):
@@ -3196,7 +3197,10 @@ def _probe_zip(path, size, ctx, extractor, out):
                 if why == ["cfb_signature"]:
                     try:
                         blob = read_member(archive, info, ctx)
-                    except Unreadable:
+                    except Unreadable as exc:
+                        # a member nothing declares, with the compound file signature, that a bound keeps unread: said, and the answer partial
+                        zip_unreadable(ctx, members, shown, exc)
+                        ctx.problem("%s begins with the compound file signature and was not read, so whether it holds a VBA project is not known" % shown)
                         continue
                     if not cfb_has_vba(blob, ctx):
                         continue
@@ -3209,12 +3213,6 @@ def _probe_zip(path, size, ctx, extractor, out):
                         ctx.problem("%s is declared as the VBA project (%s) and was not read" % (shown, ", ".join(why)))
                         continue
                     members["read"] += 1
-                try:
-                    blob = read_member(archive, info, ctx)
-                except Unreadable as exc:
-                    zip_unreadable(ctx, members, shown, exc)
-                    continue
-                members["read"] += 1
                 try:
                     body, _cfb = probe_ole_blob(blob, ctx, extractor, label=shown, source=info.filename)
                 except CfbError as exc:

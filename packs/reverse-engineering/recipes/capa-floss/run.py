@@ -500,7 +500,7 @@ KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|se
                              r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
 # prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
 # where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
@@ -863,7 +863,7 @@ def final_check(value, safe=None, key=""):
 BUDGET_SECONDS = 3500                     # recipe.json gives this recipe 3600
 GRACE_SECONDS = 10                        # a program that outlives its own clock by this much is ended
 VERSION_SECONDS = 20
-MAX_JSON = 32 << 20                       # an engine's JSON read here: parsed JSON takes about twelve times its size, so a larger file is kept whole and not read
+MAX_JSON = 32 << 20                       # an engine's JSON read here: parsed JSON takes up to about twenty-five times its size, so a larger file is kept whole and not read
 TSV_ROWS = 1_000_000
 EARLIER = re.compile(r"^(capa|floss|coverage)(-\d+)?\.(json|stderr)$|^(matches|index)(-\d+)?\.tsv$")
 FLOSS_KINDS = ("static_strings", "stack_strings", "tight_strings", "decoded_strings")
@@ -884,8 +884,10 @@ def describe(exc):
 def target_of(arg):
     text = open(arg, encoding="utf-8").read() if os.path.isfile(arg) else arg
     target = json.loads(text)
-    paths = target.get("paths") or []
-    if not paths or not isinstance(paths[0], str):
+    if not isinstance(target, dict):
+        raise ValueError("the target is not a JSON object")
+    paths = target.get("paths")
+    if not isinstance(paths, list) or not paths or not isinstance(paths[0], str):
         raise ValueError("the target names no path")
     return target, paths[0]
 
@@ -915,14 +917,14 @@ def detect(path):
     return None, "no PE or ELF signature (the engines are run on those; Mach-O and raw shellcode are not offered)"
 
 
-def new_name(out_dir, stem, ext):
+def new_name(out_dir, stem, ext, mode=0o644):
     """A name in `out_dir` that nothing has: `stem.ext`, or `stem-2.ext`, ... The file is created at once, exclusively, so that a result an
     earlier run left in this directory is never opened for writing, let alone replaced."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     for n in range(1, 1000):
         name = "%s%s" % (stem if n == 1 else "%s-%d" % (stem, n), ext)
         try:
-            os.close(os.open(os.path.join(out_dir, name), flags, 0o644))
+            os.close(os.open(os.path.join(out_dir, name), flags, mode))
         except FileExistsError:
             continue
         return name
@@ -1165,7 +1167,7 @@ def write_results(state):
 
 
 def run(path, out_dir, fmt, budget):
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
     started = time.monotonic()
     sample = os.path.abspath(path)
     state = {"out_dir": out_dir, "fmt": fmt, "shown": shown_path(path), "errors": [], "engines": {}, "matches": None}
@@ -1180,6 +1182,7 @@ def run(path, out_dir, fmt, budget):
 
     STATE["last_word"] = last_word
     install_signal_handlers()
+    become_subreaper()
     for engine in ENGINES:
         state["engines"][engine["id"]] = {"id": engine["id"], "program": engine["program"], "status": "failed", "reason": "%s has not run" % engine["program"],
                                           "argv": [engine["program"]] + engine["argv"] + ["<sample>"], "seconds": engine["seconds"], "file": None, "stderr_file": None,
@@ -1195,6 +1198,7 @@ def run(path, out_dir, fmt, budget):
         run_engines(state, sample, budget, started, unfinished)
     except Exception as exc:  # noqa: BLE001 - the receipt says what stopped the recipe, never "started and has not finished"
         state["errors"].append("the recipe stopped on an unexpected error (%s): the engines' statuses are as far as it got" % scrub(describe(exc), "text"))
+    sweep_orphans()
     final = write_results(state)
     print(json.dumps({"ok": final == "complete", "status": final, "format": fmt, "coverage": state["coverage_name"], "index": state["index_name"]}))
     return 0 if final in ("complete", "partial") else 2
@@ -1211,6 +1215,7 @@ def run_engines(state, sample, budget, started, unfinished):
             continue
         e["installed"] = True
         rc, out, err, timed = version_of(exe, out_dir, max(1, min(VERSION_SECONDS, int(budget - (time.monotonic() - started)))))
+        sweep_orphans()
         e["version_command"] = {"argv": [engine["program"], "--version"], "exit_code": rc, "first_line": first_line(out) or first_line(err), "timed_out": timed,
                                 "note": "what the program printed, not a statement of what this recipe knows about that release"}
         left = budget - (time.monotonic() - started)
@@ -1219,8 +1224,9 @@ def run_engines(state, sample, budget, started, unfinished):
             e.update({"status": "failed", "reason": "the recipe's time budget was spent before %s could start" % engine["program"], "timed_out": True})
             unfinished()
             continue
-        e["file"] = new_name(out_dir, engine["id"], ".json")
-        e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr")
+        # what an engine wrote is raw (strings out of the sample, as FLOSS recovers them): mode 0600, as the tools' own raw files are
+        e["file"] = new_name(out_dir, engine["id"], ".json", 0o600)
+        e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr", 0o600)
         e["seconds"] = seconds
         try:
             rc, timed_out = run_to_files([exe] + engine["argv"] + [sample], os.path.join(out_dir, e["file"]), os.path.join(out_dir, e["stderr_file"]), seconds)
@@ -1236,8 +1242,13 @@ def run_engines(state, sample, budget, started, unfinished):
             unfinished()
             continue
         e["exit_code"], e["timed_out"] = rc, timed_out
+        orphans = sweep_orphans()
         doc, why = read_json(os.path.join(out_dir, e["file"]))
         status, reason, details = judge(engine, rc, timed_out, doc, why)
+        if orphans:
+            e["orphans_ended"] = orphans
+            if status == "complete":
+                status, reason = "partial", "%s exited 0 and left %d process(es) of its own running, which were ended: what they wrote after it exited is not in its output" % (engine["program"], orphans)
         e.update({"status": status, "reason": reason, "bytes": os.path.getsize(os.path.join(out_dir, e["file"])), **details})
         if engine["id"] == "capa" and status == "complete" and isinstance(doc.get("rules"), dict):
             state["matches"] = new_name(out_dir, "matches", ".tsv")
@@ -1250,6 +1261,43 @@ def run_engines(state, sample, budget, started, unfinished):
         if drop_if_empty(os.path.join(out_dir, e["stderr_file"])):
             e["stderr_file"] = None
         unfinished()
+
+
+SUBREAPER = [False]
+
+
+def become_subreaper():
+    """On Linux, ask the kernel to make this process the parent of any process an engine leaves behind (PR_SET_CHILD_SUBREAPER = 36), so that
+    one that called setsid or double-forked and outlived its parent can still be found and ended. macOS has no such call: there an orphan
+    of an engine that exited by itself is not found (the tree is walked, and killed, only while its parent is alive)."""
+    if sys.platform.startswith("linux") and ctypes is not None:
+        try:
+            SUBREAPER[0] = ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+        except Exception:  # noqa: BLE001
+            SUBREAPER[0] = False
+
+
+def sweep_orphans():
+    """End every process still below this one (an engine has exited, so none should be) and reap what can be reaped; how many were ended."""
+    if not SUBREAPER[0]:
+        return 0
+    ended = 0
+    for _ in range(4):
+        victims = descendants(os.getpid())
+        if not victims:
+            break
+        for pid in victims:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                ended += 1
+            except OSError:
+                pass
+        for pid in victims:
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+    return ended
 
 
 def drop_if_empty(path):
@@ -1272,8 +1320,8 @@ def main(argv):
         return 2
     try:
         _target, path = target_of(args["--target"])
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": scrub(str(exc))}))
+    except (OSError, ValueError, RecursionError) as exc:
+        print(json.dumps({"ok": False, "error": scrub(str(exc) if not isinstance(exc, RecursionError) else "the target is nested too deeply")}))
         return 2
     if not os.path.isfile(path):
         print(json.dumps({"ok": False, "error": "the target is not a readable file"}))
@@ -1286,7 +1334,7 @@ def main(argv):
         print(json.dumps({"ok": False, "error": "run needs --out DIR"}))
         return 2
     if fmt is None:
-        os.makedirs(args["--out"], exist_ok=True)
+        os.makedirs(args["--out"], mode=0o700, exist_ok=True)
         name, index = receipt_names(args["--out"])
         if index != "index.tsv":
             os.unlink(os.path.join(args["--out"], index))

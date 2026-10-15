@@ -438,7 +438,7 @@ test("an --out that cannot be written is a JSON failure, not a traceback", async
   });
 });
 
-test("an engine's JSON larger than the recipe reads (32 MiB: parsed JSON takes about twelve times its size) is kept whole and the engine is partial, not read", async () => {
+test("an engine's JSON larger than the recipe reads (32 MiB: parsed JSON takes up to about twenty-five times its size) is kept whole and the engine is partial, not read", async () => {
   await withCwd(async (cwd, bin) => {
     const big = `if [ "$1" = "--version" ]; then echo "stand-in"; exit 0; fi\n${PYTHON} -c "import sys; sys.stdout.write('{\\"rules\\": {}, \\"pad\\": \\"' + 'a' * (33 << 20) + '\\"}')"\n`;
     await engines(bin, { capa: big });
