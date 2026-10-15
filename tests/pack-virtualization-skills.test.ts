@@ -101,9 +101,9 @@ const SOURCE = async (tool: string): Promise<string> => readFile(join(TOOLS, too
 
 // What a skill teaches by name, each of which a tool must write: tool -> [skill, names].
 const TAUGHT: Array<[string, string, string[]]> = [
-  ["snapshot_chain_check", "snapshots/chain-integrity", ["resolved_to", "id_check", "identity_mismatch", "complete", "broken", "cycle", "too_deep", "missing", "short", "qemu_img", "match", "mismatch", "not_available",
+  ["snapshot_chain_check", "snapshots/chain-integrity", ["resolved_to", "id_check", "identity_mismatch", "complete", "broken", "cycle", "too_deep", "missing", "short", "qemu_img", "match", "match_via_parent_linkage2", "mismatch", "not_available",
     "parent_unreadable", "identity_not_compared", "extent_missing", "data_file_missing", "issues", "base_note", "parent_linkage", "DataWriteGuid", "skipped"]],
-  ["snapshot_chain_check", "snapshots/header-markers", ["vhd_saved_state_flag", "vhd_footer_copy_differs", "newline_detection_mismatch", "vhdx_headers_checksum_fail", "descriptor_problem", "duplicate_cid",
+  ["snapshot_chain_check", "snapshots/header-markers", ["vhd_saved_state_flag", "vhd_footer_copy_differs", "newline_detection_mismatch", "vhdx_headers_checksum_fail", "vhd_footer_checksum_fail", "vhd_dynamic_header_checksum_fail", "vhdx_region_table_checksum_fail", "vhdx_region_table_copy_damaged", "descriptor_problem", "duplicate_cid",
     "parent_missing", "parent_ambiguous", "parent_names_disagree", "parent_cid_mismatch", "parent_unique_id_mismatch", "parent_linkage_mismatch", "extent_missing", "extent_short", "external_data_file_missing",
     "chain_cycle", "qemu_img_disagrees", "resolution", "id_check"]],
   ["snapshot_chain_check", "snapshots/markers", ["unclean_shutdown_flag", "qcow2_dirty_bit", "qcow2_corrupt_bit", "vhdx_log_guid_set", "running_disk_is_a_delta_without_snapshots", "delta_not_in_snapshot_database", "snapshot_disk_missing", "lock_artefact", "extent_without_descriptor"]],

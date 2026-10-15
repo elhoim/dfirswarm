@@ -25,7 +25,7 @@ Each marker is a candidate with its observation beside it. Read the observation 
 
 1. **Corroborate with the platform's own records** of the operation: the task or event for a snapshot remove, consolidate or power operation (`hypervisor/activity`). A marker without such a record stays a candidate.
 2. **Compare file times** on the delta, the parent and the configuration, remembering that a copy sets times as well as an edit. Hash the files before touching them.
-3. **Internal QCOW2 snapshots** list name, id and a host-side creation time with their entries; the names are whoever created them wrote. They show the image contained snapshots, not who removed one.
+3. **Internal QCOW2 snapshots** list name, id and a host-side creation time with their entries; the names are what their creator wrote. They show the image contained snapshots, not who removed one.
 4. **What would weaken a reading:** the same flag on a clean copy made by the same procedure, a second copy of the file without it, a task record showing a normal shutdown.
 5. **Do not name a cause** ("tampering", "failed backup") from a marker. Say what the files show, what else would show it, and what you asked for.
 

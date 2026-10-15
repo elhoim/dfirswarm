@@ -13,8 +13,9 @@ Use when `snapshot_chain_check` lists a marker about a disk's own header or desc
 |---|---|---|
 | `vhd_saved_state_flag` | VHD footer's Saved State byte set | attached to a VM in a saved state: keep that state with it |
 | `vhd_footer_copy_differs` | the footer copy at the start is not the one at the end | not written together: an interrupted write or an edit |
-| `newline_detection_mismatch` (VMDK) | the sparse header's newline-detection bytes are not the fixed values | moved in a mode that rewrites line ends: an altered copy |
-| `vhdx_headers_checksum_fail` | no VHDX header's CRC-32C holds | damaged or edited; the current header was chosen by sequence alone |
+| `newline_detection_mismatch` (VMDK) | the sparse header's newline-detection bytes are not the fixed ones | moved in a mode that rewrites line ends: an altered copy |
+| `vhd_footer_checksum_fail`, `vhd_dynamic_header_checksum_fail`, `vhdx_headers_checksum_fail`, `vhdx_region_table_checksum_fail` | a VHD footer or dynamic header checksum, or both VHDX headers' or region tables' CRC-32C, fail | damaged or edited; read as written (the VHDX header by sequence alone): the answer is `partial` |
+| `vhdx_region_table_copy_damaged` | one region-table copy fails; the other was read | a damaged or edited copy |
 | `descriptor_problem` | a CID or parentCID that is not 1 to 8 hex digits, or a parentCID with no hint | inconsistent as written; the chain stops there |
 | `duplicate_cid` | descriptors that carry one CID | a copy, or a clone without a new CID: a CID match through them proves less |
 | `parent_missing`, `parent_ambiguous` | the named parent is not in the set, or several files match its name | not collected, deleted or renamed; the set does not decide which |
