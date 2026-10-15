@@ -18,6 +18,7 @@ Use when the evidence is the control plane of virtualization or backup: hypervis
 | Which VMs, disks, snapshots and datastores do the files name? | `hypervisor/inventory` |
 | Is the disk or snapshot chain whole? | `snapshots/chain-integrity` |
 | What do flags, leftover deltas and dirty bits suggest? | `snapshots/markers` |
+| What does a header, descriptor or parent marker mean? | `snapshots/header-markers` |
 | What do the catalogue, repository and retention setting each say? | `backup/catalogues-and-retention` |
 | Was a backup deleted, or only a deletion requested or reported? | `backup/deletion-vs-loss` |
 | Which recovery points still stand, and could one be restored? | `recovery/survivability` |

@@ -40,7 +40,7 @@ async function load(root: string): Promise<Map<string, Skill>> {
   return out;
 }
 
-const IDS = ["router/start", "evidence/boundaries", "control-plane/chronology", "hypervisor/activity", "hypervisor/inventory", "snapshots/chain-integrity", "snapshots/markers", "backup/catalogues-and-retention", "backup/deletion-vs-loss", "recovery/survivability"];
+const IDS = ["router/start", "evidence/boundaries", "control-plane/chronology", "hypervisor/activity", "hypervisor/inventory", "snapshots/chain-integrity", "snapshots/markers", "snapshots/header-markers", "backup/catalogues-and-retention", "backup/deletion-vs-loss", "recovery/survivability"];
 
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., says what it shows, does not show and records, and has a short index entry", async () => {
   const skills = await load(SKILLS);
@@ -89,20 +89,26 @@ test("needs is at most two deep and its chain is at most 1,900 tokens, counting 
   }
 });
 
-test("the second-level leaf is pointed to by the leaf that says when to open it", async () => {
+test("the second-level leaves are pointed to by the leaf that says when to open them", async () => {
   const skills = await load(SKILLS);
   assert.ok(skills.get("snapshots/chain-integrity")!.body.includes("`snapshots/markers`"));
   assert.deepEqual(skills.get("snapshots/markers")!.meta.needs, ["snapshots/chain-integrity"]);
+  assert.ok(skills.get("snapshots/markers")!.body.includes("`snapshots/header-markers`"));
+  assert.deepEqual(skills.get("snapshots/header-markers")!.meta.needs, ["snapshots/chain-integrity"]);
 });
 
 const SOURCE = async (tool: string): Promise<string> => readFile(join(TOOLS, tool, "run.py"), "utf8");
 
 // What a skill teaches by name, each of which a tool must write: tool -> [skill, names].
 const TAUGHT: Array<[string, string, string[]]> = [
-  ["snapshot_chain_check", "snapshots/chain-integrity", ["resolved_to", "id_check", "identity_mismatch", "complete", "broken", "cycle", "too_deep", "missing", "short", "qemu_img", "match", "mismatch", "not_available"]],
+  ["snapshot_chain_check", "snapshots/chain-integrity", ["resolved_to", "id_check", "identity_mismatch", "complete", "broken", "cycle", "too_deep", "missing", "short", "qemu_img", "match", "mismatch", "not_available",
+    "parent_unreadable", "identity_not_compared", "extent_missing", "data_file_missing", "issues", "base_note", "parent_linkage", "DataWriteGuid", "skipped"]],
+  ["snapshot_chain_check", "snapshots/header-markers", ["vhd_saved_state_flag", "vhd_footer_copy_differs", "newline_detection_mismatch", "vhdx_headers_checksum_fail", "descriptor_problem", "duplicate_cid",
+    "parent_missing", "parent_ambiguous", "parent_names_disagree", "parent_cid_mismatch", "parent_unique_id_mismatch", "parent_linkage_mismatch", "extent_missing", "extent_short", "external_data_file_missing",
+    "chain_cycle", "qemu_img_disagrees", "resolution", "id_check"]],
   ["snapshot_chain_check", "snapshots/markers", ["unclean_shutdown_flag", "qcow2_dirty_bit", "qcow2_corrupt_bit", "vhdx_log_guid_set", "running_disk_is_a_delta_without_snapshots", "delta_not_in_snapshot_database", "snapshot_disk_missing", "lock_artefact", "extent_without_descriptor"]],
-  ["virtualization_inventory", "hypervisor/inventory", ["in_set", "snaptime", "creationTime"]],
-  ["backup_audit_normalise", "backup/catalogues-and-retention", ["category_map"]],
+  ["virtualization_inventory", "hypervisor/inventory", ["in_set", "snaptime", "creationTime", "special_sections"]],
+  ["backup_audit_normalise", "backup/catalogues-and-retention", ["category_map", "declared_fields_absent"]],
   ["backup_audit_normalise", "backup/deletion-vs-loss", ["snapshot_delete", "retention_prune", "retention_gc", "retention_remove", "vm_delete", "disk_delete"]],
   ["backup_audit_normalise", "control-plane/chronology", ["time_zone_offset_minutes", "time_utc"]],
   ["backup_audit_normalise", "hypervisor/activity", ["declared_csv", "declared_jsonl", "declared_xml"]],
@@ -119,11 +125,13 @@ test("the names and fields a skill teaches are names and fields its tool has", a
       assert.ok(script.includes(name) || manifest.includes(name), `${tool} has ${name}, which ${skillId} teaches`);
     }
   }
-  // Every marker kind the tool can raise is explained by the table, or by the chain skill it points to.
-  const kinds = [...(await SOURCE("snapshot_chain_check")).matchAll(/marker\(\s*"([a-z0-9_]+)"|"kind": "([a-z0-9_]+)"/g)].map((m) => m[1] ?? m[2]);
-  const taught = (skills.get("snapshots/markers")!.body + skills.get("snapshots/chain-integrity")!.body);
-  const wildcard = ["parent_cid_mismatch", "parent_unique_id_mismatch", "parent_linkage_mismatch", "extent_missing", "extent_short", "parent_missing", "parent_ambiguous", "chain_cycle", "descriptor_problem", "qemu_img_disagrees", "vhd_saved_state_flag", "vhd_footer_copy_differs", "newline_detection_mismatch", "vhdx_headers_checksum_fail"];
-  for (const kind of new Set(kinds)) assert.ok(taught.includes(kind) || wildcard.includes(kind), `${kind} is a marker nobody explains`);
+  // Every marker kind the tool can raise is named, by its own name, in one of the two marker tables: none is left to a wildcard.
+  const source = await SOURCE("snapshot_chain_check");
+  const kinds = new Set([...source.matchAll(/marker\(\s*"([a-z0-9_]+)"|"kind": "([a-z0-9_]+)"/g)].map((m) => m[1] ?? m[2]));
+  for (const m of source.matchAll(/marker\(\{([^}]*)\}\[/g)) for (const k of m[1].matchAll(/"([a-z0-9_]+_mismatch)"/g)) kinds.add(k[1]);
+  assert.ok(kinds.size >= 25, `the tool's marker kinds were found (${kinds.size})`);
+  const tables = skills.get("snapshots/markers")!.body + skills.get("snapshots/header-markers")!.body;
+  for (const kind of kinds) assert.ok(new RegExp(`\`${kind}\``).test(tables), `${kind} is a marker no table names`);
 });
 
 test("the skills state no product release as a fact, give no verdict from a marker, use no credential, and say the job runs with secret_output where a tool can reach a secret", async () => {

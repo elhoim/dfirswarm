@@ -545,7 +545,7 @@ checksummed, and installs and verifies in the test suite.
 | `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
 | `ransomware-response` | 17 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
 | `triage-collection` | 14 | 2 | 1 | a collector's output, which is how most cases arrive |
-| `virtualization-backup-forensics` | 10 | 3 | 1 | the control plane of virtualization and backup: hypervisor records, disk and snapshot chains, backup catalogues, and which recovery points survive |
+| `virtualization-backup-forensics` | 11 | 3 | 1 | the control plane of virtualization and backup: hypervisor records, disk and snapshot chains, backup catalogues, and which recovery points survive |
 
     scripts/pack.sh install packs/computer-forensics-base
     scripts/pack.sh install packs/windows-forensics

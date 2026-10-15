@@ -14,11 +14,11 @@ and `qemu-img` and Dissect are the base pack's.
 
 ## What it carries
 
-**Ten skills**, a router, a method leaf and eight decision-rule leaves:
+**Eleven skills**, a router, a method leaf and nine decision-rule leaves:
 `router/start`, `evidence/boundaries`, `control-plane/chronology`,
 `hypervisor/activity`, `hypervisor/inventory`, `snapshots/chain-integrity`,
-`snapshots/markers`, `backup/catalogues-and-retention`, `backup/deletion-vs-loss`,
-`recovery/survivability`.
+`snapshots/markers`, `snapshots/header-markers`, `backup/catalogues-and-retention`,
+`backup/deletion-vs-loss`, `recovery/survivability`.
 
 **Three tools,** each with the standard library only and each saying what it did
 not read:

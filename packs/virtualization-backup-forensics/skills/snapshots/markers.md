@@ -21,7 +21,7 @@ Each marker is a candidate with its observation beside it. Read the observation 
 | `snapshot_disk_missing` | database names a disk not in the set | removed, renamed, or not collected |
 | `extent_without_descriptor` | a sparse extent no descriptor in the set names | its descriptor was not collected or was removed, or it belongs to a disk outside the set |
 | `lock_artefact` | a lock file or directory is present | held when copied, or left after a crash |
-| `*_mismatch`, `extent_*` | see `snapshots/chain-integrity` | |
+| a header, descriptor, parent, extent or second-reading marker (`vhd_*`, `parent_*`, `*_mismatch`, `extent_*` and the rest) | | `snapshots/header-markers` |
 
 1. **Corroborate with the platform's own records** of the operation: the task or event for a snapshot remove, consolidate or power operation (`hypervisor/activity`). A marker without such a record stays a candidate.
 2. **Compare file times** on the delta, the parent and the configuration, remembering that a copy sets times as well as an edit. Hash the files before touching them.

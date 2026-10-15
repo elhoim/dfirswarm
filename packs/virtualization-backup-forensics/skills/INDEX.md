@@ -13,4 +13,5 @@ Router: `router/start`
 - `recovery/survivability` Which recovery points survive, and could one be restored?: The question is whether a VM or dataset can still be recovered, and from what.
 - `router/start` Where to start with virtualization and backup evidence: A case involves virtual machine images, a hypervisor, a backup system or its repository.
 - `snapshots/chain-integrity` Is the disk or snapshot chain whole?: A VM's disk is a snapshot, delta or differencing disk, or a backing chain must be established.
+- `snapshots/header-markers` Header, descriptor and parent markers: snapshot_chain_check lists a header, descriptor, parent or second-reading marker.
 - `snapshots/markers` Consolidation and unclean-close markers: snapshot_chain_check lists a marker, or snapshots may have been removed, merged or interrupted.
