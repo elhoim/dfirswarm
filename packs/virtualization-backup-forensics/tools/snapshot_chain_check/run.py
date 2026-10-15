@@ -699,8 +699,8 @@ def bind_run(values, seconds):
 # A key that is not listed holds free text (layer 2): description, annotation, audit action, actor, message, a tool's own words.
 _FIELDS = {}
 for _kind, _names in (
-    ("name", "name|display_name|domain_name|node|host|job|storage|storage name|networkName|ethernet#.networkName|snapshot name|disk key|displayName"
-             "|current_parent_snapshot|snapshot_sections|snapshot|parent snapshot name|domain name|datastore|server|pool|vgname|thinpool|key"),
+    ("name", "name|display_name|domain_name|job|storage|storage name|networkName|ethernet#.networkName|snapshot name|disk key|displayName"
+             "|current_parent_snapshot|snapshot_sections|snapshot|parent snapshot name|domain name|datastore|pool|vgname|thinpool|key"),
     ("path", "file|leaf_file|rel|root|links|special|unreadable|too_deep|lock directory|parent_hint|parentFileNameHint|parent name|parent_name|backing_file|backing_filename"
              "|external_data_file|parent_absolute_win32_path|parent_relative_path|parent_volume_path|disk_files|snapshot disk file|state_file|snapshot state file"
              "|extent file name|configuration_path|vmxCfgPath|datastore_hint|datastore path|nvram|disk file|volume|vm_state_volume|vmstate|path|named|export|special_sections|section|disk source|source_name|object"),
@@ -747,7 +747,7 @@ class _Strip(dict):
 
 _STRIP = _Strip()
 # the escape of such a character written as text: \u2066, \U000e0041, \x00, \u{200b}
-_ESCAPED = re.compile(r"\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|u\{([0-9A-Fa-f]{1,6})\})")
+_ESCAPED = re.compile(r"\\+(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|u\{([0-9A-Fa-f]{1,6})\})")
 
 
 def _unescape_invisible(m):
@@ -758,7 +758,7 @@ def _unescape_invisible(m):
     return "" if (unicodedata.category(c) in _STRIP_CATS or ord(c) in _FILLERS) else m.group(0)
 
 
-_ESCAPED_PRINTABLE = re.compile(r"\\(?:x|u00)([2-7][0-9A-Fa-f])")
+_ESCAPED_PRINTABLE = re.compile(r"\\+(?:x|u00)([2-7][0-9A-Fa-f])")
 
 
 def _flat(text, nfkc=True, decode=True):
@@ -785,9 +785,9 @@ _CUT_NOTE = re.compile(r"\.\.\.\(whole text: \d+ characters\)$")
 _ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/<>\"'`]{1,128}(?=@[^\s/@<>\"'`]*(?:[\s/<>\"'`?#]|$))")
 _SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{20,}={0,2}(?![A-Za-z0-9+=])")
 _BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
-_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}"
+_TOKEN_HEAD = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}"
                          r"|glpat-[A-Za-z0-9_-]{4,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{4,}|SG\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?|AIza[0-9A-Za-z_-]{8,}"
-                         r"|npm_[A-Za-z0-9]{8,}|pypi-[A-Za-z0-9_-]{8,}|shpat_[A-Za-z0-9]{8,}|dop_v1_[A-Za-z0-9]{8,}|ya29\.[A-Za-z0-9_-]{8,}")
+                         r"|npm_[A-Za-z0-9]{8,}|pypi-[A-Za-z0-9_-]{8,}|shpat_[A-Za-z0-9]{8,}|dop_v1_[A-Za-z0-9]{8,}|ya29\.[A-Za-z0-9_-]{8,})")
 # The value after a name that says it is a secret, found anywhere in the string: the secret word first (glued to whatever comes
 # before it, in any case: vncPassword, adminpass, dbPwd; `pass` not after by, com, over, under, tres, encom, sur or im, so that
 # bypass: and compass: are words), then `=` or `:` (quotes and a little space allowed), then the value and up to three more words
@@ -814,8 +814,10 @@ def _random_slashed(run):
         return False
     flat = run.replace("/", "").rstrip("=")
     letters = [c for c in flat if c.isalpha()]
-    if not (any(c.isdigit() for c in flat) and any(c.islower() for c in letters) and any(c.isupper() for c in letters)):
+    if not (any(c.islower() for c in letters) and any(c.isupper() for c in letters)):
         return False
+    if not any(c.isdigit() for c in flat):          # a key of letters only: long, and its case changes as random text does
+        return len(letters) >= 24 and sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower()) >= 0.45 * len(letters)
     flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
     packed = len(re.findall(r"(?<=[A-Za-z])[0-9]{1,3}(?=[A-Za-z])", flat))
     return len(letters) >= 14 and (flips >= 0.33 * len(letters) or (packed and flips >= 0.25 * len(letters))) or _token_run(flat)
@@ -960,8 +962,8 @@ _ID_FORMS = re.compile(
     r"|[0-9A-Fa-f]{1,16}|[0-9A-Fa-f]{32}|[0-9]{1,18}|(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}"
     r"|naa\.[0-9a-fA-F]{16,32}|eui\.[0-9a-fA-F]{16}|wwn-0x[0-9a-fA-F]{16}|vml\.[0-9a-fA-F]{20,40}|mpx\.vmhba[0-9]+:C[0-9]+:T[0-9]+:L[0-9]+"
     r"|[A-Za-z][A-Za-z0-9_.-]{0,15}[0-9]{0,6}")
-_DENY_IN_IDENT = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_|xox[abeprs]-|eyJ[A-Za-z0-9_-]{10,}|glpat-|(?:sk|rk|pk)_(?:live|test)_|SG\.[A-Za-z0-9_-]{8,}"
-                            r"|AIza|npm_|pypi-|shpat_|dop_v1_|ya29\.|sk-[A-Za-z0-9_-]{8,}|-----BEGIN|[A-Za-z0-9_-]{0,40}(?i:passw|pwd|secret|token)[A-Za-z0-9_-]{0,3}[=:]")
+_DENY_IN_IDENT = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_|xox[abeprs]-|glpat-|(?:sk|rk|pk)_(?:live|test)_|SG\.[A-Za-z0-9_-]{8,}"
+                            r"|AIza|npm_|pypi-|shpat_|dop_v1_|ya29\.|sk-[A-Za-z0-9_-]{8,})|eyJ[A-Za-z0-9_-]{10,}|-----BEGIN|[A-Za-z0-9_-]{0,40}(?i:passw|pwd|secret|token)[A-Za-z0-9_-]{0,3}[=:]")
 _VOWELS = frozenset("aeiouAEIOU")
 
 
@@ -969,11 +971,13 @@ def _cls(c):
     return 0 if c.isdigit() else 1 if c.isupper() else 2
 
 
-def _token_like(run, hex_too=True):
+def _token_like(run, hex_too=True, words=True):
     """Whether a run of letters and digits (joined across - _ + =) of 16 or more is a token and not words, a date, a version or a
     counter: hexadecimal, digits packed between letters, class changes (capital, small letter, digit) as random text has them,
     capitals in pairs, or letters with no word structure. Thresholds were set on a corpus of VM, host, datastore, snapshot and
     file names against random text of 14 to 40 characters (the measured rates are in the pack's changelog)."""
+    if len(run) >= 16:
+        run = _DATE.sub("-", run)                    # a date or a time stamp in a file name (Veeam's D2022-03-28T152355) is not a token
     alnum = "".join(c for c in run if c.isalnum())
     n = len(alnum)
     if n < 16:
@@ -988,7 +992,7 @@ def _token_like(run, hex_too=True):
     packed = len(_PACKED.findall(alnum))
     if kinds >= {1, 2} and sum(len(w) for w in _WORDS.findall(alnum)) >= 0.7 * n:
         return False                                # capitalised words written together (ProxyK8sMgmtNode10), not a token
-    if n >= 28 and len(kinds) >= 2 and sum(len(w) for w in _WORDISH.findall(alnum)) < 0.6 * max(1, n - nd):
+    if words and n >= 28 and len(kinds) >= 2 and sum(len(w) for w in _WORDISH.findall(alnum)) < 0.6 * max(1, n - nd):
         return True                                 # a long run whose letters are not made of words (a counter's digits do not count)
     if len(kinds) == 3:
         if n < 18:
@@ -996,7 +1000,7 @@ def _token_like(run, hex_too=True):
         upper_pairs = sum(1 for a, b in zip(alnum, alnum[1:]) if a.isupper() and b.isupper()) / (n - 1)
         return changes >= 0.45 or (changes >= 0.30 and upper_pairs >= 0.08) or packed >= 4 or (n < 20 and changes >= 0.5)
     if n < 18:
-        return False
+        return kinds == {0, 1} and nd >= 3 and (changes >= 0.3 or packed >= 2)      # 16 or 17 capitals and digits (a base32 seed)
     if kinds == {1, 2}:
         upper_pairs = sum(1 for a, b in zip(alnum, alnum[1:]) if a.isupper() and b.isupper()) / (n - 1)
         return changes >= 0.45 or (changes >= 0.35 and upper_pairs >= 0.10)
@@ -1018,6 +1022,7 @@ def _token_like(run, hex_too=True):
 
 _PACKED = re.compile(r"(?<=[A-Za-z])[0-9]{1,2}(?=[A-Za-z])")
 _WORDS = re.compile(r"[A-Z][a-z]{2,}")
+_DATE = re.compile(r"(?:19|20)[0-9]{2}[-_.]?[0-1][0-9][-_.]?[0-3][0-9](?:[T_-]?[0-2][0-9][:.]?[0-5][0-9][:.]?[0-5][0-9])?(?![0-9])")
 _WORDISH = re.compile(r"[A-Z]{2,4}(?=[A-Z][a-z]{3,})|[A-Z][a-z]{3,}|[a-z]{5,}")
 
 
@@ -1034,9 +1039,14 @@ _HAS_DIGIT, _HAS_UPPER, _HAS_LOWER, _WORD4 = re.compile(r"[0-9]"), re.compile(r"
 
 
 def _cross_slash_token(run):
-    """A run of letters and digits that goes across `/` and is random as a whole: a base64 key cut by its slashes."""
-    return "/" in run and ((len(run) >= 24 and _HAS_UPPER.search(run) is not None and _HAS_LOWER.search(run) is not None and _HAS_DIGIT.search(run) is not None
-                            and _token_like(run.replace("/", ""))) or _random_run(run) or (len(run) >= 20 and "+" in run and _HAS_UPPER.search(run) is not None and _HAS_LOWER.search(run) is not None))
+    """A run of letters and digits that goes across `/` and is random as a whole: a base64 key cut by its slashes. A path of words and
+    counters, or of capitals and digits only (SAN-LUN10/FILE8), is not one."""
+    if "/" not in run or _HAS_UPPER.search(run) is None or _HAS_LOWER.search(run) is None:
+        return False
+    if sum(len(w) for w in _WORDISH.findall("".join(c for c in run if c.isalnum()))) >= 0.6 * max(1, sum(c.isalpha() for c in run)):
+        return len(run) >= 36 and _random_run(run)
+    return ((len(run) >= 30 and _HAS_DIGIT.search(run) is not None and _token_like(run.replace("/", ""), True, False)) or (len(run) >= 30 and _random_run(run))
+            or (len(run) >= 20 and "+" in run))
 
 
 def _ident_text_ok(text, limit, path, slash=False):
@@ -1064,9 +1074,9 @@ def _ident_text_ok(text, limit, path, slash=False):
         for m in _PATH_RUN.finditer(scan):
             if _cross_slash_token(m.group()):
                 return False
-    if _SECRET_WORD.search(text):                  # the name of a secret in a name: no random-looking piece beside it
+    if _SECRET_WORD.search(text):                  # the name of a secret in a name: no random-looking piece beside it (words are not)
         for piece in _ALNUM_RUN.findall(_SECRET_WORD.sub(" ", text)):
-            if len(piece) >= 10 and len({_cls(c) for c in piece}) >= 2:
+            if len(piece) >= 10 and len({_cls(c) for c in piece}) >= 2 and sum(len(w) for w in _WORDS.findall(piece)) < 0.7 * len(piece):
                 return False
     return True
 
@@ -1240,7 +1250,7 @@ def seal(value, depth=0, field=None, where=""):
 # ---- layer 3: the backstop, written apart from the layers above -----------------------------------------------------------
 # Its own normaliser: every character of a C category, a mark that combines or encloses, a line or paragraph separator, a blank
 # filler; and the escapes \uXXXX \UXXXXXXXX \xNN of such a character.
-_S_ESC = re.compile(r"\\(?:[uU]\{?([0-9a-fA-F]{4,8})\}?|x([0-9a-fA-F]{2}))")
+_S_ESC = re.compile(r"\\+(?:[uU]\{?([0-9a-fA-F]{4,8})\}?|x([0-9a-fA-F]{2}))")
 _S_FILL = "\u115f\u1160\u3164\uffa0\u2800"
 
 
@@ -1279,7 +1289,7 @@ _S_NOT_PASS = ("bypass", "compass", "overpass", "underpass", "trespass", "encomp
 _S_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 _S_DIGITS = re.compile(r"[0-9]{19}")
 _S_HEXRUN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{40,}(?![0-9A-Za-z])")
-_S_B64NOPAD = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{20,23}(?![A-Za-z0-9+/=])")
+_S_B64NOPAD = re.compile(r"[A-Za-z0-9+/]{20,}")
 _S_B64PAD = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{15,}={1,2}(?![A-Za-z0-9+=])")
 _S_PREFIX = re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12}|(?:gh[pousr]_|github_pat_|glpat-|xox[a-z]-|xapp-|sk-|sk_live_|rk_live_|pk_live_|sk_test_"
                        r"|npm_|pypi-|shpat_|dop_v1_|AIza|ya29\.|SG\.)[A-Za-z0-9_-]{12}|eyJ[A-Za-z0-9_-]{12}")
@@ -1370,7 +1380,7 @@ def _suspect(text):
     if _S_HEXRUN.search(bare):
         return "a long hexadecimal run"
     for m in _S_B64NOPAD.finditer(bare):
-        if "/" in m.group() and "+" in m.group() and len({_class(c) for c in m.group() if c.isalnum()}) >= 2:
+        if "/" in m.group() and "+" in m.group() and len({_class(c) for c in m.group() if c.isalnum()}) == 3:
             return "a base64 run with / and +"
     for m in _S_B64PAD.finditer(bare):
         body = m.group().rstrip("=")

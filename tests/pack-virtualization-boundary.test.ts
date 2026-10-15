@@ -202,7 +202,24 @@ def stop():
     return {"after_deadline": a, "short_name": b, "stop": tool.RUN["stop"], "count": tool.RUN["stopped_strings"]}
 
 
-print(json.dumps({"rates": rates, "judge": judge, "linear": linear, "stop": stop}[req["op"]]()))
+def answer():
+    tool.RUN["deadline"] = time.monotonic() - 1
+    tool.RUN["stop"] = None
+    tool.seal_text("a plain sentence nobody judged before " + str(random.random()), "boundary", None)
+    doc = json.loads(tool.answer_text({"status": "complete", "status_basis": "every file was read", "note": "hello"}))
+    return {"status": doc["status"], "basis": doc["status_basis"], "stopped_by": doc["boundary"]["stopped_by"], "withheld_by_the_stop": doc["boundary"]["strings_withheld_by_the_stop"], "note": doc["note"]}
+
+
+def cap():
+    tool.RUN["cap"] = 100
+    tool.RUN["chars"] = 0
+    tool.RUN["stop"] = None
+    a = tool.seal_text("ab cd " * 10 + "q1", "boundary", None)
+    b = tool.seal_text("ef gh " * 10 + "q2", "boundary", None)
+    return {"first": a == "ab cd " * 10 + "q1", "second": b, "stop": tool.RUN["stop"]}
+
+
+print(json.dumps({"rates": rates, "judge": judge, "linear": linear, "stop": stop, "answer": answer, "cap": cap}[req["op"]]()))
 `;
 
 function host(script: string, req: Json, timeoutMs = 240_000): Promise<Json> {
@@ -340,13 +357,14 @@ test("a secret name glued to a letter or written in CamelCase (adminPassword=, v
 
 // ---- time and size: every layer is linear ---------------------------------------------------------------------------------
 
-test("the layers take time proportional to the length of a string: 32 KB and 128 KB of each pathological shape, in CPU seconds (a string over 256 KiB is judged in its first 256 KiB, so the work stops growing there)", async () => {
+test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`), in CPU seconds", async () => {
   for (const [label, script] of TOOLS) {
     for (const field of [null, "name", "file"]) {
-      const t = await host(script, { op: "linear", sizes: [32768, 131072], field });
+      const t = await host(script, { op: "linear", sizes: [5000, 20000, 100000], field });
       for (const [shape, row] of Object.entries(t as Record<string, Record<string, number>>)) {
-        assert.ok(row["131072"] < 3, `${label} ${field} ${shape}: 128 KB took ${row["131072"]} s`);
-        assert.ok(row["131072"] <= Math.max(0.25, row["32768"] * 8), `${label} ${field} ${shape}: 32 KB ${row["32768"]} s, 128 KB ${row["131072"]} s is not linear`);
+        assert.ok(row["100000"] < 3, `${label} ${field} ${shape}: 100 KB took ${row["100000"]} s`);
+        assert.ok(row["100000"] <= Math.max(0.3, row["5000"] * 40), `${label} ${field} ${shape}: 5 KB ${row["5000"]} s, 100 KB ${row["100000"]} s is not linear`);
+        assert.ok(row["20000"] <= Math.max(0.15, row["5000"] * 8), `${label} ${field} ${shape}: 5 KB ${row["5000"]} s, 20 KB ${row["20000"]} s is not linear`);
       }
     }
   }
@@ -358,6 +376,21 @@ test("past its time or character budget a string is withheld by its size, and th
     assert.match(got.after_deadline, /^<withheld: \d+ bytes, run limit>$/, label);
     assert.equal(got.stop, "max_seconds");
     assert.ok(got.count >= 1);
+  }
+});
+
+test("a run that passes its time or its character cap says so in the answer: partial, boundary.stopped_by, and the strings it could not judge withheld by size", async () => {
+  for (const [label, script] of TOOLS) {
+    const a = await host(script, { op: "answer" });
+    assert.equal(a.status, "partial", label);
+    assert.equal(a.stopped_by, "max_seconds");
+    assert.match(a.basis, /judging the strings stopped at max_seconds/);
+    assert.ok(a.withheld_by_the_stop >= 1);
+    assert.equal(a.note, "hello", "the final answer itself is still judged and shown");
+    const c = await host(script, { op: "cap" });
+    assert.equal(c.first, true);
+    assert.match(c.second, /^<withheld: 62 bytes, run limit>$/);
+    assert.match(c.stop, /cap of \d+ characters/);
   }
 });
 
@@ -447,6 +480,7 @@ test("SIGTERM during a run: one JSON answer that names the signal and the rows k
       if (!temp) return;                      // the run finished before there was a temporary file: nothing to test on this machine
       child.signal("SIGTERM");
       const code = await child.closed;
+      for (let i = 0; i < 80 && !child.stdout().includes('"status"'); i++) await new Promise((r) => setTimeout(r, 25));      // the pipe drains after the exit event
       assert.equal(code, 143, `${label} exit code`);
       const doc = JSON.parse(child.stdout());
       assert.equal(doc.status, "partial");
