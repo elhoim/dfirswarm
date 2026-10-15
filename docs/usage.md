@@ -880,7 +880,9 @@ carries through chains of jobs; a job declaring nothing whose command names the
 sensitive job is derived. A generation of a sensitive output withholds its
 coverage detail from the catalogue projection at the source. An entry citing a
 sensitive output (`job:`, `sha256:`, `member:`) is recorded sensitive, and the
-answer to `record` says so. The package side is above (`package --redact`);
+answer to `record` says so. A tool whose manifest declares `secret_output` is run
+this way without the agent's flag, and the answer to the job says so
+(`secret_output_by: "tool_manifest"`). The package side is above (`package --redact`);
 `export --redact` treats an unmarked entry citing one as sensitive.
 
 **A cancelled job's output.** An entry citing the kept output of a job that

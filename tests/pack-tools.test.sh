@@ -147,6 +147,67 @@ for d in "$WORK/sealed"/*/; do
 done
 pass "every shipped pack seals without a warning, and is checked in as sealed"
 
+# --- a tool manifest's secret_output: the two reference adopters declare it, and the seal refuses what the harness cannot read ---
+# The job service reads one key of a tool's manifest, secret_output ("required", or { "when_args": [the tool's own params] }), and
+# refuses every job of a tool whose key it cannot read; the seal says so first (tests/secret-output-declaration.test.ts holds the
+# harness side).
+for spec in "computer-forensics-base sqlite_query" "encrypted-containers recovery_key_scan"; do
+  set -- $spec
+  [[ "$(jq -c '.secret_output' "$ROOT/packs/$1/tools/$2/manifest.json")" == '{"when_args":["write_values"]}' ]] \
+    || fail "$2 should declare secret_output when write_values is set: $(jq -c '.secret_output' "$ROOT/packs/$1/tools/$2/manifest.json")"
+  jq -e '.params | has("write_values")' "$ROOT/packs/$1/tools/$2/manifest.json" >/dev/null || fail "$2 declares a parameter it does not have"
+done
+declared_bad() { # <label> <jq value for secret_output> <expected message>
+  rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+  local m="$WORK/decl/tools/sqlite_query/manifest.json"
+  jq --argjson v "$2" '.secret_output = $v' "$m" > "$m.new" && mv "$m.new" "$m"
+  local said; said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" 2>&1)" && fail "$1: the seal should refuse secret_output $2"
+  grep -q -- "$3" <<<"$said" || fail "$1: the seal should say '$3', not: $said"
+}
+declared_bad "true" 'true' 'secret_output is "required" or'
+declared_bad "a word" '"sometimes"' 'secret_output is "required" or'
+declared_bad "an extra key" '{"when_args":["write_values"],"also":1}' 'secret_output is "required" or'
+declared_bad "an empty list" '{"when_args":[]}' 'when_args is a list of one to sixteen'
+declared_bad "a number in the list" '{"when_args":[1]}' 'when_args is a list of one to sixteen'
+declared_bad "twice" '{"when_args":["write_values","write_values"]}' 'names a parameter twice'
+declared_bad "not a parameter" '{"when_args":["nope"]}' 'names nope, which is not a parameter of the tool'
+# The parameters it names are plain booleans that are not on by default, and params is an object (the runtime reads it the same way).
+declared_bad_params() { # <label> <jq filter on the manifest> <expected message>
+  rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+  local m="$WORK/decl/tools/sqlite_query/manifest.json"
+  jq "$2" "$m" > "$m.new" && mv "$m.new" "$m"
+  local said; said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" 2>&1)" && fail "$1: the seal should refuse it"
+  grep -q -- "$3" <<<"$said" || fail "$1: the seal should say '$3', not: $said"
+}
+declared_bad_params "an integer parameter" '.params.write_values.type = "integer"' 'which is not declared type "boolean"'
+declared_bad_params "a string parameter" '.params.write_values.type = "string"' 'which is not declared type "boolean"'
+declared_bad_params "an untyped parameter" 'del(.params.write_values.type)' 'which is not declared type "boolean"'
+declared_bad_params "a default that is on" '.params.write_values.default = true' 'whose default is other than false'
+declared_bad_params "a default that is a truthy string" '.params.write_values.default = "yes"' 'whose default is other than false'
+# Not a truthiness test: JS and Python disagree on [] and {}, so the rule is "absent, null or false" in both.
+declared_bad_params "a default that is an empty list" '.params.write_values.default = []' 'whose default is other than false'
+declared_bad_params "a default that is an empty object" '.params.write_values.default = {}' 'whose default is other than false'
+declared_bad_params "a default that is zero" '.params.write_values.default = 0' 'whose default is other than false'
+declared_bad_params "a default that is an empty string" '.params.write_values.default = ""' 'whose default is other than false'
+declared_bad_params "params as a list" '.params = ["write_values", "length"]' 'needs the tool'"'"'s params to be an object'
+declared_bad_params "a prototype name" '.secret_output = {"when_args": ["__proto__"]}' 'which is not a parameter of the tool'
+rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+jq '.params.write_values.default = false' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
+bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept a boolean parameter whose default is off"
+jq '.params.write_values.default = null' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
+bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept a boolean parameter whose default is null"
+# A recipe cannot honour the key: the seal refuses it in recipe.json.
+rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+rec="$(ls "$WORK/decl/recipes" | head -1)"
+jq '.secret_output = "required"' "$WORK/decl/recipes/$rec/recipe.json" > "$WORK/decl/r.new" && mv "$WORK/decl/r.new" "$WORK/decl/recipes/$rec/recipe.json"
+said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" 2>&1)" && fail "the seal should refuse secret_output in recipe.json"
+grep -q 'secret_output is a tool manifest' <<<"$said" || fail "the seal should say a recipe cannot honour secret_output, not: $said"
+rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+jq '.secret_output = "required"' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
+bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept secret_output \"required\""
+rm -rf "$WORK/decl"
+pass "sqlite_query and recovery_key_scan declare secret_output on write_values, and the seal refuses a declaration the harness could not read"
+
 # --- mft_records: a synthetic $MFT built from the documented layout ----------
 "$PY" - "$WORK/MFT" <<'EOF' || fail "could not build the synthetic \$MFT"
 import struct, sys, datetime
