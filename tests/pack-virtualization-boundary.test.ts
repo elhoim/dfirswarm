@@ -181,7 +181,8 @@ def linear():
     out = {}
     for name, make_text in (("words", lambda n: ("web-server-prod-db-" * n)[:n]), ("a_a", lambda n: ("a_" * n)[:n]), ("b64", lambda n: rs(random.Random(1), n, B64)),
                             ("colons", lambda n: ("~:" * n)[:n]), ("dashes", lambda n: ("a-" * n)[:n]), ("slashes", lambda n: ("Ab1/" * n)[:n]), ("ghp", lambda n: ("ghp_" * n)[:n]),
-                            ("equals", lambda n: ("a=" * n)[:n]), ("at", lambda n: ("u:p@" * n)[:n]), ("invisible", lambda n: ("a\u2066" * n)[:n]), ("pass", lambda n: ("password=" * n)[:n])):
+                            ("equals", lambda n: ("a=" * n)[:n]), ("at", lambda n: ("u:p@" * n)[:n]), ("invisible", lambda n: ("a\u2066" * n)[:n]), ("pass", lambda n: ("password=" * n)[:n]),
+                            ("backslashes", lambda n: "\\" * n), ("eyj", lambda n: ("eyJ" * n)[:n]), ("escape_halves", lambda n: ("\\u20" * n)[:n])):
         row = {}
         for n in req["sizes"]:
             text = make_text(n)
@@ -357,7 +358,7 @@ test("a secret name glued to a letter or written in CamelCase (adminPassword=, v
 
 // ---- time and size: every layer is linear ---------------------------------------------------------------------------------
 
-test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`), in CPU seconds", async () => {
+test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`, a run of backslashes, `eyJeyJ`, `\\u20\\u20`), in CPU seconds", async () => {
   for (const [label, script] of TOOLS) {
     for (const field of [null, "name", "file"]) {
       const t = await host(script, { op: "linear", sizes: [5000, 20000, 100000], field });
