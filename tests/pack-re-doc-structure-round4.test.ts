@@ -50,6 +50,19 @@ test("P1-3 a VBA project part not named vbaProject.bin is read when the content 
   });
 });
 
+test("P1-3 a part's own Override content type wins over the Default of its extension: an Excel package that types .bin as the VBA project reads only its VBA project", async () => {
+  await withCwd(async (cwd) => {
+    const a = await read(cwd, "excel.xlsm", buildZip([
+      { name: "[Content_Types].xml", data: Buffer.from(ct(`<Default Extension="bin" ContentType="${VBA_CT}"/>` +
+        `<Override PartName="/xl/printerSettings/printerSettings1.bin" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"/>` +
+        `<Override PartName="/xl/activeX/activeX1.bin" ContentType="application/vnd.ms-office.activeX"/>`)) },
+      { name: "xl/workbook.xml", data: Buffer.from("<workbook/>") }, { name: "xl/vbaProject.bin", data: vba() },
+      { name: "xl/printerSettings/printerSettings1.bin", data: Buffer.alloc(300, 1) }, { name: "xl/activeX/activeX1.bin", data: Buffer.alloc(64, 2) }]));
+    assert.deepEqual(a.vbaproject_parts.map((p: Json) => [p.part, p.selected_by]), [["xl/vbaProject.bin", ["content_type", "name"]]]);
+    assert.equal(a.status, "complete", JSON.stringify(a.problems));
+  });
+});
+
 test("P1-3 a declared VBA project part that the package does not hold is a problem, and the answer is partial", async () => {
   await withCwd(async (cwd) => {
     const a = await read(cwd, "missing.docm", buildZip([{ name: "[Content_Types].xml", data: Buffer.from(ct(`<Override PartName="/word/macros.bin" ContentType="${VBA_CT}"/>`)) },

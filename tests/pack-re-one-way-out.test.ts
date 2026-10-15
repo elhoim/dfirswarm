@@ -238,8 +238,8 @@ function realistic(seed: number, perShape: number): { shape: string; secret: str
 }
 const WRAPS = [(s: string) => s, (s: string) => `word/${s}.xml`, (s: string) => `https://h.example/${s}`, (s: string) => `../${s}/x.exe`, (s: string) => `Macros/VBA/${s}`, (s: string) => `/C/Users/x/${s}`];
 // The measured residue of the `/` rules (the changelog states the same numbers): the share of secrets printed whole, and the share of
-// which some nine characters are printed, over these shapes. Measured on 7,000 of each (seeded): whole 1.2% (AWS), 2.1% (16 bytes),
-// 1.4% (20), 2.8% (24), 0.1% (32); nine characters 3.1%, 2.2%, 1.7%, 3.8%, 1.8%. The bounds here leave room for the sample's spread.
+// which some nine characters are printed, over these shapes. Measured on 7,000 of each (seeded): whole 1.4% (AWS), 2.4% (16 bytes),
+// 1.6% (20), 3.4% (24), 0.1% (32); nine characters 2.9%, 2.5%, 1.8%, 4.1%, 1.9%. The bounds here leave room for the sample's spread.
 const RESIDUE: Record<string, { whole: number; nine: number }> = {
   aws40: { whole: 0.025, nine: 0.05 }, b64_16: { whole: 0.04, nine: 0.045 }, b64_20: { whole: 0.03, nine: 0.035 }, b64_24: { whole: 0.045, nine: 0.06 }, b64_32: { whole: 0.01, nine: 0.035 },
 };
@@ -314,6 +314,7 @@ const HIDE: Record<string, (s: string) => string> = {
   bidi: (s) => s.replace(/(.....)/g, "$1\u2066"),
   combining: (s) => s.replace(/(..)/g, "$1\u0301"),
   full_width: (s) => s.replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0)),
+  no_break_space: (s) => s.replace(/(.......)/g, "$1\u00a0"),
 };
 
 test("P2-1 a token split by NUL, its \\x00 escape, UTF-16 read as 8-bit text, zero-width, soft hyphen, bidi or combining marks, or in full-width forms, is withheld whole, in every copy and for every shape", () => {
@@ -323,7 +324,7 @@ test("P2-1 a token split by NUL, its \\x00 escape, UTF-16 read as 8-bit text, ze
       for (const [how, hide] of Object.entries(HIDE)) texts.push({ text: `word/${hide(c.plant)}.xml`, c, how });
     }
   }
-  const strip = (s: string): string => s.normalize("NFKC").replace(/\\x[0-9a-fA-F]{2}|[\0\u200b\u00ad\u2066\u0300-\u036f]/g, "");
+  const strip = (s: string): string => s.normalize("NFKC").replace(/\\x[0-9a-fA-F]{2}|[\0\u200b\u00ad\u2066\u0300-\u036f\u00a0 ]/g, "");
   for (const path of COPIES) {
     const r = py(path, "texts = json.load(sys.stdin)\nprint(json.dumps([m.shown_path(t) for t in texts]))", texts.map((t) => t.text));
     assert.equal(r.status, 0, r.stderr);
@@ -392,5 +393,20 @@ test("the sanitiser's output is a fixed point also for text with hidden characte
     const r = py(path, "texts = json.load(sys.stdin)\nbad = [t for t in texts if m.shown_path(m.shown_path(t)) != m.shown_path(t)]\nprint(json.dumps(bad[:5]))", texts);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), [], `${path}: not a fixed point`);
+  }
+});
+
+test("a piece of a key next to a piece withheld alone is withheld with it (the growth across `/`), and a key glued to a token keeps no piece", () => {
+  const cases: [string, string][] = [
+    ["ehbmtdzvALrzIy/kzvaretHImjWVidK6ccSkU1kG.pdf", "<token-shaped text withheld 40 characters>.pdf"],
+    ["iWVgTdB+Maj9AtILVHX58weguemi/2acrXHHBpsh", "<token-shaped text withheld 40 characters>"],
+    ["tXCWPlepyJcdP+D/GFHMqaDni2BBVndGWULOwK8r", "<token-shaped text withheld 40 characters>"],
+    ["ghp_Q7wErTy9uIoP3aSdF6gHjK2lZxC5vBnM8qW1k4BREtyo2fBeI0cHYq+wBchO/FsOL3gu00I1Hd/G", "<token-shaped text withheld 78 characters>/G"],
+    ["Documents/" + "ghp_Ab3dEf5hIj7lMn9pQr1tUv3xYz5bCd7fGh9j" + "/Invoices", "Documents/<token-shaped text withheld 40 characters>/Invoices"],
+  ];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", cases.map((c) => c[0]));
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), cases.map((c) => c[1]), path);
   }
 });

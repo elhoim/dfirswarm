@@ -456,43 +456,68 @@ def _slash_spans(text):
         run = m.group()
         if "/" not in run.strip("/"):
             continue
+        # each piece is read once: its start and end, whether it can be in a window (not empty, not a plain word; `==` alone can), the class of its first
+        # and last counted character, its class changes, its counted characters and whether one is a digit (`+` and `=` not counted)
         pieces, at = [], m.start()
         for piece in run.split("/"):
-            pieces.append((at, at + len(piece), piece))
+            core = piece.rstrip("=")
+            cls = [_char_class(ch) for ch in core if ch != "+"]
+            pieces.append((at, at + len(piece), not piece or bool(PLAIN_PIECE.fullmatch(core)), cls[0] if cls else None, cls[-1] if cls else None,
+                           sum(1 for x, y in zip(cls, cls[1:]) if x != y), len(cls), 2 in cls, len(core)))
             at += len(piece) + 1
+        n = len(pieces)
         if run.endswith("="):
             # padded base64 (RFC 4648 section 4): the longest window of whole pieces that ends the run, holds a `/` and no plain word,
             # and is a multiple of four characters long, as an encoding with its padding is: the shared block's own `==` rule, across `/`
-            for i in range(len(pieces) - 1):
-                start = pieces[i][0]
-                if m.end() - start > 64 or any(not p or PLAIN_PIECE.fullmatch(p.rstrip("=")) for _, _, p in pieces[i:]):
+            clear = [False] * (n + 1)
+            clear[n] = True
+            for i in range(n - 1, -1, -1):
+                clear[i] = clear[i + 1] and not pieces[i][2]
+            for i in range(n - 1):
+                length = m.end() - pieces[i][0]
+                if clear[i] and 16 <= length <= 64 and length % 4 == 0:
+                    spans.append((pieces[i][0], m.end()))
+                    break
+        # prefix sums, so that a window costs a few additions: class changes inside pieces, at the `/` between two pieces (the last
+        # counted character of the one before and the first of the next), counted characters, digits, and pieces a window cannot hold
+        inner_sum, join_sum, char_sum, digit_sum, block_sum = [0], [0], [0], [0], [0]
+        join, next_counted, last = [0] * n, [n] * (n + 1), None
+        for k, (start, end, blocked, first, tail, inner, count, digit, core_len) in enumerate(pieces):
+            join[k] = 1 if last is not None and first is not None and first != last else 0
+            last = tail if tail is not None else last
+            inner_sum.append(inner_sum[-1] + inner)
+            join_sum.append(join_sum[-1] + join[k])
+            char_sum.append(char_sum[-1] + count)
+            digit_sum.append(digit_sum[-1] + (1 if digit else 0))
+            block_sum.append(block_sum[-1] + (1 if blocked else 0))
+        for k in range(n - 1, -1, -1):
+            next_counted[k] = k if pieces[k][6] else next_counted[k + 1]
+        far = 0
+        for i in range(n):
+            if pieces[i][2] or pieces[i][8] < 3:
+                continue
+            # the last piece a window from i can reach: within 64 characters and before a piece a window cannot hold
+            far = max(far, i)
+            while far + 1 < n and pieces[far + 1][1] - pieces[i][0] <= 64 and not pieces[far + 1][2]:
+                far += 1
+            while far > i and pieces[far][1] - pieces[i][0] > 64:
+                far -= 1
+            if far == i or digit_sum[far + 1] == digit_sum[i]:
+                continue
+            f = next_counted[i]
+            # the longest window from i that is withheld: one span per start. A window neither begins nor ends with a piece of one or two
+            # characters (a file name `s` after a withheld folder is not taken into it; such a piece of a key, left out, is two at most)
+            for j in range(far, i, -1):
+                end = pieces[j][1]
+                if end - pieces[i][0] < 16:
+                    break
+                chars = char_sum[j + 1] - char_sum[i]
+                if pieces[j][8] < 3 or chars < 14 or digit_sum[j + 1] == digit_sum[i]:
                     continue
-                if m.end() - start >= 16 and (m.end() - start) % 4 == 0:
-                    spans.append((start, m.end()))
-                    break
-        for i in range(len(pieces)):
-            changes = chars = 0
-            prev = None
-            has_digit = False
-            for j in range(i, len(pieces)):
-                start, end, piece = pieces[j]
-                if not piece or PLAIN_PIECE.fullmatch(piece.rstrip("=")):
-                    break
-                if end - pieces[i][0] > 64:
-                    break
-                for ch in piece.rstrip("="):
-                    if ch == "+":
-                        continue
-                    k = _char_class(ch)
-                    if prev is not None and k != prev:
-                        changes += 1
-                    prev, chars = k, chars + 1
-                    has_digit = has_digit or k == 2
-                # a window neither begins nor ends with a piece of one or two characters: a file name `s` after a withheld folder is not
-                # taken into it (such a piece of a key, left out, is two characters at most)
-                if (j > i and end - pieces[i][0] >= 16 and chars >= 14 and has_digit and changes >= SLASH_DENSITY * (chars - 1)
-                        and len(pieces[i][2].rstrip("=")) >= 3 and len(piece.rstrip("=")) >= 3):
+                changes = inner_sum[j + 1] - inner_sum[i] + join_sum[j + 1] - join_sum[i + 1] - (join[f] if i < f <= j else 0)
+                if changes >= SLASH_DENSITY * (chars - 1):
                     spans.append((pieces[i][0], end))
+                    break
     spans.sort()
     merged = []
     for start, end in spans:
@@ -507,13 +532,14 @@ def _slash_spans(text):
 # \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
 _HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 _MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
+_NO_BREAK = {0xA0: None, 0x2007: None, 0x202F: None}      # no-break spaces, which NFKD would make plain spaces that end a user-info
 
 
 def unhidden(text):
     """The text without what can split a token unseen (a copy that is tested, never printed)."""
     if not _MAYBE_HIDDEN.search(text):
         return text
-    text = _HIDDEN_ESCAPE.sub("", text)
+    text = _HIDDEN_ESCAPE.sub("", text).translate(_NO_BREAK)
     # NFKD, so that a mark a composition would fold into its letter (L and U+0301 compose to U+0139) is a mark that is dropped
     text = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
@@ -563,15 +589,49 @@ def _shown_pass(out):
         if "eyJ" in out:
             out = JWT_TAIL.sub(_whole_withheld, out)
         out = scrub(GLUED.sub(_whole_withheld, out), "names")
-    return TOKEN_HEAD.sub(_whole_withheld, out)
+    return _grow(TOKEN_HEAD.sub(_whole_withheld, out))
+
+
+_MARK_END = re.compile(r"<token-shaped text withheld (\d+) characters>$")
+_MARK_START = re.compile(r"<token-shaped text withheld (\d+) characters>")
+_PIECE = re.compile(r"[A-Za-z0-9_+%-]+={0,2}")
+
+
+def _grow(out):
+    """A withheld token takes the random-looking pieces joined to it by `/` (the shared block's growth across `/`, which the component
+    pass does not see): a piece of a key next to a piece withheld alone is not left printed."""
+    if "/" not in out or "withheld" not in out:
+        return out
+    res = []
+    for part in out.split("/"):
+        m = _MARK_END.search(res[-1]) if res else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            res[-1] = res[-1][:m.start()] + _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names")
+        else:
+            res.append(part)
+    out = []
+    for part in reversed(res):
+        m = _MARK_START.match(out[-1]) if out else None
+        if m and _PIECE.fullmatch(part) and _randomish(part):
+            out[-1] = _withheld("token-shaped text", int(m.group(1)) + 1 + len(part), "names") + out[-1][m.end():]
+        else:
+            out.append(part)
+    return "/".join(reversed(out))
+
+
+_ONE_CLEAN = set()                  # pieces of text between escapes known to pass _shown_one unchanged
 
 
 def _shown_one(text):
+    if text in _ONE_CLEAN:
+        return text, 1
     out = _shown_pass(text)
     passes = 1
     while out != text and passes < 4:
         text, out = out, _shown_pass(out)
         passes += 1
+    if passes == 1 and len(out) <= 256 and len(_ONE_CLEAN) < 200000:
+        _ONE_CLEAN.add(out)
     return out, passes
 
 
@@ -2904,6 +2964,7 @@ def _probe_zip(path, size, ctx, extractor, out):
             ct = by_name.get("[content_types].xml")
             vba_declared = {}                # lower-case part name -> how the package declares it its VBA project
             vba_extensions = set()
+            overridden = set()               # every part an Override names: its own content type wins over the Default of its extension
             if ct is not None:
                 overrides, defaults, notable = ctx.page("content_types"), 0, []
 
@@ -2920,6 +2981,8 @@ def _probe_zip(path, size, ctx, extractor, out):
                                "content_type": text_of(kind, None, "names")}
                     else:
                         return
+                    if local == "Override":
+                        overridden.add(attrs.get("PartName", "").lstrip("/").lower())
                     if kind.strip().lower() == VBA_CONTENT_TYPE:
                         if local == "Default":
                             vba_extensions.add(attrs.get("Extension", "").lower())
@@ -2999,7 +3062,7 @@ def _probe_zip(path, size, ctx, extractor, out):
                     why |= vba_declared.get(n, set())
                     if n.endswith("vbaproject.bin"):
                         why.add("name")
-                    if n.rpartition(".")[2] in vba_extensions and "." in n:
+                    if n.rpartition(".")[2] in vba_extensions and "." in n and n not in overridden:
                         why.add("content_type")
                 if why:
                     vba_parts.append((info, sorted(why)))
