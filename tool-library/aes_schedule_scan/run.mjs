@@ -9,8 +9,11 @@
 // lays it out, and with the bytes of each 32-bit word reversed (the schedule
 // as an array of little-endian words). It never prints a key: each distinct
 // key goes to a private file (mode 0600) in out_dir, and the result names the
-// offset, the key size, the byte order and the key's sha256, so the hash can
-// go in the ledger and the file can be tried against the evidence.
+// offset, the key size, the byte order and the key file's name, so the file can
+// be tried against the evidence. No hash of a key is printed or written
+// anywhere, nor a name made from one: a digest of a key is a derivable quantity
+// of it, and what goes in the ledger is the finding's offset and the key file's
+// name.
 //
 // A hit is a lead, not a finding: the schedule may belong to any program or to
 // nobody. What this does not test: AES-192, a schedule with decayed bits, a
@@ -20,7 +23,6 @@
 // Args, JSON on stdin: path (the file), out_dir, start and length (a byte
 // window of the file, default all of it), chunk_bytes, budget_seconds. A call
 // that stops on its budget says complete=false and the start to carry on from.
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -194,22 +196,33 @@ fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
 const counters = { prefilter: 0, full: 0 };
 const hits = [];
 const seen = new Set();
-const keyFiles = new Set();
+// One private file a key; the same key found again (at another offset or in another layout) names the same file.
+// The name comes from where the key was first found and never from the key: no hash of it, whole or in part, is
+// printed, written or used in a path.
+const keyFiles = new Map();
+/** The file that holds this key in out_dir, written now (mode 0600) when it is not there yet. */
+function keyFileFor(offset, keyBytes, key) {
+  const known = keyFiles.get(key.toString("latin1"));
+  if (known) return known;
+  for (let n = 0; ; n++) {
+    const file = `key-${offset.toString(16)}-${keyBytes * 8}${n ? `-${n + 1}` : ""}.bin`;
+    try {
+      fs.writeFileSync(path.join(outDir, file), key, { flag: "wx", mode: 0o600 });
+    } catch (e) {
+      if (e.code !== "EEXIST") fail("cannot write a key file", { reason: String(e.code ?? e.message) });
+      // A file of that name from an earlier call holds this key (use it) or another (try the next name).
+      if (!fs.readFileSync(path.join(outDir, file)).equals(key)) continue;
+    }
+    keyFiles.set(key.toString("latin1"), file);
+    return file;
+  }
+}
 function found(offset, keyBytes, reversedWords, key) {
   const id = `${offset}:${keyBytes}:${reversedWords}`;
   if (seen.has(id)) return;
   seen.add(id);
-  const digest = createHash("sha256").update(key).digest("hex");
-  const file = `key-${digest.slice(0, 16)}.bin`;
-  if (!keyFiles.has(file)) {
-    keyFiles.add(file);
-    try {
-      fs.writeFileSync(path.join(outDir, file), key, { flag: "wx", mode: 0o600 });
-    } catch (e) {
-      if (e.code !== "EEXIST" || !fs.readFileSync(path.join(outDir, file)).equals(key)) fail("cannot write a key file", { reason: String(e.code ?? e.message) });
-    }
-  }
-  hits.push({ offset, offset_hex: `0x${offset.toString(16)}`, key_bits: keyBytes * 8, word_order: reversedWords ? "reversed-each-32bit-word" : "standard", schedule_bytes: SCHEDULE[keyBytes], key_sha256: digest, key_file: file });
+  const file = keyFileFor(offset, keyBytes, key);
+  hits.push({ offset, offset_hex: `0x${offset.toString(16)}`, key_bits: keyBytes * 8, word_order: reversedWords ? "reversed-each-32bit-word" : "standard", schedule_bytes: SCHEDULE[keyBytes], key_file: file });
 }
 
 const fd = fs.openSync(args.path, "r");
@@ -257,7 +270,7 @@ const result = {
   seconds: (performance.now() - started) / 1000,
   hit_count: hits.length,
   hits,
-  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); key_sha256 is what to record in the ledger. A hit is a lead until it decrypts something the evidence holds. A key file is live material from the evidence: out_dir by default is under work/quarantine/<agent>/ (in a job, $OUT/quarantine/), which a handover package leaves in the sandbox. A key file anywhere else, and a job's outputs in a package that carries outputs, travel with it unless the hit is recorded as a sensitive ledger entry that cites key_file (a redacted package then withholds the file) or the scan ran as a secret_output job.",
+  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); what to record is the finding's offset and key_file name, never a digest of the key. A hit is a lead until it decrypts something the evidence holds. A key file is live material from the evidence: out_dir by default is under work/quarantine/<agent>/ (in a job, $OUT/quarantine/), which a handover package leaves in the sandbox. A key file anywhere else, and a job's outputs in a package that carries outputs, travel with it unless the hit is recorded as a sensitive ledger entry that cites key_file (a redacted package then withholds the file) or the scan ran as a secret_output job.",
 };
 const resultFile = path.join(outDir, `${TOOL}.${start}.json`);
 fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));

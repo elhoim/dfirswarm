@@ -1,6 +1,6 @@
 {
   "name": "aes_schedule_scan",
-  "description": "Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard lays them out or with each 32-bit word's bytes reversed. A key goes to a private file in out_dir, never to the answer: it gives offset, size, byte order, the key's sha256. A hit is a lead. Not AES-192, decayed keys or the decryption layout (aes_inverse_scan). Windows: start, length.",
+  "description": "Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard lays them out or with each 32-bit word's bytes reversed. A key goes to a private file in out_dir, never to the answer: it gives offset, size, byte order, key file name. A hit is a lead. Not AES-192, decayed keys or the decryption layout (aes_inverse_scan). Windows: start, length.",
   "use": {
     "extensions": [
       ".mem",
@@ -45,6 +45,6 @@
   ],
   "by": "s3472f0",
   "at": "2026-10-01T08:59:03.079Z",
-  "version": 1,
-  "sha256": "2740081aeabdce3eef26c23325786d769047fa827505947a19b1215f890574eb"
+  "version": 2,
+  "sha256": "d90980960ee3ea21724180dda7c3bc5b74c73dafcc378dd64eff1a4cc1b59613"
 }
