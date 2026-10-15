@@ -2,6 +2,8 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `mobile/router`
+
 - `android/artifacts` Android artefacts by build, user and protection state: The evidence holds Android application or system data.
 - `apps/databases` App databases, transaction state, deleted fragments: An answer rests on an app's SQLite records or on deleted content.
 - `apps/fragments` Reading a sqlite_freespace answer: You ran sqlite_freespace and must report what its fragments are.
@@ -12,3 +14,4 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `ios/containers-and-time` iOS containers and time conversion: You must attribute an app container or convert an iOS time.
 - `ios/unified-logs` iOS unified logs on Linux: An iOS question depends on retained diagnostic logs.
 - `location/sources` Mobile location records and uncertainty: The question is where a device, media item or person was.
+- `mobile/router` Mobile notes by question: Pick a mobile note when none is listed, or you cannot choose.

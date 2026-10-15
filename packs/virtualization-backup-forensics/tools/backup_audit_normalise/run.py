@@ -804,8 +804,8 @@ _NAMED_SECRET = re.compile(
     r"(?:(?i:passw(?:or)?d|passwd|passphrase|pwd|secret|token|credentials?|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|master[_-]?key"
     r"|shared[_-]?key|signing[_-]?key|encryption[_-]?key|secret[_-]?key)"
     r"|(?<![Bb]y)(?<![Cc]om)(?<![Oo]ver)(?<![Uu]nder)(?<![Tt]res)(?<![Ee]ncom)(?<![Ss]ur)(?<![Ii]m)(?i:pass)"
-    r"|(?i:pw|auth|sig|sas))s?[\"']?[ \t]{0,2}[=:][ \t]{0,2}[\"']?"
-    r"((?!line[ \t]+[0-9])[^\s\"'<>;,&]+(?:[ \t]+[^\s\"'<>;,&=:]+){0,3})")
+    r"|(?i:pw|auth|sig|sas))s?(?:\\{0,3}[\"'])?[ \t]{0,2}[=:][ \t]{0,2}(?:\\{0,3}[\"'])?"
+    r"((?!line[ \t]+[0-9])[^\s\"'<>;,&\\][^\s\"'<>;,&]*(?:[ \t]+[^\s\"'<>;,&=:]+){0,3})")
 _NAMED_FLAG = re.compile(r"(?<![\w-])--?(?i:passw(?:or)?d|passwd|pass|pwd|secret|token|api-?key|access-?key|client-?secret|auth)(?:=|[ \t]+)(?!-)([^\s\"']+)")
 _LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
@@ -946,7 +946,7 @@ def _free_once(text, kind):
 
 
 # ---- layer 1: the allow-list ---------------------------------------------------------------------------------------------
-_NAME_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%-]*")
+_NAME_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%$-]*")
 _PATH_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%{}$-]*")
 _VERSION_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%/-]*")
 _SEP_DIGITS = re.compile(r"(?<=[0-9])[:/](?=[0-9])")
@@ -967,11 +967,12 @@ _ID_EMBEDDED = re.compile(
 _ID_FORMS = re.compile(
     r"\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?|[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|(?:[0-9A-Fa-f]{2} ){7}[0-9A-Fa-f]{2}-(?:[0-9A-Fa-f]{2} ){7}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2} ){15}[0-9A-Fa-f]{2}"
-    r"|[0-9A-Fa-f]{1,16}|[0-9A-Fa-f]{32}|[0-9]{1,18}|(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}"
+    r"|[0-9A-Fa-f]{1,16}|[0-9A-Fa-f]{32}|[0-9]{1,18}|(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}"
     r"|naa\.[0-9a-fA-F]{16,32}|eui\.[0-9a-fA-F]{16}|wwn-0x[0-9a-fA-F]{16}|vml\.[0-9a-fA-F]{20,40}|mpx\.vmhba[0-9]+:C[0-9]+:T[0-9]+:L[0-9]+"
     r"|[A-Za-z][A-Za-z0-9_.-]{0,15}[0-9]{0,6}")
 _DENY_IN_IDENT = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_|xox[abeprs]-|glpat-|(?:sk|rk|pk)_(?:live|test)_|SG\.[A-Za-z0-9_-]{8,}"
-                            r"|AIza|npm_|pypi-|shpat_|dop_v1_|ya29\.|sk-[A-Za-z0-9_-]{8,})|eyJ[A-Za-z0-9_-]{10,}|-----BEGIN|[A-Za-z0-9_-]{0,40}(?i:passw|pwd|secret|token)[A-Za-z0-9_-]{0,3}[=:]")
+                            r"|AIza|npm_|pypi-|shpat_|dop_v1_|ya29\.|sk-[A-Za-z0-9_-]{8,})|eyJ[A-Za-z0-9_-]{10,}|-----BEGIN|[A-Za-z0-9_-]{0,40}(?i:passw|pwd|secret|token|credential|api[_-]?key|private[_-]?key|access[_-]?key|account[_-]?key)[A-Za-z0-9_-]{0,3}[=:]"
+                            r"|(?<![A-Za-z])(?i:pass|pw|auth|sig|sas)s?[=:]")
 _VOWELS = frozenset("aeiouAEIOU")
 
 
@@ -995,6 +996,8 @@ def _token_like(run, hex_too=True, words=True):
         return n >= 19
     if all(c in "0123456789abcdefABCDEF" for c in alnum):
         return hex_too
+    if hex_too and _HEX32.search(alnum):
+        return True                                 # a digest or a key written in hexadecimal inside a longer name
     kinds = {_cls(c) for c in alnum}
     changes = sum(1 for a, b in zip(alnum, alnum[1:]) if _cls(a) != _cls(b)) / (n - 1)
     packed = len(_PACKED.findall(alnum))
@@ -1030,6 +1033,7 @@ def _token_like(run, hex_too=True, words=True):
 
 _PACKED = re.compile(r"(?<=[A-Za-z])[0-9]{1,2}(?=[A-Za-z])")
 _WORDS = re.compile(r"[A-Z][a-z]{2,}")
+_HEX32 = re.compile(r"[0-9a-fA-F]{32,}")
 _DATE = re.compile(r"(?:19|20)[0-9]{2}[-_.]?[0-1][0-9][-_.]?[0-3][0-9](?:[T_-]?[0-2][0-9][:.]?[0-5][0-9][:.]?[0-5][0-9])?(?![0-9])")
 _WORDISH = re.compile(r"[A-Z]{2,4}(?=[A-Z][a-z]{3,})|[A-Z][a-z]{3,}|[a-z]{5,}")
 
@@ -1072,7 +1076,7 @@ def _ident_text_ok(text, limit, path, slash=False):
         if ":" in tail or not _DRIVE.fullmatch(head):
             return False
         probe = head + tail
-    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(text):
+    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(_ID_EMBEDDED.sub("x", text)):
         return False
     scan = _ID_EMBEDDED.sub(" ", text) if len(text) >= 20 else text
     for m in _RUN_CAND.finditer(scan):
@@ -1347,11 +1351,11 @@ def _s_named(flat):
             return False
         i = m.start()
         pos = m.end()
-        after = flat[i + 1:i + 4].lstrip(" \t\"'")
+        after = flat[i + 1:i + 6].lstrip(" \t\"'\\")
         if not after or after[0] in "<>" or _S_LINE.match(flat, i + 1):
             continue                                  # nothing after it, a marker, or an error message's `: line 3, column 5`
         j = i
-        while j > 0 and flat[j - 1] in " \t\"'" and i - j < 3:
+        while j > 0 and flat[j - 1] in " \t\"'\\" and i - j < 5:
             j -= 1
         k = j
         while k > 0 and j - k < 64 and flat[k - 1] in _S_NAME_CHARS:

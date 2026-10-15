@@ -10,7 +10,7 @@ steps at the end are the maintainer's, in order.
 | 1 | License: GNU AGPL v3 or later, copyright Halil Öztürkci, 2026, with a commercial licence offered alongside it. The console and the server banner carry the section 13 source offer | `LICENSE`, `NOTICE`, `COMMERCIAL-LICENSE.md`, `package.json` `license`, README § License, `ui/src/components/app-shell.tsx`, `scripts/ui-server.ts` |
 | 2 | Name: **Agent Swarm** everywhere (was "Simple Swarm" during development) | `package.json`, `ui/index.html`, the wordmark, the server's placeholder page, `extensions/agent-swarm.ts` (renamed), every doc |
 | 3 | Security policy: threat model, scope, reporting, operator hardening | `SECURITY.md` |
-| 4 | CI: typecheck, the node suites, every shell suite (`scripts/test-bash.sh`), UI build, a guard that no run state is tracked — no model, key, Herdr or Pi needed; and on a KVM runner the VM suite, with the base and disk images built from the recipes. `images.yml` builds every profile, `full` included. Every job runs on amd64 Linux: no arm64 image is built or booted and no job runs on macOS, and `spikes/` is neither typechecked nor re-run (see below) | `.github/workflows/ci.yml`, `.github/workflows/images.yml` |
+| 4 | CI: typecheck, the node suites, every shell suite (`scripts/test-bash.sh`), UI build, a guard that no run state is tracked — no model, key, Herdr or Pi needed; and on a KVM runner the VM suite, with the base and disk images built from the recipes. `images.yml` builds every profile, `full` included. Every job but one runs on amd64 Linux; one job, in three parts, runs the typecheck, the node suites and the shell suites on a hosted macOS runner (Apple silicon). No arm64 image is built or booted, and `spikes/` is neither typechecked nor re-run (see below) | `.github/workflows/ci.yml`, `.github/workflows/images.yml` |
 | 5 | Contributing guide with the house rules (tests in `tests/`, bash 3.2, English only, harness owns its files) | `CONTRIBUTING.md` |
 | 6 | Code of conduct: Contributor Covenant 2.1 | `CODE_OF_CONDUCT.md` |
 | 7 | Issue and PR templates, Dependabot for npm and Actions | `.github/` |
@@ -36,7 +36,7 @@ steps at the end are the maintainer's, in order.
 | A hosted demo | Impossible by design: a run needs Herdr panes and a paid or subscribed model. A screen recording linked from the README would be the substitute. |
 | Publishing to npm | It is a CLI and a web app you clone; `private: true` stays. |
 | macOS `pf` enforcement for netguard | Still **UNKNOWN**; the proxy mode is what is verified on macOS. Listed in the README roadmap. |
-| CI on arm64 and on macOS | GitHub's hosted runners used here are amd64 Linux. The Apple-silicon VM path, the arm64 image builds (their pinned downloads and compiled tools) and the macOS-only suites (the seatbelt guard, `--inputs-image`) are run by hand on the development Mac before a release. |
+| CI on arm64 images and the macOS VM path | The macOS job runs the typecheck, the node suites and every shell suite (the seatbelt guard, `--inputs-image`) on a hosted runner, but a hosted runner cannot boot a microVM. The Apple-silicon VM path and the arm64 image builds (their pinned downloads and compiled tools) are run by hand on the development Mac before a release. |
 | Typechecking or re-running `spikes/` | The spikes record measurements taken once (the shared-directory losses, the five-second cache); they are outside `tsconfig.json` and CI. A new msb version is the time to re-run `spikes/microvm-smoke/shared-fs.sh` by hand. |
 
 ## The maintainer's own steps

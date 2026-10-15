@@ -24,11 +24,11 @@ not say no key was in memory, and AES-192, other ciphers and other layouts are n
 examined. The tool library (`--tools-from tool-library`) has two more layouts,
 `aes_schedule_scan` (the bytes of each word reversed) and `aes_inverse_scan` (as a
 decryption routine stores it). They write a key to a private file under their
-`out_dir`, and their answer still carries a digest of it: run them as
-`secret_output` jobs and copy neither the key nor that digest into a post, the
-ledger or the report. `aeskeyfind` is in the memory and full images; a host run has
-it only if the operator installed it, and without it this check was not run, and
-the report says so.
+`out_dir`, and their answer gives the offset and the key file's name, no digest:
+run them as `secret_output` jobs and record the offset and the key file's name,
+never the key or a hash of it, in a post, the ledger or the report. `aeskeyfind`
+is in the memory and full images; a host run has it only if the operator installed
+it, and without it this check was not run, and the report says so.
 
 **Sensitive output.** `aeskeyfind` prints the keys on stdout and the two library tools write them to a file: every run is a job with `secret_output: true`; the ledger and the report carry offsets and counts only (`credentials/material`).
 

@@ -1,7 +1,7 @@
 {
   "id": "cloud-forensics",
   "name": "Cloud and SaaS Forensics Pack",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "description": "Method and tooling for logs that belong to somebody else's computer, examined as supplied exports: what a cloud or SaaS export covers and what its silence can show, the Microsoft 365 unified audit log, Entra sign-ins, AWS CloudTrail, Google Workspace, and the tokens, grants and mailbox rules behind a cloud account.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -26,6 +26,10 @@
   ],
   "method_only": [
     {
+      "path": "skills/cloud/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
+    },
+    {
       "path": "skills/google/workspace-access.md",
       "why": "a method leaf for Workspace evidence: the pack has no reader for token, Drive or admin events, so it reads the export as supplied and names no tool or program"
     },
@@ -38,7 +42,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "455666925d16f4c77c520c68ad8fa581743c867438412e19dbbdbdc924d5cd0e",
+      "README.md": "1343dfb9780cff60a5c664b17af8796d7d65b16d446dec0b8c715d51fa5798f1",
       "tools/ual_parse/manifest.json": "14f85b9d45568668b606cb5dd4c94fe2394a215a78fdf87dccb3940236863d17",
       "tools/ual_parse/run.py": "44b1065e1f3efab680d2b3476d79886fb08bc25a6210ee901e7b3c2083a83bdb",
       "tools/signin_analyse/manifest.json": "19c57c2da89ef547c73623fb43accc03e9f83078767c3aab99108667deb82410",
@@ -52,12 +56,13 @@
       "skills/google/workspace.md": "a8e5c5dc0150a693bf0bf54a410dcd1a7b9bf01461afd32e12c36c708f2a566a",
       "skills/logs/sources.md": "1ff58fa6b521168b1a1d439cfd2275cb636ce2dc2593f7861eb93829d02c92ff",
       "skills/logs/what-exists.md": "8b29caefc5a4930d4af9b52706d79ae93c87c30ec6d9b62efeb4157108922dc5",
+      "skills/cloud/router.md": "a802777a992013d5fa60162c78d788f9283b9c08e4e7e6795a3ff5c2a53d6371",
       "skills/m365/unified-audit-log.md": "04ba5c0035ac630d1274dc377ae9f8b93ac56845ba01713737353ec618bafe53",
       "skills/aws/cloudtrail.md": "fd40e09cdff829feed25a5a53e6b45c7ff783baf1bb91719f1ce1583bf6e4988",
       "skills/entra/signins.md": "068452016ed964aa2a61fb0634b92f71845bb0364b386b6b8d5a88d813ecb2f5",
       "requires/host.json": "fa29166ae2652d2a487c863b8e2e4cf4b52dc41750356fb424f0a4e42e261a2e",
       "requires/python.txt": "eb9148a62031d80af4795335b759dbe15552ed2df3b5b97648fbcda6b32b64de",
-      "skills/INDEX.md": "2ac3020dd6c464b02af069629bdece87e8b32c3e548abfa5c4a67788819abc64"
+      "skills/INDEX.md": "dc5c072ff20da259b4b316a3a6e96ea5a87cf52040ece8099efd635a00f0f89a"
     }
   },
   "tools": [
@@ -65,5 +70,5 @@
     "signin_analyse",
     "ual_parse"
   ],
-  "skills": 9
+  "skills": 10
 }

@@ -200,7 +200,7 @@ async function campaign(label: string, script: string, build: (r: R) => Case): P
       const job = r() < 0.4;
       const env: Record<string, string> = job ? { JOB_ID: `j${String(100000 + i).padStart(6, "0")}`, OUT: join(dir, "out") } : {};
       if (job) await mkdir(env.OUT, { recursive: true });
-      const args = { ...c.args, ...(job && r() < 0.5 ? { write_text: true } : {}) };
+      const args: Record<string, unknown> = { ...c.args, ...(job && r() < 0.5 ? { write_text: true } : {}) };
       const tag = `${label} case ${i} (seed ${SEED})`;
       const before = new Set(await walk(dir));
       const res = await run(script, dir, args, env);
