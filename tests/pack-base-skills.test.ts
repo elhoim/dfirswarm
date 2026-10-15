@@ -342,7 +342,10 @@ test("data/sqlite: on a secret table select locators only, because the inline pa
   const secrets = skills.get("data/sqlite-secrets")!;
   const fallback = paragraph(secrets, "**Fallback, outside a job or without the mode.**");
   assert.match(fallback, /`limit` is 1 or more, so the inline page always carries at least one row of values/);
-  assert.match(fallback, /select only locators \(`rowid`, `length\(col\)`, `typeof\(col\)`\)/);
+  assert.match(fallback, /select only locators \(`rowid`, `length\(col\)`, `typeof\(col\)`\) `FROM t NOT INDEXED ORDER BY rowid`/);
+  // Through an index on the secret column the locators come ranked by its values (the final review of #144): the table itself, in
+  // rowid order, and a WITHOUT ROWID table in its key's.
+  assert.match(fallback, /WITHOUT ROWID: `ORDER BY` the key, which ranks it\./);
   // The pointer says when to read the leaf: before any query on such a table, since the inline page carries values (the review of
   // #144 found it inverted: "Only if you need the rows" sent the agent there only when it wanted values in its context).
   assert.match(paragraph(s, "**Sensitive output.**"), /Before you query one, read `data\/sqlite-secrets`: the inline page always holds values\./);
@@ -370,20 +373,24 @@ test("data/sqlite: on a secret table select locators only, because the inline pa
   try {
     const db = join(dir, "t.db");
     const made = await runPySnippet(
-      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table tok(id integer primary key, v blob)'); c.execute('insert into tok(v) values(?)',(b'planted-secret-value-0001',)); c.commit()",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table tok(host text, v blob)'); c.execute('create index ixv on tok(v)'); [c.execute('insert into tok(host, v) values(?, ?)',('host-%d' % i, v)) for i, v in enumerate((b'zz-planted-secret-value-0001', b'aa-planted-secret-value-0002'))]; c.commit()",
       [db],
       {},
     );
     assert.equal(made.code, 0, made.stderr);
     const script = join(PACK, "tools", "sqlite_query", "run.py");
-    const b64 = Buffer.from("planted-secret-value-0001").toString("base64");
-    const loc = await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok", limit: 1 });
+    const b64 = Buffer.from("zz-planted-secret-value-0001").toString("base64");
+    // The skill's query, with t and col filled in: rowid order, not the order of the index on v (which would put rowid 2 first).
+    const loc = await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok NOT INDEXED ORDER BY rowid", limit: 2 });
     assert.equal(loc.code, 0, loc.stdout + loc.stderr);
     const answer = JSON.parse(loc.stdout);
     assert.equal(answer.ok, true);
     assert.ok(!loc.stdout.includes("planted-secret") && !loc.stdout.includes(b64), "a locator select puts no value in the answer");
     assert.ok(loc.stdout.includes("blob"), "typeof(v) says it is a blob");
-    const plain = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok", limit: 1 });
+    assert.deepEqual(answer.rows.map((r: { values: unknown[] }) => r.values[0]), [1, 2]);
+    const ranked = JSON.parse((await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok", limit: 2 })).stdout);
+    assert.deepEqual(ranked.rows.map((r: { values: unknown[] }) => r.values[0]), [2, 1], "without the clause SQLite reads the covering index, in the values' order");
+    const plain = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok WHERE rowid = 1", limit: 1 });
     assert.ok(plain.stdout.includes(b64), "a plain select puts the base64 of a short BLOB in the inline page");
     const zero = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok", limit: 0 });
     assert.notEqual(zero.code, 0);

@@ -847,6 +847,7 @@ def describe(exc):
 # ValueError: a generated column's error that quotes bytes that are not UTF-8 arrives as one, with no code).
 READ_ERRORS = (sqlite3.Error, ValueError)
 SQLITE_INTERRUPT, SQLITE_TOOBIG, SQLITE_AUTH = 9, 18, 23
+SQLITE_ERROR_MISSING_COLLSEQ = 1 | (1 << 8)
 # The fixed messages sqlite gives those codes (the wording of a denial changed between versions), for a Python that gives no code.
 FIXED_MESSAGES = {"interrupted": SQLITE_INTERRUPT, "string or blob too big": SQLITE_TOOBIG, "not authorized": SQLITE_AUTH,
                   "authorization denied": SQLITE_AUTH}
@@ -890,6 +891,17 @@ def refused_function(exc):
 
 def too_big(exc):
     return sqlite_code(exc) == SQLITE_TOOBIG
+
+
+def missing_collation(exc):
+    """sqlite has no collation of the name the schema gives (SQLITE_ERROR_MISSING_COLLSEQ, an extended code; on Python before 3.11,
+    which gives none, sqlite's own fixed words, which no value comes before: the name after them is the schema's)."""
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code == SQLITE_ERROR_MISSING_COLLSEQ
+    return str(exc).startswith("no such collation sequence: ")
 
 
 def stops_the_export(exc):
@@ -950,8 +962,18 @@ class SecretValues:
         # Created once the table is known and before its first row is read: a file or a link already at that name is refused by
         # name (O_EXCL does not follow a link, a dangling one included), instead of failing, or writing through it, after the
         # export. With nothing to write it stays an empty file but for its end line, mode 0600, and the answer says written: 0.
+        # OUT itself first: a file or a link to nothing at OUT is said as such, not as a values file that exists.
+        out_dir = self.path.parent
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            if os.path.islink(str(out_dir)) and not os.path.exists(str(out_dir)):
+                raise SecretValuesRefused("OUT is a link to nothing (its target does not exist), not a directory: %s; nothing was "
+                                          "written" % out_dir)
+            if os.path.lexists(str(out_dir)) and not os.path.isdir(str(out_dir)):
+                raise SecretValuesRefused("OUT is not a directory (a file is at its name): %s; nothing was written" % out_dir)
+            raise SecretValuesRefused("OUT could not be made: %s (%s); nothing was written" % (out_dir, describe(exc)))
+        try:
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
             raise SecretValuesRefused("the values file already exists: %s" % self.path)
@@ -1142,6 +1164,36 @@ def value_json(value):
     return value
 
 
+END_RESERVE = 4096                # room kept for the end line but for sqlite's message in it
+
+
+def line_reserve(finding_id, locator, value):
+    """The most bytes the values file's line for this cell can take, from what the answer prints of the cell (its locator, type
+    and length: never its content): six per byte of text (the longest JSON escape of a byte, \\u0001), the exact base64 of a BLOB,
+    an integer's or a real's own characters. The cap is decided on these, so where an export stops does not depend on how a value
+    escapes, and the file stays within the cap since a line is never longer. A not_exported line reserves six per byte of sqlite's
+    message, whose length can follow a value it quotes."""
+    base = len(json.dumps({"finding_id": finding_id, **locator})) + 1      # the line but its last key, and its newline
+    if isinstance(value, NotExported):
+        extra = len(', "not_exported": ""') + len(value.why)
+        if value.error:
+            # The class is one of a few fixed names (it can say whether the message was UTF-8: a fixed room hides that).
+            extra += (len(', "error_class": , "sqlite_message": ') + max(256, len(json.dumps(value.error)))
+                      + 6 * len((value.message or "").encode("utf-8", "replace")) + 2)
+        return base + extra
+    extra = len(', "value": ')
+    if isinstance(value, bytes):
+        return base + extra + len('{"blob_b64": ""}') + 4 * ((len(value) + 2) // 3)
+    if isinstance(value, _Text):
+        n = len(value.raw)
+        return base + extra + len('{"text_invalid_utf8": , "bytes_b64": "", "length": }') + 6 * n + 2 + 4 * ((n + 2) // 3) + len(str(n))
+    if isinstance(value, str):
+        return base + extra + 6 * len(value.encode("utf-8", "replace")) + 2
+    if isinstance(value, float):
+        return base + extra + max(len(repr(value)), len('{"real": "-inf"}'))
+    return base + extra + len(str(value))
+
+
 class NotExported:
     """A cell whose value is not in the values file: `value_too_large` (longer than VALUE_MAX: its type, and its length when SQLite
     gives it without reading the value) or `unreadable` (sqlite could not compute it: a generated column's error)."""
@@ -1191,16 +1243,34 @@ def declared_without_rowid(sql):
     return ")" in text and bool(re.search(r"\bWITHOUT\s+ROWID\b", text[text.rfind(")") + 1:], re.I))
 
 
+def table_list_row(conn, table):
+    """The table's row of PRAGMA table_list (SQLite 3.37 and later: schema, name, type, ncol, wr, strict), or None."""
+    try:
+        for r in conn.execute("PRAGMA table_list"):
+            if len(r) > 4 and str(r[0]) == "main" and str(r[1]) == table:
+                return r
+    except READ_ERRORS:
+        pass
+    return None
+
+
+def is_virtual(conn, table, sql, rootpage):
+    """SQLite's own answer where it gives one (table_list's type), else the schema: a virtual table has no b-tree (rootpage 0), and
+    its statement says VIRTUAL once its strings, quoted names and comments are blanked (CREATE /* x */ VIRTUAL TABLE is one, in a
+    schema an application or a crafted file wrote)."""
+    r = table_list_row(conn, table)
+    if r is not None:
+        return str(r[2]) == "virtual"
+    return rootpage == 0 or bool(re.match(r"\s*create\s+virtual\s+table\b", blank_quoted(sql), re.I))
+
+
 def is_without_rowid(conn, table, sql):
     """SQLite's own answer where it gives one (PRAGMA table_list, SQLite 3.37 and later: its `wr` column), else the statement's
     text. Decided before the names: columns named rowid, oid and _rowid_ hide the rowid of a rowid table and change nothing of a
     WITHOUT ROWID one."""
-    try:
-        for r in conn.execute("PRAGMA table_list"):
-            if len(r) > 4 and str(r[0]) == "main" and str(r[1]) == table:
-                return bool(r[4])
-    except READ_ERRORS:
-        pass
+    r = table_list_row(conn, table)
+    if r is not None:
+        return bool(r[4])
     return declared_without_rowid(sql)
 
 
@@ -1219,6 +1289,41 @@ def primary_key_order(conn, table, info):
         pass
     key = [str(r[1]) for r in sorted((r for r in info if r[5]), key=lambda r: r[5])]
     return key, ", ".join(q_ident(k) for k in key)
+
+
+def byte_compare(a, b):
+    """The stand-in for a collation this SQLite does not have: code point order, which is UTF-8's byte order."""
+    return (a > b) - (a < b)
+
+
+def stand_in_collations(conn, table):
+    """The collations a WITHOUT ROWID table's primary key names that this SQLite does not have (an application's own: Android's
+    LOCALIZED and UNICODE), each given a byte compare, so that the key's ORDER BY can be prepared. SQLite then walks the table's
+    b-tree in the order it is stored and sorts nothing (the ORDER BY names the key's own collations), so the rows come in the
+    order the application's collation gave them; a comparison under that name in the table's own expressions (a generated
+    column) is the byte compare's. Only a name sqlite says is missing gets one (asked of a constant, not of a value)."""
+    names = []
+    try:
+        for r in conn.execute("PRAGMA index_list(%s)" % q_ident(table)):
+            if str(r[3]) == "pk":
+                for x in conn.execute("PRAGMA index_xinfo(%s)" % q_ident(str(r[1]))):
+                    if x[5] and isinstance(x[4], str) and x[4] and x[4] not in names:
+                        names.append(x[4])
+    except READ_ERRORS:
+        return []
+    stood = []
+    for name in names:
+        try:
+            conn.execute("SELECT 'a' < 'b' COLLATE %s" % q_ident(name)).fetchone()
+        except READ_ERRORS as exc:
+            if not missing_collation(exc):
+                continue
+            try:
+                conn.create_collation(name, byte_compare)
+                stood.append(name)
+            except (sqlite3.Error, ValueError, TypeError):
+                pass
+    return stood
 
 
 def integer_primary_key(conn, table, info):
@@ -1246,14 +1351,16 @@ def table_layout(conn, wanted, columns):
     or None: a shadowed table with no INTEGER PRIMARY KEY is read NOT INDEXED in its storage order, a virtual table in its
     module's), and ranks (the columns whose values that order follows: [] for a rowid order that is no column's, None for a
     module's, which is not known)."""
-    found = [(str(r[0]), r[1] if isinstance(r[1], str) else "") for r in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    rows = list(conn.execute("SELECT name, sql, rootpage FROM sqlite_master WHERE type = 'table' ORDER BY name"))
+    found = [(str(r[0]), r[1] if isinstance(r[1], str) else "") for r in rows]
+    roots = {str(r[0]): r[2] for r in rows}
     names = [n for n, _s in found]
     hits = [n for n in names if n == wanted] or [n for n in names if n.lower() == wanted.lower()]
     if len(hits) != 1:
         values_fail("the database has no table of that name (the mode reads one table; a view is not one)" if not hits
                     else "more than one table matches that name without regard to case: give it exactly", table=wanted, tables=len(names))
     table = hits[0]
-    virtual = bool(re.match(r"\s*create\s+virtual\s+table\b", dict(found)[table], re.I))
+    virtual = is_virtual(conn, table, dict(found)[table], roots[table])
     try:
         info = [r for r in conn.execute("PRAGMA table_xinfo(%s)" % q_ident(table)) if r[6] in (0, 2, 3)]
     except READ_ERRORS as exc:
@@ -1365,6 +1472,7 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
     if bounds and kind != "rowid":
         why, reason = NO_RANGE[kind]
         values_fail(why, table=table, reason=reason)
+    stood_in = stand_in_collations(conn, table) if kind == "without_rowid" else []
     # The values file is made now: the table exists and its layout is read, and no row has been. A wrong name or a file that is
     # not SQLite leaves nothing behind, and the same job can ask again.
     try:
@@ -1436,6 +1544,7 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
     names = [scrub(cell(c)) for c, _t in cols]
     stats = [{"values": collections.OrderedDict(), "length_min": None, "length_max": None} for _ in cols]
     page, page_bytes, total, nulls, file_stopped, file_stopped_rowid = [], 0, 0, 0, None, None
+    reserved = 0                         # the values file's bytes as line_reserve counts them: what the cap is decided on
     missing, missing_count, parts = [], collections.Counter(), 0
     parts_limit = False
     job = os.environ.get("JOB_ID") or ""
@@ -1493,7 +1602,7 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
     def take(row):
         """One row: its values to the values file (OSError: the values file failed), then, once the row is through, its locators to
         the answer and the locators file and its counts, so row_count N means rows 1..N in the locators file."""
-        nonlocal total, nulls, file_stopped, file_stopped_rowid, page_bytes
+        nonlocal total, nulls, file_stopped, file_stopped_rowid, page_bytes, reserved
         n = total + 1
         rid = row[0] if kind == "rowid" else None
         vals = row[1:] if kind == "rowid" else row
@@ -1511,11 +1620,13 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
                 cells.append("%s:%d" % (kind_of, length))
             if file_stopped:
                 continue
-            if values.bytes + (len(v.message or "") * 6 if isinstance(v, NotExported) else 4 * ((length + 2) // 3) if isinstance(v, bytes) else length * 6) + 300 > FILE_BYTES:
-                file_stopped, file_stopped_rowid = n, rid
-                continue
             finding = "V%07d" % (values.written + 1)
             locator = {"table": table, "rowid": rid, "n": n, "column": col, "type": kind_of, "length": length}
+            need = line_reserve(finding, locator, v)
+            if reserved + need > FILE_BYTES - END_RESERVE:
+                file_stopped, file_stopped_rowid = n, rid
+                continue
+            reserved += need
             if isinstance(v, NotExported):
                 values.add_missing(finding, locator, v.why, v.error, v.message)
             elif isinstance(v, bytes) and len(v) > STREAM_AT:
@@ -1599,6 +1710,11 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
         elif parts_limit:
             failure, reason = ("%d rows had a cell that could not be read with the rest, the most read a cell at a time; the export "
                                "stopped at %s" % (PARTS_MAX, where)), "too_many_rows_read_in_parts"
+        elif missing_collation(exc):
+            failure, reason = ("%s could not be read: the table's schema names a collation this SQLite does not have (an "
+                               "application's own), where no byte compare stands in (one does only for a WITHOUT ROWID table's "
+                               "primary key). That is the schema's doing, not a value's; the collation's name is in sqlite's "
+                               "message, in the values file's end line" % where), "missing_collation"
         else:
             failure, reason = ("%s could not be read: none of its cells. The error's class and sqlite's message are not printed, "
                                "since they can depend on a value; they are in the values file's end line" % where), "row_unreadable"
@@ -1690,6 +1806,14 @@ def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mod
                                               "generated column's json_extract fails on text that is not JSON), so it can say something "
                                               "of those values. Each such cell has a not_exported line in the values file%s; the rest of "
                                               "its row is exported" % (" (up to the row values_file_holds names)" if values.error else ""))}
+    if stood_in:
+        out["collations_stood_in"] = {
+            "names": [scrub(cell(c)) for c in stood_in],
+            "note": ("this SQLite does not have the collation(s) the table's primary key names (an application's own); a byte compare "
+                     "stood in for each so that the key's order could be asked for. SQLite walks the table in the order it stores it "
+                     "and sorts nothing, so the rows come in the order the application's collation gave them (n ranks the key, as for "
+                     "any WITHOUT ROWID table); a comparison under that name in the table's own expressions (a generated column) is the "
+                     "byte compare's, not the application's")}
     if published:
         out["locators_file"] = published[1]
         out["locators_file_format"] = "JSON Lines: a header line {table, columns, locator}, then one {n, rowid, cells} per row; a cell is type:length, too_large:type:length, unreadable or null; no value"
@@ -1743,8 +1867,8 @@ def main():
     else:
         stray = [k for k in VALUES_PARAMS if k in obj]
         if stray:
-            say({"ok": False, "error": "%s belong to write_values, which writes the values of one table to a sealed file; "
-                                       "an ordinary query takes sql" % ", ".join(stray)}, 1)
+            say({"ok": False, "error": "%s %s to write_values, which writes the values of one table to a sealed file; "
+                                       "an ordinary query takes sql" % (", ".join(stray), "belongs" if len(stray) == 1 else "belong")}, 1)
     db = obj["db_path"]
     sql = obj.get("sql", "")
     for name, text in (("db_path", db), ("sql", sql)):

@@ -417,7 +417,9 @@ class SqliteQueryValues(Case):
         # The parameters of the mode do not leak into an ordinary query either.
         plain = run_tool("sqlite_query", {"db_path": db, "sql": "select 1", "table": "logins"}, self.dir)
         self.assertEqual(plain.code, 1)
-        self.assertIn("belong to write_values", plain.json["error"])
+        self.assertTrue(plain.json["error"].startswith("table belongs to write_values"), plain.json["error"])
+        both = run_tool("sqlite_query", {"db_path": db, "sql": "select 1", "table": "logins", "rowid_from": 1}, self.dir)
+        self.assertTrue(both.json["error"].startswith("table, rowid_from belong to write_values"), both.json["error"])
         # A rowid range selects by position, and the counts are the same whatever the values are.
         ranged = self.export(db, env, rowid_from=2, rowid_to=3)
         self.assertEqual(ranged.code, 0, ranged.stdout)
@@ -1221,6 +1223,243 @@ class SqliteQueryValuesDelta(Case):
         self.assertIn(left[0], j.get("locators_file_left", ""), "what remains is named")
         self.assertNotIn("none is left", j.get("locators_file_error", ""))
         self.assertEqual(len(self.locator_rows(out, j)), 3, "the locators file itself is published")
+
+
+class SqliteQueryValuesFinal(Case):
+    """The final delta review of #144: each test fails on the pack as it was at 7afea4cb (PACK_DIR pointed at a copy of it). Truth
+    comes from SQLite itself (its query plans, a collation the test registers when it writes the table) and from JSON's own rules
+    for how long an escape can be."""
+
+    job, export, make = SqliteQueryValuesDelta.job, SqliteQueryValuesDelta.export, SqliteQueryValuesDelta.make
+    values_lines, with_generated = SqliteQueryValuesDelta.values_lines, SqliteQueryValuesDelta.with_generated
+
+    # --- P2: the skill's fallback query outside a job --------------------------------------------------------------------
+
+    def test_the_skills_fallback_query_reads_the_table_not_an_index_on_the_secret_column(self):
+        skill = self.read(os.path.join(os.path.dirname(tool_path("sqlite_query")), "..", "..", "skills", "data", "sqlite-secrets.md"))
+        fallback = next(p for p in skill.split("\n\n") if p.startswith("**Fallback"))
+        self.assertIn("(`rowid`, `length(col)`, `typeof(col)`) `FROM t NOT INDEXED ORDER BY rowid`", fallback)
+        self.assertIn("WITHOUT ROWID", fallback)
+        self.assertIn("INTEGER PRIMARY KEY", fallback)
+        # rowid order is not the values' order, and an index on the secret column covers the locator query.
+        db = self.make("cookies.db", ["create table cookies(host text, value text)", "create index ix_value on cookies(value)"],
+                       [("insert into cookies values(?, ?)", ("h%d" % i, v)) for i, v in enumerate(["zz-secret-1", "aa-secret-2", "mm-secret-3", "bb-secret-4"])])
+        conn = sqlite3.connect(db)
+        plain = "SELECT rowid, length(value), typeof(value) FROM cookies"
+        self.assertIn("COVERING INDEX", " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + plain)))
+        self.assertEqual([r[0] for r in conn.execute(plain)], [2, 4, 3, 1], "without the clause the rowids come ranked by the values")
+        skills = plain + " NOT INDEXED ORDER BY rowid"
+        plan = " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + skills))
+        self.assertNotIn("INDEX", plan)
+        self.assertNotIn("TEMP B-TREE", plan)
+        conn.close()
+        r = run_tool("sqlite_query", {"db_path": db, "sql": skills}, self.dir)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual([row["values"][0] for row in r.json["rows"]], [1, 2, 3, 4])
+        # WITHOUT ROWID: ordered by its primary key, never by the index on the secret column.
+        wr = self.make("wr.db", ["create table t(k text primary key, value text) without rowid", "create index ixv on t(value)"],
+                       [("insert into t values(?, ?)", ("k%d" % i, v)) for i, v in enumerate(["zz", "aa", "mm"])])
+        conn = sqlite3.connect(wr)
+        plan = " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN SELECT length(value), typeof(value) FROM t NOT INDEXED ORDER BY k"))
+        self.assertNotIn("ixv", plan)
+        self.assertNotIn("TEMP B-TREE", plan)
+        conn.close()
+
+    # --- P3-1: where the values file stops does not depend on how a value escapes ----------------------------------------
+
+    def test_where_the_values_file_stops_depends_on_no_values_content(self):
+        answers = {}
+        cap = 30000
+        for label, first in (("ascii", "a" * 1000), ("control", "\x01" * 1000), ("quote", '"' * 1000), ("two_byte", "é" * 500),
+                             ("astral", "\U0001F600" * 250)):
+            db = self.make("cap-%s.db" % label, ["create table t(s text)"],
+                           [("insert into t values(?)", (first,))] + [("insert into t values(?)", ("b" * 1000,))] * 39)
+            # The same path for every database, as the twins of the review: the answer names it.
+            same = self.path("inputs", "ev.db")
+            if os.path.exists(same):
+                os.unlink(same)
+            os.link(db, same)
+            out, env = self.job("o-" + label, "j000400")
+            proc = in_process("m.FILE_BYTES = %d\nm.LOCATORS_BYTES = 10 ** 9" % cap, {"db_path": same, "table": "t", "write_values": True}, env, self.dir)
+            j = json.loads(proc.stdout)
+            self.assertLessEqual(os.path.getsize(os.path.join(out, "sqlite-query-values.jsonl")), cap)
+            for k in ("database_sha256", "locators_file", "earlier_answers"):
+                j.pop(k, None)
+            answers[label] = j
+        first = answers["ascii"]
+        self.assertTrue(first.get("values_file_stopped_at_row"), first)
+        for label, j in answers.items():
+            self.assertEqual({k: j.get(k) for k in ("values_file_stopped_at_row", "cells_with_a_value", "resume", "row_count")},
+                             {k: first.get(k) for k in ("values_file_stopped_at_row", "cells_with_a_value", "resume", "row_count")}, label)
+            self.assertEqual(j, first, "the whole answer is the same: %s" % label)
+
+    def test_a_cells_reserve_is_never_less_than_its_line_and_follows_only_its_type_and_length(self):
+        import random
+        m = load_tool()
+        rnd = random.Random(144)
+        pools = ["a", "\x00", "\x01", "\x1f", '"', "\\", "/", "é", " ", "￿", "\U0001F600", " ", "z"]
+
+        def line(finding, locator, v):
+            if isinstance(v, m.NotExported):
+                extra = {"error_class": v.error, "sqlite_message": v.message} if v.error else {}
+                return len(json.dumps({"finding_id": finding, **locator, "not_exported": v.why, **extra}) + "\n")
+            if isinstance(v, bytes):
+                return len(json.dumps({"finding_id": finding, **locator, "value": {"blob_b64": base64.b64encode(v).decode("ascii")}}) + "\n")
+            return len(json.dumps({"finding_id": finding, **locator, "value": m.value_json(v)}) + "\n")
+
+        for i in range(3000):
+            pick = rnd.randrange(7)
+            if pick == 0:
+                v = "".join(rnd.choice(pools) for _ in range(rnd.randrange(60)))
+            elif pick == 1:
+                v = bytes(rnd.randrange(256) for _ in range(rnd.randrange(60)))
+            elif pick == 2:
+                raw = bytes(rnd.randrange(256) for _ in range(1 + rnd.randrange(60))) + b"\xff"
+                v = m.text_factory(raw)
+            elif pick == 3:
+                v = rnd.choice([0, -1, 2 ** 63 - 1, -2 ** 63, rnd.randrange(-10 ** 12, 10 ** 12)])
+            elif pick == 4:
+                v = rnd.choice([0.1, -1e300, 1e-310, float("nan"), float("inf"), float("-inf"), rnd.random()])
+            elif pick == 5:
+                v = m.NotExported("unreadable", "unreadable", None, rnd.choice(["OperationalError SQLITE_ERROR", "UnicodeDecodeError (sqlite's message is not UTF-8)"]),
+                                  "".join(rnd.choice(pools) for _ in range(rnd.randrange(80))))
+            else:
+                v = m.NotExported("value_too_large", rnd.choice(["text", "blob"]), rnd.choice([None, 70000000]))
+            kind, length = m.value_kind(v)
+            locator = {"table": rnd.choice(["t", "ta\"ble", "ét\x01"]), "rowid": rnd.choice([None, 7, -2 ** 63]), "n": 1 + i,
+                       "column": rnd.choice(["c", "c\nol"]), "type": kind, "length": length}
+            finding = "V%07d" % (1 + i)
+            self.assertGreaterEqual(m.line_reserve(finding, locator, v), line(finding, locator, v), repr(v))
+        # Same type and length, different content: the same reserve.
+        loc = {"table": "t", "rowid": None, "n": 1, "column": "c", "type": "text", "length": 6}
+        self.assertEqual(len({m.line_reserve("V0000001", loc, s) for s in ("aaaaaa", "\x01" * 6, '"' * 6, "é" * 3, "\U0001F600" + "ab")}), 1)
+        loc = dict(loc, type="text_not_utf8", length=4)
+        self.assertEqual(m.line_reserve("V0000001", loc, m.text_factory(b"\xff\xfe\xfd\xfc")),
+                         m.line_reserve("V0000001", loc, m.text_factory(b"ab\xffc")))
+
+    # --- P3-2: a WITHOUT ROWID key under an application's collation --------------------------------------------------------
+
+    def collated(self, name, ddl, keys):
+        path = self.path("inputs", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        for coll in ("LOCALIZED", "UNICODE"):
+            conn.create_collation(coll, lambda a, b: (a < b) - (a > b))      # reverse: the stored order is no byte order
+        for st in ddl:
+            conn.execute(st)
+        for k in keys:
+            conn.execute("insert into t(k, v, s) values(?, ?, ?)", k)
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_a_key_under_an_applications_collation_is_read_in_its_stored_order(self):
+        keys = [("apple", "v-apple", '{"a": 1}'), ("zebra", "v-zebra", "not json"), ("kiwi", "v-kiwi", '{"a": 3}'), ("mango", "v-mango", '{"a": 4}')]
+        db = self.collated("loc.db", ["create table t(k text collate LOCALIZED primary key, v text, s text) without rowid", "create index iv on t(v)"], keys)
+        out, env = self.job("o", "j000410")
+        r = self.export(db, "t", env, columns=["k", "v"])
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["table_kind"], r.json["n_ranks"], r.json["row_count"]), ("without_rowid", ["k"], 4))
+        self.assertEqual(r.json["collations_stood_in"]["names"], ["LOCALIZED"])
+        lines, end = self.values_lines(out)
+        self.assertTrue(end["complete"], end)
+        self.assertEqual([l["value"] for l in lines if l["column"] == "k"], ["zebra", "mango", "kiwi", "apple"], "the application's order, as stored")
+        # SQLite walks the table: no sort, no index, whatever the stand-in compares.
+        m = load_tool()
+        conn = sqlite3.connect("file:%s?mode=ro&immutable=1" % db, uri=True)
+        self.assertEqual(m.stand_in_collations(conn, "t"), ["LOCALIZED"])
+        info = list(conn.execute("PRAGMA table_xinfo(t)"))
+        stmt, _p = m.export_statement("t", "without_rowid", {"order_by": m.primary_key_order(conn, "t", info)[1]}, '"k"')
+        plan = " ".join(str(x[3]) for x in conn.execute("EXPLAIN QUERY PLAN " + stmt))
+        self.assertNotIn("TEMP B-TREE", plan)
+        self.assertNotIn("iv", plan)
+        conn.close()
+        # A composite key, the second part under another application collation and descending.
+        db2 = self.collated("uni.db", ["create table t(k text, v text collate UNICODE, s text, primary key(k, v desc)) without rowid"],
+                            [("a", "v1", "x"), ("a", "v3", "x"), ("b", "v2", "x")])
+        out2, env2 = self.job("o2", "j000411")
+        r2 = self.export(db2, "t", env2, columns=["k", "v"])
+        self.assertEqual(r2.code, 0, r2.stdout)
+        self.assertEqual(r2.json["collations_stood_in"]["names"], ["UNICODE"])
+        lines2, _end = self.values_lines(out2)
+        self.assertEqual([(l["n"], l["value"]) for l in lines2 if l["column"] == "v"], [(1, "v1"), (2, "v3"), (3, "v2")])
+
+    def test_a_collation_missing_outside_the_key_is_named_as_the_schemas_doing(self):
+        db = self.collated("gen.db", ["create table t(k text primary key, v text, s text) without rowid"], [("a", "v1", "x"), ("b", "v2", "y")])
+        self.with_generated(db, "s < 'm' COLLATE LOCALIZED", "g")
+        out, env = self.job("o", "j000412")
+        r = self.export(db, "t", env, columns=["g"])
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertEqual(r.json["reason"], "missing_collation")
+        self.assertIn("names a collation this SQLite does not have", r.json["error"])
+        self.assertNotIn("can depend on a value", r.json["error"])
+        _lines, end = self.values_lines(out)
+        self.assertIn("LOCALIZED", end["sqlite_message"])
+        m = load_tool()
+        self.assertTrue(m.missing_collation(sqlite3.OperationalError("no such collation sequence: LOCALIZED")), "Python before 3.11: the fixed words")
+        self.assertFalse(m.missing_collation(sqlite3.OperationalError("bad JSON path: 'no such collation sequence: x'")))
+
+    # --- P3-3: a virtual table is what SQLite says, whatever its statement's text ----------------------------------------
+
+    def test_a_virtual_table_with_a_comment_in_its_statement_is_still_virtual(self):
+        for module in ("fts5", "fts4"):
+            path = self.path("inputs", "vt-%s.db" % module)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            conn = sqlite3.connect(path)
+            conn.execute("create virtual table v using %s(body)" % module)
+            for docid, body in ((482915, "secret one"), (613377, "secret two"), (771203, "secret three")):
+                conn.execute("insert into v(rowid, body) values (?, ?)", (docid, body))
+            conn.commit()
+            conn.execute("pragma writable_schema = 1")
+            sql = conn.execute("select sql from sqlite_master where name = 'v'").fetchone()[0]
+            conn.execute("update sqlite_master set sql = ? where name = 'v'", (sql.replace("CREATE VIRTUAL TABLE", "CREATE /* x */ VIRTUAL TABLE", 1),))
+            conn.commit()
+            conn.close()
+            out, env = self.job("o-" + module, "j00042%d" % len(module))
+            r = self.export(path, "v", env)
+            self.assertEqual(r.stderr, "")
+            if r.code == 0:
+                self.assertEqual((r.json["table_kind"], r.json["locator"]), ("virtual", "n"), module)
+            else:
+                self.assertEqual(r.json["reason"], "virtual_table_unsupported", r.stdout)
+            for docid in ("482915", "613377", "771203"):
+                self.assertNotIn(docid, r.stdout, "a docid the application set is never printed (%s)" % module)
+            out2, env2 = self.job("o2-" + module, "j00043%d" % len(module))
+            ranged = self.export(path, "v", env2, rowid_from=600000)
+            self.assertEqual(ranged.code, 1, ranged.stdout)
+            self.assertIn(ranged.json["reason"], ("virtual_table", "virtual_table_unsupported"))
+            self.assertNotIn("613377", ranged.stdout)
+        # Where PRAGMA table_list is missing (SQLite before 3.37): the statement with its comments blanked, or no b-tree.
+        m = load_tool()
+
+        class NoTableList:
+            def execute(self, *_a):
+                raise sqlite3.OperationalError("unknown pragma")
+
+        self.assertTrue(m.is_virtual(NoTableList(), "v", "CREATE /* x */ VIRTUAL TABLE v USING fts5(body)", 9))
+        self.assertTrue(m.is_virtual(NoTableList(), "v", "CREATE TABLE v(body)", 0))
+        self.assertFalse(m.is_virtual(NoTableList(), "v", "CREATE TABLE v(body DEFAULT 'CREATE VIRTUAL TABLE')", 2))
+
+    # --- P3-4: OUT that is not a directory is said as such ---------------------------------------------------------------
+
+    def test_an_out_that_is_not_a_directory_is_said_as_such(self):
+        db = self.make("t.db", ["create table t(v text)"], [("insert into t values('value-1')", ())])
+        nowhere = self.path("nowhere")
+        dangling = self.path("out-dangling")
+        os.symlink(nowhere, dangling)
+        r = self.export(db, "t", {"JOB_ID": "j000440", "OUT": dangling})
+        self.assertEqual((r.code, r.stderr), (1, ""))
+        self.assertIn("OUT is a link to nothing", r.json["error"])
+        self.assertNotIn("already exists", r.json["error"])
+        self.assertFalse(os.path.lexists(nowhere))
+        plain = self.path("out-file")
+        with open(plain, "w") as fh:
+            fh.write("x")
+        r = self.export(db, "t", {"JOB_ID": "j000441", "OUT": plain})
+        self.assertEqual((r.code, r.stderr), (1, ""))
+        self.assertIn("OUT is not a directory", r.json["error"])
+        self.assertNotIn("already exists", r.json["error"])
+        self.assertEqual(self.read(plain), "x")
 
 
 if __name__ == "__main__":

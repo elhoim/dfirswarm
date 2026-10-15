@@ -733,7 +733,13 @@ import each other), and holds to this:
   tool reads the table itself, and a WITHOUT ROWID table (whatever its columns
   are named) or an INTEGER PRIMARY KEY table comes in the order of its key,
   which the answer names (`n_ranks`); SQLite reads a WITHOUT ROWID table
-  through a covering index unless the ORDER BY is its whole key. And an error
+  through a covering index unless the ORDER BY is its whole key. A locator
+  query a skill gives for use outside the mode reads the table the same way
+  (`SELECT rowid, length(col), typeof(col) FROM t NOT INDEXED ORDER BY rowid`):
+  without the clause an index on the column returns the rowids in its values'
+  order. Where a size cap stops an export is decided on what the answer prints
+  of each cell (its type and length), never on the bytes its value took, which
+  follow how the value escapes; the run's time still follows them. And an error
   message can quote a value (a generated column's `json_extract` does), and so
   can what Python makes of one (a message that quotes bytes that are not UTF-8
   is a `UnicodeDecodeError`): the answer says the row and what the error's code
