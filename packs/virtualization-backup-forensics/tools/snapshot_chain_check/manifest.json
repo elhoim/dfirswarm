@@ -44,7 +44,7 @@
     },
     "qemu_img": {
       "type": "string",
-      "description": "off (default), auto or require. auto runs `qemu-img info --output=json -f <format> <image>` once per parsed image of the set (never --backing-chain), when qemu-img is on PATH; require fails when it is not. A VMDK text descriptor and a QCOW2 image with an external data file are not given to it (qemu-img would open the files they name); a run that fails, times out or prints no JSON, and an eligible image left unchecked at qemu_img_max_images or the clock, make the answer partial. Its answer sits beside the native reading and replaces nothing"
+      "description": "off (default), auto or require. auto runs `qemu-img info --output=json -f <format> <image>` once per parsed image of the set (never --backing-chain), when qemu-img is on PATH; require fails when it is not. A VMDK text descriptor and a QCOW2 image with an external data file are not given to it (qemu-img would open the files they name), nor an extent another descriptor names; a run that fails, times out or prints no JSON, and an eligible image left unchecked at qemu_img_max_images or the clock, make the answer partial. Its answer sits beside the native reading and replaces nothing"
     },
     "qemu_img_max_images": {
       "type": "integer",
@@ -89,5 +89,5 @@
       }
     ]
   },
-  "sha256": "fb2998e479bb163ec52465bf687d6cb348e05b5f8428851408d965a51db6caa0"
+  "sha256": "d6a76b6e1470baf80f3c8ee953142e84eefbc8056734a51561bf50370f81d69e"
 }

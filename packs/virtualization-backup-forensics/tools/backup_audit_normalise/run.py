@@ -593,7 +593,7 @@ def withheld_summary(shower):
 # types) is shown as it is, as a GUID is.
 BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
 _GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
-_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@(?:[\w\[]|$))")
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@)")
 _SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
 _BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
 _TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")

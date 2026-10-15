@@ -728,7 +728,10 @@ test("files made by a real qemu-img are read as qemu-img reads them: sizes, back
     // and the optional second reading agrees with the first, through the real program
     const second = body(await tool(CHAIN, cwd, { root: "inputs/real", qemu_img: "require" }));
     assert.equal(second.qemu_img.available, true);
-    assert.ok(second.qemu_img.checked >= 8);
+    assert.equal(second.status, "complete", second.status_basis);
+    assert.ok(second.qemu_img.checked >= 7);
+    assert.equal(second.qemu_img.failed, 0);
+    assert.equal(second.qemu_img.skipped.text_descriptor, 1, "two.vmdk is a text descriptor");
     assert.deepEqual((await rowsOf(cwd, second, "markers")).filter((m) => m.kind === "qemu_img_disagrees"), []);
   });
 });
@@ -826,6 +829,15 @@ test("qemu_img never opens a name a file holds: a VMDK text descriptor and a QCO
     assert.deepEqual(calls.map((c) => c[c.length - 1].split("/").pop()), ["plain.qcow2"], "only the image that names no other file was given to qemu-img");
     assert.deepEqual(out.qemu_img.skipped, { text_descriptor: 1, external_data_file: 1 });
     assert.equal(out.qemu_img.checked, 1);
+    // a split disk: its text descriptor names extents that are sparse files with a descriptor of their own (as qemu-img's
+    // twoGbMaxExtentSparse writes them); the disk is the descriptor, so its extents are not given to qemu-img either
+    await put(cwd, "inputs/s/two.vmdk", vmdkDescriptor({ cid: "aabbccd1", createType: "twoGbMaxExtentSparse", extents: [{ sectors: 2048, type: "SPARSE", name: "two-s001.vmdk" }] }));
+    await put(cwd, "inputs/s/two-s001.vmdk", vmdkSparse({ descriptor: vmdkDescriptor({ cid: "aabbccd1", createType: "twoGbMaxExtentSparse", extents: [{ sectors: 2048, type: "SPARSE", name: "two-s001.vmdk" }] }) }));
+    await writeFile(log, "");
+    out = json(await tool(CHAIN, cwd, { root: "inputs/s", qemu_img: "auto" }, { QEMU_STUB_LOG: log }, bin));
+    assert.equal((await readFile(log, "utf8")).trim(), "", "neither the descriptor nor its extent was given to qemu-img");
+    assert.deepEqual(out.qemu_img.skipped, { text_descriptor: 1, extent_of_another_descriptor: 1 });
+    assert.equal(out.status, "complete");
     // a failing qemu-img: the second reading is missing, and the answer says so
     out = json(await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto" }, { QEMU_STUB_MODE: "fail" }, bin));
     assert.equal(out.status, "partial");

@@ -32,7 +32,7 @@ a version this tool does not know is reported and not read.
 qemu-img is run only when asked (qemu_img: auto or require), once per image of the set with the format fixed and never
 with --backing-chain, and its answer is kept beside the native reading and never replaces it; a run that fails or times
 out makes the answer partial. A VMDK text descriptor and a QCOW2 image with an external data file are not given to it,
-because qemu-img opens the files those name. Nothing in the set is executed, and a name inside a file is looked up among
+because qemu-img opens the files those name, nor is an extent another descriptor names. Nothing in the set is executed, and a name inside a file is looked up among
 the files given, never opened by this tool: a parent named outside the set is reported as missing.
 
 SENSITIVE OUTPUT. Names, hints, snapshot names and descriptions are shown after the shape check of the shared block:
@@ -591,7 +591,7 @@ def withheld_summary(shower):
 # types) is shown as it is, as a GUID is.
 BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
 _GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
-_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@(?:[\w\[]|$))")
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@)")
 _SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
 _BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
 _TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")
@@ -2191,7 +2191,8 @@ def main():
     if qemu_mode != "off":
         qemu_report["note"] = ("qemu-img info was run once per image of the set with the format fixed and without --backing-chain; its answer sits beside the "
                                "native reading in `qemu_img` of the disk row and replaces nothing. A VMDK text descriptor and a QCOW2 image with an external "
-                               "data file are not given to it: qemu-img would open the files they name, which can lie outside the set")
+                               "data file are not given to it (qemu-img would open the files they name, which can lie outside the set), nor an extent "
+                               "another descriptor names (the disk is that descriptor)")
         cross, failed_runs = [], []
         skipped = collections.Counter()
         skipped_first = {}
@@ -2203,6 +2204,8 @@ def main():
             why = None
             if d["format"] == "vmdk" and nodes[fid]["row"]["kind"] != "vmdk_sparse":
                 why = "text_descriptor"           # qemu-img would open its extents by the names it holds
+            elif fid in extent_targets:
+                why = "extent_of_another_descriptor"   # a split disk's extent: the disk is its descriptor, which qemu-img is not given
             elif d.get("external_data_file"):
                 why = "external_data_file"        # qemu-img would open the data file by the name the header holds
             elif count >= qemu_max:

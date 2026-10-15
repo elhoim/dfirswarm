@@ -57,6 +57,7 @@ function shapes(): Record<string, Shape> {
     base64_key16: make(mixed(10) + "/" + mixed(11) + "=="),
     url_userinfo: make(`https://svc:${pw}@h.example.test/x`, pw),
     bare_userinfo: make(`svc:${pw}@h.example.test`, pw),
+    userinfo_odd_host: make(`svc:${pw}@-mon1.example.test`, pw),
     storage_userinfo: make(`cephstore:svc:${pw}@mon1.example.test`, pw),
     path_userinfo: make(`/mnt/svc:${pw}@nas/share`, pw),
     long129: make(mixed(129)),
