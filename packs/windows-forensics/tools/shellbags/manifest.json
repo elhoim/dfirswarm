@@ -35,7 +35,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 5,
-  "sha256": "6150f23daae8ea56d508b96b985f388954f29577cc4c7436a10fe19320b16bff",
+  "sha256": "45dc6d07907698b17315a3d13f5633b6e1764dd030b317ae3fbb562a3c63339b",
   "use": {
     "extensions": [
       ".dat"
