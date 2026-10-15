@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import * as P from "../extensions/protocol.ts";
-import { sensitiveEntries } from "../scripts/output-hygiene.ts";
+import { argIsSet, declaredSecretOutput, ownSensitivity, parseSecretDeclaration, sensitiveEntries } from "../scripts/output-hygiene.ts";
 import { storePaths } from "../scripts/evidence-store.ts";
 import { describe, JobService } from "../scripts/job-service.ts";
 import { redactPackage } from "../scripts/package-tools.ts";
@@ -272,4 +272,24 @@ test("recovery_key_scan declares the same, and writes no value in a job that is 
   assert.match(answer.error, /not run as secret output/);
   assert.equal(existsSync(join(storePaths(S).jobs, hand.id, "out", "recovery-passwords.jsonl")), false);
   await svc.stop("test over");
+});
+
+test("an argument is set when it is true, a number but zero, or a string, list or object with something in it", () => {
+  for (const v of [true, 1, -2, 0.5, "x", " ", [0], [""], { a: 1 }]) assert.equal(argIsSet(v), true, JSON.stringify(v));
+  for (const v of [undefined, null, false, 0, Number.NaN, "", [], {}]) assert.equal(argIsSet(v), false, String(v));
+  const params = { write_values: {}, text: {} };
+  const parsed = parseSecretDeclaration({ when_args: ["write_values", "text"] }, params, true);
+  assert.ok(parsed.ok);
+  const declaration = parsed.ok ? parsed.declaration : null;
+  assert.equal(declaredSecretOutput(declaration, {}), false);
+  assert.equal(declaredSecretOutput(declaration, { text: "a" }), true);
+  assert.equal(declaredSecretOutput(declaration, { write_values: false, text: "" }), false);
+  assert.equal(declaredSecretOutput(null, { write_values: true }), false, "no declaration, no effect");
+  assert.deepEqual(parseSecretDeclaration(undefined, params, false), { ok: true, declaration: null });
+  assert.equal(parseSecretDeclaration(undefined, params, true).ok, false, "a key that is present and undefined (not JSON) is not understood");
+  assert.equal(parseSecretDeclaration({ when_args: ["__proto__"] }, params, true).ok, false, "a name is a parameter the tool has, not one every object has");
+  assert.equal(parseSecretDeclaration({ when_args: ["toString"] }, params, true).ok, false);
+  assert.equal(ownSensitivity({ secret_output: true, secret_output_by: "tool_manifest" })?.declared, "tool_manifest");
+  assert.equal(ownSensitivity({ secret_output: true })?.declared, undefined);
+  assert.equal(ownSensitivity({ secret_output_by: "tool_manifest" }), null, "the flag decides, not the note about where it came from");
 });
