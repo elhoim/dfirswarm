@@ -41,5 +41,5 @@
   ],
   "purpose": "inventory",
   "covers": "What capa and FLOSS each wrote about a PE or ELF file, as the program said it (coverage.json: per-engine status, argv, version output, exit code, bytes; limits_hit, warnings, errors). A rule match is a hypothesis about what the code could do and a recovered string is derived; neither is behaviour, reachability or intent. It does not run the sample, does not run an engine that is not installed, and a status other than complete names what is missing. capa.json and floss.json can hold credentials: coverage.json, index.tsv and matches.tsv copy none.",
-  "sha256": "0ca23f1950bedffc6bf2bd09556e35cf8eca23aaf4916585eb9c61903a65873b"
+  "sha256": "ae98a3549b1e4bcafcfa04fb12b44d2f739170fa99887e1c36527eb917a346e2"
 }

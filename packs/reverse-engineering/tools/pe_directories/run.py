@@ -446,6 +446,9 @@ KEYVALUE_SECRET = re.compile(r"((?:(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"?" + 
                              r"|" + _KV_QUOTE + r"(?:token|secret|credentials?|auth|sig)" + _KV_QUOTE + _KV_GAP + r":)" + _KV_GAP + r")"
                              r"(?:(" + _KV_QUOTE + r")(?!<withheld )((?:(?!" + _KV_ENTITY + r")[^\"'\r\n]){1,512})(?=[\"']|" + _KV_ENTITY + r")"
                              r"|" + _KV_QUOTE + r"?(?!" + _KV_QUOTE + r"|\\{1,2}(?:x09|t))(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
+# The letters any name of the rule above has in it. A text without them is not read by the rule, which would otherwise try every name at every
+# position of it: the test is a few times cheaper than the rule on a text of any other kind.
+KEYVALUE_HINT = re.compile(r"pw|pass|psw|secret|private|token|key|cred|auth|sig", re.I)
 ELEMENT_SECRET = re.compile(r"((?:<|&lt;)(?:password|passwd|passphrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
                             r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret)(?:>|&gt;))((?:(?!&lt;)[^<>\r\n]){1,512})(?=<|&lt;)", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
@@ -647,7 +650,7 @@ def _shown_pass(out):
     if "@" in out:
         # first: a rule that withheld a piece of a password with a `:` in it would leave the marker, which breaks the token this one reads
         out = slash_userinfo(out)
-    if "=" in out or ":" in out:
+    if ("=" in out or ":" in out) and KEYVALUE_HINT.search(out):
         # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)

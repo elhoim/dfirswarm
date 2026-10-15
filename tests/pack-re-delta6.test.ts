@@ -209,6 +209,26 @@ test("P2-2 text that merely looks like these forms is kept: a key with no value,
   }
 });
 
+test("P2-2 the cheap pre-test of the secret-named key rule holds every name the rule has, and the rule finds nothing in a text the pre-test passes over (2,000 random strings, in every copy)", () => {
+  for (const path of COPIES) {
+    const r = py(path, [
+      "names = ['password', 'passwd', 'passphrase', 'pwd', 'pswd', 'psw', 'secret_key', 'private-key', 'secret', 'client_secret', 'token', 'api_key', 'access-key',",
+      "         'account_key', 'shared_access_key', 'credential', 'credentials', 'pw', 'pass', 'auth', 'sig']",
+      "missing = [n for n in names if not m.KEYVALUE_HINT.search(n)]",
+      "rnd = random.Random(88)",
+      `atoms = ['=', ':', ' ', '\\t', '"', "'", '&quot;', '\\\\"', 'value', 'x', 'abc', '12', ';', '/', '@', '<', '>', 'word', 'a_b']`,
+      "bad = 0",
+      "for _ in range(2000):",
+      "    t = ''.join(rnd.choice(atoms) for _ in range(rnd.randrange(1, 40)))",
+      "    if not m.KEYVALUE_HINT.search(t) and m.KEYVALUE_SECRET.search(t):",
+      "        bad += 1",
+      "print(json.dumps({'missing': missing, 'bad': bad}))",
+    ].join("\n"));
+    assert.equal(r.status, 0, `${path}: ${r.stderr}`);
+    assert.deepEqual(JSON.parse(r.stdout), { missing: [], bad: 0 }, path);
+  }
+});
+
 test("P2-2 the secret-named key rule and the element rule take time linear in the text: 128 KB and 512 KB of each hostile shape, the larger at most 4.5 times the smaller plus a quarter of a second, and none over 3 s", () => {
   for (const path of COPIES) {
     const r = py(path, [
