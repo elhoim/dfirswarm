@@ -589,7 +589,7 @@ class Shown(str):
 # the cut, and a run of name characters the cut ends might be the head of a token: each is withheld whole.
 _OPEN_AUTHORITY = re.compile(r"(?<=//)[^/?#\s]*$")
 _OPEN_BARE = re.compile(r"[^\s/@:<>]{1,64}:[^\s/@<>]*$")
-_OPEN_RUN = re.compile(r"[A-Za-z0-9_+%/=.:@-]+$")
+_RUN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%/=.:@-")
 
 
 def cut_safely(text, limit):
@@ -598,8 +598,11 @@ def cut_safely(text, limit):
     if len(text) <= limit:
         return text
     head = text[:limit]
-    if _OPEN_RUN.match(text, limit):          # the cut fell inside a run
-        head = _OPEN_RUN.sub(lambda m: _withheld("open run at a cut", len(m.group()), "cut"), head)
+    if limit > 0 and text[limit] in _RUN_CHARS and head[-1] in _RUN_CHARS:      # the cut fell inside a run: the run's head is withheld whole
+        start = limit
+        while start > 0 and head[start - 1] in _RUN_CHARS:
+            start -= 1
+        head = head[:start] + _withheld("open run at a cut", limit - start, "cut")
     head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
     return _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
 
@@ -676,8 +679,10 @@ def withheld_summary(shower):
 # (a GUID in a Hyper-V file name, the volume id of /vmfs/volumes/<id>/, naa.<hex>, the name Windows gives a machine nobody named).
 # Anything else is shown as <withheld: N bytes, field F>; a path is judged component by component, and when a component is
 # withheld as a piece of a base64 key the key's other pieces next to it (across a `/`) are withheld with it. The original goes to the
-# values file when one was asked for (write_text, a job). A name shorter than the run threshold is shown whatever it is: a
-# short password used as a VM name is not recognised.
+# values file when one was asked for (write_text, a job). A key piece with something glued to it (`local:`, `[ds1] `, a quote, a
+# JSON brace) is judged by the stretch of key at its end next to the `/`. An iqn. or t10. id is shown as an id only when what it holds
+# is a name and not a stretch of random text. A name shorter than the run threshold is shown whatever it is: a short password used
+# as a VM name is not recognised.
 #
 # LAYER 2, a deny-list, for every other string (a description, an annotation, an audit action or actor, a message, any text
 # the tool wrote around a name). The string is first normalised by Unicode property, not by a list: characters of the
@@ -690,8 +695,8 @@ def withheld_summary(shower):
 # token, credential, api/access/account/private/secret/master/shared/signing/encryption key, authorization, bearer, dsn,
 # webhook url, connection string, ssh key, snmp community, and pass, pw, auth, sig, sas, otp, psk, pin at the start of a word,
 # in any case, glued or CamelCase, with up to two digits after the name: vncPassword=, adminPassword=, SecretAccessKey:,
-# PGPASSWORD=, MYSQL_PWD=, sig=, cipassword:, password1=, pass_word:, and `--password <value>`, `--passphrase <value>`,
-# `set password <value>`). A name not in this list (a bare key, community, webhook or url; "the password is X") is not
+# PGPASSWORD=, MYSQL_PWD=, sig=, cipassword:, password1=, pass_word:, and `--password <value>`, `-password <value>`, `--passphrase <value>`,
+# `set password <value>`; a value in angle brackets is a value, unless it is a placeholder word: <redacted>, <password>). A name not in this list (a bare key, community, webhook or url; "the password is X") is not
 # recognised. The rules are applied until they change nothing more.
 #
 # LAYER 3, the backstop, written apart from the two layers above (its own normaliser, patterns, named-secret search and
@@ -812,20 +817,23 @@ _TOKEN_HEAD = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4
 # The value after a name that says it is a secret, found anywhere in the string: the secret word first (glued to whatever comes
 # before it, in any case: vncPassword, adminpass, dbPwd; `pass` not after by, com, over, under, tres, encom, sur or im, so that
 # bypass: and compass: are words), then `=` or `:` (quotes and a little space allowed), then the value and up to three more words
-# of it. An error message's `token: line 3, column 5` is not a value.
+# of it. An error message's `token: line 3, column 5` is not a value. A value in angle brackets is a value, whatever it holds: only a
+# placeholder word the tool knows (<redacted>, <password>, <secret>, <token>, <hidden>, <masked>, <value>, <your-password>, <***> ...) is
+# not (_PLACEHOLDER).
+_PLACEHOLDER = r"<(?i:redacted|hidden|masked|removed|omitted|secret|password|passwd|passphrase|pwd|pass|token|key|value|placeholder|empty|none|null|unset|your[ _-]?(?:password|secret|token|key)|\*{1,16})?>"
 _NAMED_SECRET = re.compile(
     r"(?:(?i:pass[_-]?w(?:or)?d|passwd|passphrase|pwd|secret|token|credentials?|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|master[_-]?key"
     r"|shared[_-]?key|signing[_-]?key|encryption[_-]?key|secret[_-]?key|authorization|bearer|dsn|webhook[_-]?url|connection[_-]?string|ssh[_-]?key"
     r"|snmp[_-]?community|community[_-]?string)"
     r"|(?<![Bb]y)(?<![Cc]om)(?<![Oo]ver)(?<![Uu]nder)(?<![Tt]res)(?<![Ee]ncom)(?<![Ss]ur)(?<![Ii]m)(?i:pass)"
     r"|(?i:pw|auth|sig|sas|otp|psk|pin))s?[0-9]{0,2}(?:\\{0,3}[\"'])?[ \t]{0,2}[=:][ \t]{0,2}(?:\\{0,3}[\"'])?"
-    r"((?!line[ \t]+[0-9])[^\s\"'<>;,&\\][^\s\"'<>;,&]*(?:[ \t]+[^\s\"'<>;,&=:]+){0,3})")
-_NAMED_FLAG = re.compile(r"(?<![\w-])--?(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth|bearer|psk)(?:=|[ \t]+)(?!-)([^\s\"']+)")
-_NAMED_SET = re.compile(r"(?<![\w-])(?i:set|enable)[ \t]+(?i:passw(?:or)?d|secret|passphrase|token)[ \t]+(?:[0-9][ \t]+)?([^\s\"']+)")
+    r"((?!line[ \t]+[0-9])(?!" + _PLACEHOLDER + r")(?:<[^<>\"'\n]{0,200}>|[^\s\"'>;,&\\][^\s\"'<>;,&]*(?:[ \t]+[^\s\"'<>;,&=:]+){0,3}))")
+_NAMED_FLAG = re.compile(r"(?<![\w-])--?(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth|bearer|psk)(?:=|[ \t]+)(?!-)(?!" + _PLACEHOLDER + r")([^\s\"']+)")
+_NAMED_SET = re.compile(r"(?<![\w-])(?i:set|enable)[ \t]+(?i:passw(?:or)?d|secret|passphrase|token)[ \t]+(?:[0-9][ \t]+)?(?!" + _PLACEHOLDER + r")([^\s\"']+)")
 _LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
 # A string none of whose rules can match is passed without the slow path: every rule needs one of these.
-_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|--|-----BEGIN")
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|-(?i:pass|pwd|secret|token|api|access|client|auth|bearer|psk)|-----BEGIN")
 _PIECE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
 _DIGIT_PLUS = re.compile(r"[0-9+]")
 _SEALED = {}
@@ -983,7 +991,34 @@ _ID_EMBEDDED = re.compile(
     r"(?<![A-Za-z0-9])(?:WIN-[A-Z0-9]{11}|DESKTOP-[A-Z0-9]{7}|LAPTOP-[A-Z0-9]{8}|\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?|[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|naa\.[0-9a-fA-F]{16,32}|eui\.[0-9a-fA-F]{16}|wwn-0x[0-9a-fA-F]{16}|vml\.[0-9a-fA-F]{20,40}"
     r"|iqn\.[0-9]{4}-[0-9]{2}\.[a-z0-9][a-z0-9.-]{0,60}(?::[A-Za-z0-9._-]{1,40})?"
-    r"|t10\.[A-Za-z]{2,12}_+[A-Za-z0-9 _.-]{1,50}_+[A-Za-z0-9]{4,30})(?![A-Za-z0-9])")
+    r"|t10\.[A-Za-z]{2,12}_[A-Za-z0-9 _.-]{1,50}_[A-Za-z0-9]{4,24})(?![A-Za-z0-9])")
+# A run of underscores in a t10. id is read by the class beside it, never by two `_+` around it: that pair tried every split of the run
+# (`t10.AB` and 4,000 underscores took 3 s). An iqn. or t10. form carries a name the evidence chose, so it is accepted as an id only
+# when what it carries is a name and not a stretch of random text (_id_plausible); otherwise it is judged like any other text.
+_ID_SEGMENT = re.compile(r"[^_ ]+")
+
+
+def _id_plausible(text):
+    """Whether an iqn. or t10. id holds names: an iqn. whose domain and target have no token-like run, a t10. whose vendor, model and
+    serial pieces are short or do not mix capitals, small letters and digits as random text does. A GUID or a hexadecimal id is as it is."""
+    if text.startswith("iqn."):
+        return not any(_token_like(run) for run in _RUN_CAND.findall(text[12:]))
+    if text.startswith("t10."):
+        for piece in _ID_SEGMENT.findall(text[4:]):
+            if len(piece) >= 16 and (len(piece) > 24 or (_HAS_LOWER.search(piece) and _HAS_UPPER.search(piece) and _HAS_DIGIT.search(piece) and _token_like(piece))):
+                return False
+    return True
+
+
+def _id_sub(text, fill):
+    """`text` with each id of a kind in it replaced by fill(id); an iqn. or t10. form that is not plausible stays as the text it is."""
+    return _ID_EMBEDDED.sub(lambda m: fill(m.group()) if _id_plausible(m.group()) else m.group(), text)
+
+
+def _id_is(text):
+    return _ID_EMBEDDED.fullmatch(text) is not None and _id_plausible(text)
+
+
 # the forms an identifier field may hold: a GUID, a VMFS volume id, VMware's uuid bytes, up to 16 hexadecimal digits (a CID), 32 (a
 # content id), a number, a MAC or WWN, a device id, a counter (S000001), a short word (snapshot0, current, vm-100)
 _ID_FORMS = re.compile(
@@ -1092,15 +1127,15 @@ def _ident_text_ok(text, limit, path, slash=False):
         if any(unicodedata.category(c) in _STRIP_CATS or ord(c) in _FILLERS or not (c.isascii() or c.isalnum()) for c in n):
             return False
         text = "".join(c if c.isascii() else "a" for c in n)
-    probe = _SEP_DIGITS.sub("", _ID_EMBEDDED.sub("x", text)) if len(text) >= 12 else _SEP_DIGITS.sub("", text)
+    probe = _SEP_DIGITS.sub("", _id_sub(text, lambda _: "x")) if len(text) >= 12 else _SEP_DIGITS.sub("", text)
     if path and ":" in probe:
         head, _, tail = probe.partition(":")       # a drive (C:), a storage id (local-lvm:vm-100-disk-0), host:port
         if ":" in tail or not _DRIVE.fullmatch(head):
             return False
         probe = head + tail
-    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(_ID_EMBEDDED.sub("x", text)):
+    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(_id_sub(text, lambda _: "x")):
         return False
-    scan = _ID_EMBEDDED.sub(" ", text) if len(text) >= 15 else text
+    scan = _id_sub(text, lambda _: " ") if len(text) >= 15 else text
     for m in _RUN_CAND.finditer(scan):
         if _token_like(m.group()):
             return False
@@ -1129,28 +1164,49 @@ def _ident(text, kind, field, where):
         _keep_original(orig, field, where)
         return "<withheld: %d bytes, field %s>" % (blen(orig), field if field_kind(field) else "name")
     if kind == "id":
-        if (_ID_FORMS.fullmatch(body) or _ID_EMBEDDED.fullmatch(body)) and not _DENY_IN_IDENT.search(body):        # the ids a name or a path shows (t10., iqn.) are shown in an id field too
+        if (_ID_FORMS.fullmatch(body) or _id_is(body)) and not _DENY_IN_IDENT.search(body):        # the ids a name or a path shows (t10., iqn.) are shown in an id field too
             return text
         return _withhold_field(text, field, where)
     if kind == "path":
         parts = _SEP.split(body)
         ok = [i % 2 == 1 or not p or _MARKER.fullmatch(p) is not None or p in OWN_NAMES or _ident_text_ok(p, 255, True) for i, p in enumerate(parts)]
-        seeds = {i for i in range(0, len(parts), 2) if not ok[i] and _KEY_PIECE.fullmatch(parts[i].partition(".")[0])}      # a piece withheld that a key's pieces are made of
+        # What each piece holds at the edge a key's neighbour would join: a piece of the key alphabet alone is all key; a piece with
+        # something glued to it (`local:`, `[ds1] `, `C:`, a quote or a brace, an error message) holds a stretch of key at the end that
+        # is not glued (its tail, for the piece left of a `/`, its head for the piece right of one). A withheld piece whose edge is
+        # a stretch of key seeds the sweeps below like a withheld piece of the key alphabet alone.
+        pure, heads, tails, seeds_r, seeds_l = set(), {}, {}, set(), set()
+        for i in range(0, len(parts), 2):
+            stem = parts[i].partition(".")[0]
+            if _KEY_PIECE.fullmatch(stem):
+                pure.add(i)
+                heads[i] = tails[i] = stem
+                if not ok[i]:                       # a piece withheld that a key's pieces are made of
+                    seeds_r.add(i)
+                    seeds_l.add(i)
+            else:
+                heads[i], tails[i] = _key_head(stem), _key_tail(parts[i])
+                if not ok[i]:
+                    if _key_edge(tails[i]):
+                        seeds_r.add(i)
+                    if _key_edge(heads[i]) or (len(heads[i]) >= 3 and heads[i].endswith("=") and heads[i].rstrip("=")):      # the padding of a key
+                        seeds_l.add(i)
         run = []                                    # two pieces in a row that look like stretches of a base64 key: the key was cut by its `/`
         for i in range(0, len(parts), 2):
-            if ok[i] and _piece_random(_ID_EMBEDDED.sub("", parts[i])):          # a GUID, a volume id or a default machine name in a piece is not a stretch of a key
+            if ok[i] and _piece_random(_id_sub(parts[i], lambda _: "")):          # a GUID, a volume id or a default machine name in a piece is not a stretch of a key
                 run.append(i)
                 continue
             if len(run) >= 2:
                 for j in run:
                     ok[j] = False
-                    seeds.add(j)
+                    seeds_r.add(j)
+                    seeds_l.add(j)
             run = []
         if len(run) >= 2:
             for j in run:
                 ok[j] = False
-                seeds.add(j)
-        scan = _ID_EMBEDDED.sub(lambda m: " " * len(m.group()), body)
+                seeds_r.add(j)
+                seeds_l.add(j)
+        scan = _id_sub(body, lambda found: " " * len(found))
         i0 = pos0 = 0                                    # the first piece that can overlap the next run (runs come in order: each piece is passed once)
         for m in _PATH_RUN.finditer(scan):               # a run of letters and digits that goes across `/` is judged as one: a base64 key cut by its slashes
             while i0 < len(parts) and pos0 + len(parts[i0]) <= m.start():
@@ -1170,11 +1226,14 @@ def _ident(text, kind, field, where):
                     hit.pop()
                 for i, _ in hit:
                     ok[i] = False
-                    seeds.add(i)
-        # A key cut by its `/` is withheld in every piece: from a withheld piece of a key's alphabet, the pieces next to it across a
+                    seeds_r.add(i)
+                    seeds_l.add(i)
+        # A key cut by its `/` is withheld in every piece: from a withheld piece whose edge is key, the pieces next to it across a
         # `/` (an empty one for `//`, a short one only if a random-looking one follows it) are withheld as far as the last random-looking
-        # one. One sweep to the right and one to the left, each piece read twice at most.
+        # one; a piece with something glued to it ends the key, and is withheld when the edge toward the key is a random-looking stretch.
+        # One sweep to the right and one to the left, each piece read twice at most.
         for step in (2, -2):
+            seeds = seeds_r if step == 2 else seeds_l
             active, pending = False, []
             for k in (range(0, len(parts), 2) if step == 2 else range(len(parts) - 1, -1, -2)):
                 before = k - 1 if step == 2 else k + 1
@@ -1190,9 +1249,10 @@ def _ident(text, kind, field, where):
                     continue
                 elif not ok[k]:
                     take, pending = pending, []
-                elif not _KEY_PIECE.fullmatch(stem) or _ID_EMBEDDED.fullmatch(parts[k]):
+                elif k not in pure or _id_is(parts[k]):
+                    edge = heads[k] if step == 2 else tails[k]
+                    take = pending + [k] if k not in pure and _key_edge(edge, 4) else []
                     active, pending = False, []
-                    continue
                 elif _randomish(stem):
                     take, pending = pending + [k], []
                 elif len(stem) <= 8:
@@ -1203,6 +1263,9 @@ def _ident(text, kind, field, where):
                     continue
                 for j in take:
                     ok[j] = ok[j] and not parts[j]
+        for i in range(2, len(parts) - 2, 2):       # one random-looking piece between two that are withheld is the middle of the key
+            if ok[i] and i in pure and parts[i - 1] == "/" == parts[i + 1] and not ok[i - 2] and not ok[i + 2] and len(heads[i]) >= 8 and _randomish(heads[i]) and not _id_is(parts[i]):
+                ok[i] = False
         if all(ok):
             return text
         _keep_original(orig, field, where)
@@ -1215,6 +1278,29 @@ def _ident(text, kind, field, where):
 
 _SEP = re.compile(r"([/\\])")
 _KEY_PIECE = re.compile(r"[A-Za-z0-9+=_-]+")
+_KEY_SET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+=_-")
+
+
+def _key_edge(edge, least=8):
+    """The end of a piece that has something glued to it, next to a `/`: `least` or more characters of the key alphabet that mix capitals,
+    small letters and digits or capitals inside a word as a stretch of a key does (a time stamp, `vm-100-disk-0` and a plain word do not)."""
+    return len(edge) >= least and _randomish(edge) and _HAS_UPPER.search(edge) is not None and _HAS_LOWER.search(edge) is not None
+
+
+def _key_head(text):
+    """The longest start of `text` made of the key alphabet [A-Za-z0-9+=_-] (a scan, not a pattern: linear whatever follows)."""
+    n = 0
+    while n < len(text) and text[n] in _KEY_SET:
+        n += 1
+    return text[:n]
+
+
+def _key_tail(text):
+    """The longest end of `text` made of the key alphabet."""
+    n = len(text)
+    while n > 0 and text[n - 1] in _KEY_SET:
+        n -= 1
+    return text[n:]
 _SURROGATE_BYTE = re.compile("[\udc80-\udcff]")
 
 
@@ -1394,6 +1480,10 @@ _S_HEX = re.compile(r"[0-9A-Fa-f-]+")
 _S_IDS = re.compile(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|(?:naa|eui|wwn-0x|vml)\.?[0-9A-Fa-f]{16,40}|t10\.[A-Za-z0-9_.]{8,120}"
                     r"|iqn\.[0-9]{4}-[0-9]{2}\.[a-z0-9][a-z0-9.-]{0,60}(?::[A-Za-z0-9._-]{1,40})?")
 _S_MARK = re.compile(r"<[^<>]{0,80}withheld[^<>]{0,100}>")
+# a value in angle brackets is a value; only the empty brackets (what a marker leaves) and a placeholder word are not
+_S_PH = r"<(?:redacted|hidden|masked|removed|omitted|secret|password|passwd|passphrase|pwd|pass|token|key|value|placeholder|empty|none|null|unset|your[ _-]?(?:password|secret|token|key)|\*{1,16})?>"
+_S_FLAG = re.compile(r"(?<![\w-])(?:--?(?:pass|password|passwd|passphrase|pwd|secret|token|apikey|api-key|api_key|access[-_]?key|client[-_]secret|auth|bearer|psk)|(?:set|enable)[ \t]+(?:password|secret|passphrase|token))[= ](?!" + _S_PH + r")\S", re.I)
+_S_PHM = re.compile(_S_PH, re.I)
 
 
 def _class(c):
@@ -1434,9 +1524,10 @@ def _s_named(flat):
             return False
         i = m.start()
         pos = m.end()
-        after = flat[i + 1:i + 6].lstrip(" \t\"'\\")
-        if not after or after[0] in "<>" or _S_LINE.match(flat, i + 1):
-            continue                                  # nothing after it, a marker, or an error message's `: line 3, column 5`
+        raw = flat[i + 1:i + 6]
+        after = raw.lstrip(" \t\"'\\")
+        if not after or after[0] == ">" or _S_LINE.match(flat, i + 1) or (after[0] == "<" and _S_PHM.match(flat, i + 1 + len(raw) - len(after))):
+            continue                                  # nothing after it, a placeholder or what a marker leaves, or an error message's `: line 3, column 5`
         j = i
         while j > 0 and flat[j - 1] in " \t\"'\\" and i - j < 5:
             j -= 1
@@ -1465,7 +1556,7 @@ def _suspect(text):
     if _S_PEM.search(flat):
         return "a PEM marker"
     bare = _S_IDS.sub(" ", flat)
-    if _s_named(bare) or re.search(r"(?<![\w-])(?:--?(?:pass|password|passwd|passphrase|pwd|secret|token|apikey|api-key|api_key|client[-_]secret|bearer|psk)|(?:set|enable)[ \t]+(?:password|secret|passphrase|token))[= ](?!<)\S", flat, re.I):
+    if _s_named(bare) or _S_FLAG.search(flat):
         return "a named secret"
     if _S_DIGITS.search(bare):
         return "a long digit run"
