@@ -494,8 +494,14 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
     (the least built, pulled and listed for nothing the run asked for), then
     the profile's name. The order of images/profiles.json decides nothing.
     The base pack alone (it names the Sleuth Kit programs, which the `base`
-    image lacks) and a pack of stdlib Python that no profile lists are cases
-    of it.
+    image lacks) is held by `core`, the profile of that pack alone, which has
+    the fewest packs of any holder; a pack no profile lists that depends on the
+    base pack, or names only programs the base pack names and imports only
+    the Python packages it installs, is covered by `core` for the same reason. A pack that names a program the base pack does
+    not (the Volatility or tshark of another pack) is not covered by `core`,
+    and goes to the smallest profile that names it, or to `full`. A run with
+    no packs at all (and no library tool that needs a program) is `base`, the
+    agents' bare image.
 
     The wanted packs are read from `search` (where the run's packs are
     installed); a profile's own packs from `images` (what the images are built
@@ -541,11 +547,12 @@ def job_profiles(search, wanted: list, images=PACKS) -> dict:
     (profile_for), unless that profile would serve it alone and a profile
     chosen for another of the run's packs, full aside, holds it too. A
     dependency every profile holds (computer-forensics-base) is placed last,
-    once the other packs have moved: profile_for gives it the profile that the
-    tie rule picks, which a run of other packs would then boot for nothing
-    else, so it goes where the run's packs ended up (a run of
-    computer-forensics-base, macos-forensics and mobile-forensics boots one
-    image, mobile)."""
+    once the other packs have moved: profile_for gives it `core`, which a run
+    of other packs would then boot for nothing else, so it goes where the
+    run's packs ended up (a run of computer-forensics-base, macos-forensics and
+    mobile-forensics boots one image, mobile). `core` is booted only for a run
+    whose job-needing packs are the base pack alone, or when every other pack of
+    the run went to `full`, which the base pack does not join."""
     own = {name: profile_for(search, [name], images=images) for name in wanted}
     table = profiles()
     members = {name: set(resolve(images, prof["packs"])) for name, prof in table.items() if not prof.get("apt")}

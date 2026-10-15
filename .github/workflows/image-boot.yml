@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, re, memory, disk, network, linux, mobile, macos, cloud, triage, web, full]
+        profile: [base, core, re, memory, disk, network, linux, mobile, macos, cloud, triage, web, full]
         arch: [amd64]
         include:
           - { profile: base, arch: arm64 }

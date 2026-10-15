@@ -1,6 +1,9 @@
 {
   "profiles": {
     "base": [],
+    "core": [
+      "computer-forensics-base"
+    ],
     "disk": [
       "computer-forensics-base",
       "encrypted-containers",

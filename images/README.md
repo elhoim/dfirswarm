@@ -14,28 +14,29 @@ launcher and probe scripts are written into each VM by the SDK.
 |---|---|
 | `base.Dockerfile` | The agent runtime every seat boots: Node, Pi, Python with a venv at `/opt/dfir/venv` holding what the tool library imports (`library-python.txt`), and the small tools an examiner's shell has (`strings`, `hexdump`, `file`, `xxd`, `sqlite3`, `jq`, the archive tools), plus `socat` for the hub link, and `seekfix.c` preloaded (on a macOS host msb swaps `SEEK_DATA` and `SEEK_HOLE` on a mount, and GNU grep then calls a large text file binary; the shim swaps them back only where it sees the swapped answers). It records itself as a profile image does (`install.py --base`): the whole package inventory, a NOTICE, an SBOM, and that it is not for redistribution (it holds Debian's GPL programs, whose source offer is not written yet; its record and NOTICE name that as `debian-gpl-packages`). |
 | `library-python.txt` | The Python packages the tool library's tools import. In the base, so a library tool handed to any run with `--tools-from` works whatever the run's packs; `tests/recipe.test.sh` keeps it in step with the tools' imports. |
-| `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `macos`, `cloud`, `triage`, `full` — and `web`, the base with Chromium, which `--playwright` boots (the browser tools drive it with this repository's Playwright, mounted read-only). `full` holds every pack under `packs/` (with the dependencies of each), and `tests/recipe.test.sh` fails when a pack is missing from it. `macos` (macos-forensics), `cloud` (cloud-forensics) and `triage` (triage-collection) each hold one pack and the base pack: a macOS case no longer rides the `mobile` image, and a cloud or triage case no longer rides `full` (`disk` was never involved). `re` holds the ransomware pack beside reverse-engineering. |
-| `recipe.py` | Turns a profile's packs — every `requires/host.json` and `requires/python.txt`, with each pack's dependencies — into a Dockerfile (with a builder stage per program built from source), a spec and a NOTICE. `profile-for PACK...` names the profile that serves a run's packs, in this order: the smallest profile that holds them (they and their dependencies are among its packs; `full` holds every pack, so it is the answer for a pack no smaller profile lists); for a pack no profile lists, an installed pro or third-party one, the smallest profile whose packs name every program they name and install every library their tools import; else `full`. Membership comes first because a pack whose tools use nothing beyond the base's is covered by every profile, and covering alone would pick one of them by chance. Of the candidates of a step the tie rule picks: `full` last, then the fewest packs, then the fewest programs the profile's packs name, then the profile's name; the order of `profiles.json` decides nothing (`tests/recipe.test.sh` shuffles it). It reads each pack where a run does: a path as given, an id from `$DFIRSWARM_HOME/packs` and then this repository, so an installed pro or third-party pack is matched by what it names. `--tools-from DIR` adds the programs a tool directory's manifests name (`requires`): among the candidates of that order, an image smaller than `full` that has them all is preferred. `check-lock FILE` refuses an images lock entry that is not pinned by digest. |
+| `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `macos`, `cloud`, `triage`, `core`, `full` — and `web`, the base with Chromium, which `--playwright` boots (the browser tools drive it with this repository's Playwright, mounted read-only). `full` holds every pack under `packs/` (with the dependencies of each), and `tests/recipe.test.sh` fails when a pack is missing from it. `macos` (macos-forensics), `cloud` (cloud-forensics) and `triage` (triage-collection) each hold one pack and the base pack: a macOS case no longer rides the `mobile` image, and a cloud or triage case no longer rides `full` (`disk` was never involved). `re` holds the ransomware pack beside reverse-engineering. `core` holds the base pack (computer-forensics-base) and nothing else: its programs (the Sleuth Kit, plaso, dissect, bulk_extractor and the rest it names) and no other pack's; it is the image of a run whose only pack is the base pack. |
+| `recipe.py` | Turns a profile's packs — every `requires/host.json` and `requires/python.txt`, with each pack's dependencies — into a Dockerfile (with a builder stage per program built from source), a spec and a NOTICE. `profile-for PACK...` names the profile that serves a run's packs, in this order: the smallest profile that holds them (they and their dependencies are among its packs; `full` holds every pack, so it is the answer for a pack no smaller profile lists); for a pack no profile lists, an installed pro or third-party one, the smallest profile whose packs name every program they name and install every library their tools import; else `full`. A pack no profile lists that names nothing the base pack does not name (stdlib Python that depends on the base pack, or a pack that names only Sleuth Kit programs) is covered by `core`; one that names a program the base pack lacks (`vol`, `tshark`, `pwsh`) goes to the smallest profile that names it, and one that needs programs only `full` has together goes to `full`, since `core` lacks them. A run with no packs, or an unlisted pack that names and depends on nothing, is `base`. Membership comes first because a pack whose tools use nothing beyond the base's is covered by every profile, and covering alone would pick one of them by chance. Of the candidates of a step the tie rule picks: `full` last, then the fewest packs, then the fewest programs the profile's packs name, then the profile's name; the order of `profiles.json` decides nothing (`tests/recipe.test.sh` shuffles it). It reads each pack where a run does: a path as given, an id from `$DFIRSWARM_HOME/packs` and then this repository, so an installed pro or third-party pack is matched by what it names. `--tools-from DIR` adds the programs a tool directory's manifests name (`requires`): among the candidates of that order, an image smaller than `full` that has them all is preferred. `check-lock FILE` refuses an images lock entry that is not pinned by digest. |
 | `install.py` | Runs inside the build: installs what the spec names, fetches each pinned artefact (download, `.deb`, source, a source a builder stage compiles, or a data file a program reads) and checks its sha256, fails on a required package it cannot install and, at the end, on any program the packs name that is not on PATH, optional ones too, unless it is left out on purpose (no build for this architecture) or the build says `--allow-missing-optional` (see "Disk space"), and writes `/etc/dfirswarm/image.json` — every program it found, every package version (the image's whole Debian list and its venv too), each pack's version and seal, and what it could not install — `/etc/dfirswarm/NOTICE`, `/etc/dfirswarm/sbom.json` and `/etc/dfirswarm/tools.md`, the list an agent greps. |
 
 ## When the profiles change
 
 What a host that built images before this change has to know:
 
-- **New profiles.** `macos`, `cloud` and `triage` are new. A macOS case used
+- **New profiles.** `macos`, `cloud`, `triage` and `core` are new. A macOS case used
   to ride the `mobile` image, and cloud and triage cases rode `full`, so a
   host that built only `full` or `mobile` now has to build the profile the
   run's pack names (`python3 images/recipe.py profile-for PACK...` says
   which), or pass `--image`. A kickoff that cannot find a job image says so
-  and, for a pack's jobs, runs them in the default image.
+  and, for a pack's jobs, runs them in the default image. `core` is the image
+  of a run whose only pack is the base pack (see below).
 - **A pinned lock needs the new entries.** The kickoff reads
   `.images[<profile>][<arch>]` from the lock (`SWARM_IMAGES_LOCK`, else
   `images/images.lock.json`); a profile the lock does not name is not an
   error, it falls back to the unpinned local name
   `dfirswarm-<profile>:dev-<arch>`, and `scripts/swarm.sh image-for` then
   shows `digest: null`. A lock kept elsewhere (a private build repository's
-  `images.lock.json`) needs entries for `macos`, `cloud` and `triage`, built
-  and pushed there, before runs of those packs are pinned again.
+  `images.lock.json`) needs entries for `core`, `macos`, `cloud` and `triage`,
+  built and pushed there, before runs of those packs are pinned again.
 - **A run of several packs.** A profile is chosen because it holds the run's
   packs, not because it names the same programs. Where a smaller image used to
   serve a run by chance, `full` now does: `ransomware-response` with
@@ -46,12 +47,35 @@ What a host that built images before this change has to know:
   which holds every pack of the run, is `full`. A host that built only `disk`
   or `memory` needs `full` for those runs, or `--image`.
 - **The base pack alone.** `computer-forensics-base` names the Sleuth Kit
-  programs, which the `base` image lacks, so a run of it alone is served by
-  one of the nine profiles that hold it with a pack or two beside it. The tie
-  rule picks the one that names the fewest programs, `cloud` today (it was
-  `memory`, the first of them in the file); an unlisted pack of stdlib Python
-  that depends on the base pack gets the same. A pack that names nothing at
-  all and depends on nothing is served by `base`.
+  programs, which the `base` image lacks. A run whose only pack is the base
+  pack now boots `core`, the profile of that pack alone (it was `memory`, the
+  first of the six two-pack profiles in the order of the file). It is the
+  smallest profile that holds the base pack: of the candidates the tie rule
+  takes `full` last, then the fewest packs, then the fewest programs the
+  profile's packs name, then the name, and the order of `profiles.json` decides
+  nothing. A host that built `memory` and not `core` needs `core` for these
+  runs, or `--image`. An unlisted pack that depends on the base pack and names
+  only programs the base pack names (stdlib Python, or a pack that names only
+  Sleuth Kit programs, with or without that dependency) is covered by `core`
+  too. `core` lacks the programs of the other packs: a pack that names `vol`,
+  `tshark` or `pwsh` goes to the smallest profile that names it, and a pack
+  that needs programs no profile but `full` has together goes to `full`. A run
+  with no packs at all, or an unlisted pack that names nothing and depends on
+  nothing, is served by `base`.
+- **The base pack in a run of several packs.** Every profile holds the base
+  pack, so its jobs run in an image the run boots anyway: the one most of the
+  run's packs run in, then the profile of the fewest packs, then the name. The
+  set of images a run boots is the same as before for a run without a pack of
+  the new profiles (the three `ransomware-response` pairs above and the base pack alone aside), but in
+  some runs the base pack's jobs now run in another image of that set than
+  before, where `memory` took them whenever `memory` was booted:
+  linux-forensics with memory-forensics runs them in `linux`,
+  memory-forensics with mobile-forensics in `mobile`, and four larger runs in
+  `linux`, `re`, `disk` or `mobile`. When every other pack of the run goes to
+  `full`, which the base pack does not join, `core` is booted for its jobs
+  (`memory` was before): the number of images does not grow.
+  `tests/recipe.test.sh` pins each of these placements against a table frozen
+  from before the change.
 
 ## What a run checks
 
