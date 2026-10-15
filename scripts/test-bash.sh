@@ -46,8 +46,13 @@ done
 SHARD="" LIST_ONLY=0 NAMED=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --shard) SHARD="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
-    --shard=*) SHARD="${1#--shard=}"; shift ;;
+    --shard)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "test-bash: --shard needs I/N" >&2; exit 2; }
+      SHARD="$2"; shift 2 ;;
+    --shard=*)
+      SHARD="${1#--shard=}"
+      [[ -n "$SHARD" ]] || { echo "test-bash: --shard needs I/N" >&2; exit 2; }
+      shift ;;
     --list) LIST_ONLY=1; shift ;;
     -*) echo "test-bash: unknown option: $1" >&2; exit 2 ;;
     *) NAMED+=("$1"); shift ;;

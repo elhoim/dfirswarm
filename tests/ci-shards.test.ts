@@ -54,7 +54,7 @@ test("a shard is the same on every call and does not depend on what is named", (
 });
 
 test("a bad shard or a shard with named suites is refused", () => {
-  for (const args of [["--shard", "0/2"], ["--shard", "3/2"], ["--shard", "x"], ["--shard", "1/2", "reap"], ["--bogus"]]) {
+  for (const args of [["--shard", "0/2"], ["--shard", "3/2"], ["--shard", "x"], ["--shard", "1/2", "reap"], ["--shard", ""], ["--shard"], ["--shard="], ["--bogus"]]) {
     assert.throws(() => execFileSync("bash", [join(ROOT, "scripts/test-bash.sh"), ...args, "--list"], { stdio: "pipe" }), (e: { status?: number }) => e.status === 2, args.join(" "));
   }
 });
