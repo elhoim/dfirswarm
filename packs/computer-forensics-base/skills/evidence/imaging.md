@@ -21,7 +21,7 @@ Run `image_layout` once per image and put its output on the board. It names the 
 Shapes that are not a mistake and need another move:
 
 - **No partition table.** A single volume imaged alone. Drop `-o`. `mmls` finding none is an answer about those bytes at that sector size, not a broken image.
-- **A mapping layer** (LVM, a dynamic disk, a Storage Space, RAID): `mmls` names the slot but `fsstat` cannot read it. Do not rebuild it from a signature: `filesystem/layers`.
+- **A mapping layer** (LVM, a dynamic disk, a Storage Space, RAID): `mmls` names the slot but `fsstat` cannot read it. Do not rebuild it from a signature: `filesystem/layers-mapping`.
 - **An unallocated gap.** It may never have held a partition. Describe a deleted partition only when other metadata supports it; its content, not its size, is the evidence.
 
 **A logical collection is not an image.** A directory of copied files or an AD1 has no partition table to read: see `evidence/collections`.
