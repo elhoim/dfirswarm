@@ -56,6 +56,7 @@ import stat
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 DEFAULT_LIMIT = 200
@@ -78,7 +79,7 @@ def describe(exc):
 
 def fail(message, **extra):
     """An error answer: JSON, exit 1, never a traceback. A name in it that is shaped like a credential is withheld."""
-    print(json.dumps({"error": scrub(str(message)), "status": "failed", **{k: scrub_all(v) for k, v in extra.items()}}, default=str))
+    write_answer({"error": scrub(str(message)), "status": "failed", **extra})
     raise SystemExit(1)
 
 
@@ -333,6 +334,7 @@ class Table:
             fail("the whole result could not be written to %s: %s" % (shown_output(self.path), describe(exc)))
 
     def add(self, row):
+        row = row_out(row, "%s row %d" % (self.tool, self.total + 1))
         text = json.dumps(row, default=str)
         self.total += 1
         if self._out is None and (len(self.page) >= self.limit or self.bytes + len(text) > self.budget):
@@ -357,8 +359,10 @@ class Table:
             except OSError as exc:
                 fail("the whole result could not be written to %s: %s" % (shown_output(self.path), describe(exc)))
             result["all_results"] = shown_output(final)
+            OWN_SHOWN.add(result["all_results"])
             result["all_results_format"] = "JSON Lines, one complete result per line"
             if str(final) != str(self.path):
+                OWN_SHOWN.add(shown_output(self.path))
                 result["all_results_note"] = "a different file was already at %s and was kept; this result is beside it" % shown_output(self.path)
         return result
 
@@ -396,6 +400,7 @@ class SecretValues:
         self.path = Path(self.out) / name
         register_own(self.path)
         self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), name)
+        OWN_SHOWN.add(self.shown)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -503,6 +508,308 @@ def shown(path, where=None):
     """A path as it may be printed: the whole string goes through scrub (a component shaped like a recovery password, a
     key id or a token is withheld wherever it stands in the path)."""
     return scrub(path, where)
+
+
+# ---- the serialisation boundary and the independent check ----------------------------------------------------------------
+# Everything the tool prints and every row it writes to a table file passes release() / row_out(): the withholding above is
+# applied to EVERY key and value of the structure, so a field nobody listed is covered, and the structure is then read once more
+# by the check below, which is written apart from it (its own normaliser by Unicode category, its own named-secret scan, token
+# prefixes, user-info scan, long digit runs, PEM markers and class-run measure of random text; it calls nothing of the withholding
+# above). A string it finds suspect is replaced by <withheld: N bytes> and counted; the answer then says so and is partial.
+# The check judges by shape as well and has its own misses (documented in the manifest); it is a second wall, not a proof.
+# [Local to this pack. It is meant to be replaced by the pack-wide reference block; keep it in this one marked block, identical in
+# both tools.]
+
+BOUNDARY = {"replaced": 0, "by": {}, "where": [], "not_listed": 0}
+MAX_REPLACED_LISTED = 25
+OWN_SHOWN = set()                  # names of files this run made and shows (random names, nothing in them is evidence)
+TYPED_FIELDS = {"modified_epoch_ns": r"[0-9]{1,24}", "sha256": r"[0-9a-f]{64}", "sha256_of_bytes_read": r"[0-9a-f]{64}"}
+_B_MARK = re.compile(r"<[A-Za-z][A-Za-z -]{2,60} withheld, [0-9]+ characters, W[0-9]{6}>|<withheld: [0-9]+ bytes>"
+                     r"|<withheld: an integer of [0-9]+ bits>|<text over the scan budget withheld, [0-9]+ characters>")
+_B_PLAIN = re.compile(r"[\x20-\x7e]*")
+_B_DROP = frozenset(("Cc", "Cf", "Mn", "Me", "Cs", "Co", "Cn", "Zl", "Zp"))
+_B_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})|%([0-9a-fA-F]{2})")
+
+
+def _b_fold(text):
+    """The text as a reader sees it: no control, format, combining, private or unassigned character (so NUL, zero-width, bidi,
+    variation selectors and the NULs of UTF-16 read as 8-bit all vanish), spaces of every kind one space, compatibility forms
+    (full-width, ligatures) folded."""
+    if _B_PLAIN.fullmatch(text):
+        return text
+    out = []
+    for ch in text:
+        if ch == "\n":
+            out.append(ch)
+            continue
+        if ch < " " or ch == "\x7f":
+            if ch == "\t" or ch == "\r":
+                out.append(" ")
+            continue
+        category = unicodedata.category(ch)
+        if category in _B_DROP:
+            continue
+        if category == "Zs":
+            out.append(" ")
+        elif ord(ch) > 127:
+            out.append(unicodedata.normalize("NFKC", ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _b_unescape(text):
+    def one(m):
+        value = int(m.group(1) or m.group(2) or m.group(3), 16)
+        return chr(value) if 0x21 <= value < 0x7f else m.group(0)
+    return _B_ESCAPE.sub(one, text)
+
+
+_B_PEM = re.compile(r"-----\s*(?:BEGIN|END)[A-Z ]*PRIVATE KEY|PRIVATE KEY BLOCK|PuTTY-User-Key-File", re.I)
+_B_PREFIX = re.compile(
+    r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA|ABIA|ACCA)[A-Z0-9]{14}|gh[pousr]_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}|glpat-[A-Za-z0-9_-]{16}"
+    r"|xox[a-z]-[A-Za-z0-9-]{14}|xapp-[A-Za-z0-9-]{14}|dop_v1_[A-Za-z0-9]{14}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{14}|AIza[A-Za-z0-9_-]{20}|ya29\.[A-Za-z0-9_.-]{16}"
+    r"|(?<![A-Za-z0-9])(?:npm_|pypi-|shpat_|shpss_|hf_)[A-Za-z0-9_-]{14}|(?<![A-Za-z0-9])SG\.[A-Za-z0-9_.-]{16}"
+    r"|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]{0,40}[0-9])[A-Za-z0-9_-]{20}"
+    r"|eyJ[A-Za-z0-9_-]{8}|SK[0-9a-f]{32}|1//0[A-Za-z0-9_-]{20}|hooks\.slack\.com/services/", re.I)
+_B_DIGITS = re.compile(r"[0-9]{19}|(?<![0-9])[0-9]{6}(?:[-_. ]?[0-9]{6}){7}(?![0-9])")
+_B_PADDED = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{15,}={1,2}(?![A-Za-z0-9+=])")
+_B_RUN = re.compile(r"[A-Za-z0-9+/_=-]{20,}")
+_B_HEXISH = re.compile(r"[0-9A-Fa-f]+")
+_B_ID = re.compile(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|S-1-[0-9]+(?:-[0-9]+)+|/var/folders/[a-z0-9_]{2}/[a-z0-9_]{30}(?=/|$)")
+_B_OPTION = re.compile(r"(?<![\w-])--?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api-?key|client-secret|access-?key)(?:=|[ \t]+)[^\s=-]", re.I)
+_B_CLIENT = re.compile(r"(?:mysql|mariadb)\w*[^\n]{0,200}?\s-p\S|sshpass[^\n]{0,200}?\s-p\s*\S"
+                       r"|(?<![\w-])(?:-[uU]|--user)(?:=|[ \t]+)[^\s:%]{1,64}[:%]\S", re.I)
+_B_DELIM = re.compile(r"[=:]")
+_B_NAMECH = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+_B_STRONG = ("password", "passwd", "passphrase", "pwd", "secret", "token", "credential", "apikey", "api_key", "api-key", "accesskey", "access_key",
+             "access-key", "accountkey", "account_key", "privatekey", "private_key", "masterkey", "master_key", "signingkey", "sharedkey", "shared_key",
+             "authorization", "cookie")
+_B_WEAK = ("pass", "pw", "auth", "sig", "sas")
+_B_NOT_WEAK = ("bypass", "compass", "overpass", "underpass", "trespass", "surpass", "impass", "encompass")
+_B_FILE_ENDINGS = frozenset("png jpg jpeg gif svg webp ico bmp tif tiff heic plist json txt log db dat xml htm html css js py exe dll lnk".split())
+
+
+def _b_named_secret(flat):
+    """A name that says it is a secret right before an `=` or a `:` that has a value after it. The name is the run of name
+    characters that ends at the delimiter (read backwards from it, at most 64 characters), so a prefix glued to it or joined
+    with `_` does not matter: DB_PASSWORD=, adminPassword=, X-Api-Key:."""
+    size = len(flat)
+    for m in _B_DELIM.finditer(flat):
+        i = m.start()
+        j = i + 1
+        while j < size and j - i <= 5 and flat[j] in " \t\"'\\":
+            j += 1
+        if j >= size or flat[j] in "<>\n" or flat.startswith("//", j):
+            continue
+        k = i
+        while k > 0 and i - k < 5 and flat[k - 1] in " \t\"'\\":
+            k -= 1
+        n = k
+        while n > 0 and k - n < 64 and flat[n - 1] in _B_NAMECH:
+            n -= 1
+        low = flat[n:k].lower()
+        for form in (low, low[:-1] if low.endswith("s") else low):
+            if form.endswith(_B_STRONG):
+                return True
+            if form.endswith(_B_WEAK) and not form.endswith(_B_NOT_WEAK):
+                return True
+    return False
+
+
+def _b_user_info(flat):
+    """user:password@host, with a password that may hold / ? # or @: for each `@` look back to the last `:` within 256 characters."""
+    pos = 0
+    while True:
+        at = flat.find("@", pos)
+        if at < 0:
+            return False
+        pos = at + 1
+        host = flat[at + 1:at + 80]
+        run = re.match(r"[A-Za-z0-9][A-Za-z0-9.-]*", host)
+        if not run:
+            continue
+        colon = flat.rfind(":", max(0, at - 256), at)
+        if colon <= 0 or colon + 1 >= at:
+            continue
+        name = re.search(r"[A-Za-z0-9._%+-]{0,64}$", flat[max(0, colon - 64):colon])
+        secret = flat[colon + 1:at]
+        if "\n" in secret or " " in secret or "\\" in secret:
+            continue
+        name_start = colon - len(name.group())
+        if not name.group() and flat[max(0, colon - 2):colon] != "//":
+            continue
+        after_scheme = flat[max(0, name_start - 2):name_start] == "//"
+        labels = run.group().rstrip(".").split(".")
+        dotted_ip = len(labels) == 4 and all(x.isdigit() for x in labels)
+        real_host = any(x.isalpha() and len(x) >= 2 and x.lower() not in _B_FILE_ENDINGS for x in labels[1:])
+        if after_scheme or dotted_ip or real_host:
+            return True
+
+
+def _b_class(ch):
+    return 0 if ch.isdigit() else 1 if ch.isupper() else 2
+
+
+_B_LOWWORD = re.compile(r"[a-z]{3,}")
+
+
+def _b_long_lower(body):
+    """The share of a text that sits in runs of three or more small letters: high in words, low in random letters and digits."""
+    return sum(len(m.group()) for m in _B_LOWWORD.finditer(body)) / len(body)
+
+
+def _b_random_body(body):
+    """Whether letters and digits change class the way random text does: the mean length of the runs of one class is short and
+    not many letters sit in words."""
+    if len(body) < 20 or _B_HEXISH.fullmatch(body):
+        return False
+    classes = [_b_class(c) for c in body]
+    if len(set(classes)) < 2:
+        return False
+    runs = 1 + sum(1 for a, b in zip(classes, classes[1:]) if a != b)
+    return len(body) / runs <= 2.25 and _b_long_lower(body) <= 0.5
+
+
+def _b_random_run(run):
+    """A run of 20 or more characters of letters, digits and `/ _ + = -`: each piece between the separators alone, and every window
+    of whole pieces up to 64 letters and digits in which no piece reads as a word (a key with a `/` in it is two pieces)."""
+    pieces = [p for p in re.split(r"[/_+=-]+", run) if p]
+    for i in range(len(pieces)):
+        if _b_random_body(pieces[i]):
+            return True
+        total = len(pieces[i])
+        for j in range(i + 1, len(pieces)):
+            total += len(pieces[j])
+            if total > 64:
+                break
+            if all(len(x) < 4 or _b_long_lower(x) <= 0.5 for x in pieces[i:j + 1]) and total >= 20 and _b_random_body("".join(pieces[i:j + 1])):
+                return True
+    return False
+
+
+def _b_suspect(text):
+    """The name of the check a string fails, or None."""
+    if not text or len(text) < 6:
+        return None
+    for shown_name in OWN_SHOWN:
+        if shown_name in text:
+            text = text.replace(shown_name, " ")
+    flat = _B_MARK.sub(" ", _b_fold(text))
+    for form in ((flat, _b_unescape(flat)) if ("%" in flat or "\\" in flat) else (flat,)):
+        if _B_PEM.search(form):
+            return "a private-key marker"
+        if _b_named_secret(form) or _B_OPTION.search(form) or _B_CLIENT.search(form):
+            return "a named secret"
+        if _B_PREFIX.search(form):
+            return "a token prefix"
+        stripped = _B_ID.sub(" ", form)
+        if _B_DIGITS.search(stripped):
+            return "a long digit run or a recovery-password shape"
+        if _b_user_info(form):
+            return "user-info"
+        if _B_PADDED.search(stripped):
+            return "padded base64"
+        for run in _B_RUN.findall(stripped):
+            if _b_random_run(run):
+                return "a random-looking run"
+    return None
+
+
+_B_CACHE = {}
+_B_CACHE_CHARS = [0]
+
+
+def _b_verdict(text):
+    known = _B_CACHE.get(text, False)
+    if known is not False:
+        return known
+    try:
+        reason = _b_suspect(text)
+    except BaseException:                          # a check that cannot judge fails closed
+        reason = "a string the check could not judge"
+    if len(text) <= 512:
+        if _B_CACHE_CHARS[0] > (4 << 20):
+            _B_CACHE.clear()
+            _B_CACHE_CHARS[0] = 0
+        _B_CACHE[text] = reason
+        _B_CACHE_CHARS[0] += len(text)
+    return reason
+
+
+def _b_replace(size, where, reason):
+    BOUNDARY["replaced"] += 1
+    BOUNDARY["by"][reason] = BOUNDARY["by"].get(reason, 0) + 1
+    if len(BOUNDARY["where"]) < MAX_REPLACED_LISTED:
+        BOUNDARY["where"].append({"at": where or "/", "check": reason})
+    else:
+        BOUNDARY["not_listed"] += 1
+    return "<withheld: %d bytes>" % size
+
+
+def _b_size(text):
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def backstop(value, where="", key=None):
+    """The structure read back and checked: a key or a string value the check finds suspect is replaced by <withheld: N bytes>, a
+    huge integer by its size; the place is named by its top-level key and its indexes, never by an evidence-derived key."""
+    if isinstance(value, str):
+        pattern = TYPED_FIELDS.get(key)
+        if pattern and re.fullmatch(pattern, value):
+            return value
+        reason = _b_verdict(value)
+        return _b_replace(_b_size(value), where, reason) if reason else value
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value.bit_length() > 63 and key not in TYPED_FIELDS:
+            _b_replace(0, where, "a very large integer")
+            return "<withheld: an integer of %d bits>" % value.bit_length()
+        return value
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            child = k if (not where and isinstance(k, str) and re.fullmatch(r"[a-z][a-z_]{0,40}", k)) else "*"
+            new_key = backstop(k, "%s/(key)" % where, None) if isinstance(k, str) else k
+            while new_key in out:
+                new_key = "%s #" % new_key
+            out[new_key] = backstop(v, "%s/%s" % (where, child) if where else child, k if isinstance(k, str) else None)
+        return out
+    if isinstance(value, list):
+        return [backstop(v, "%s/%d" % (where, i)) for i, v in enumerate(value)]
+    return value
+
+
+def row_out(row, tool=""):
+    """A table row on its way to its page and its file: the withholding on every key and value, then the check."""
+    return backstop(scrub_all(json.loads(json.dumps(row, default=str))), tool)
+
+
+def release(doc):
+    """The final answer: normalised to what JSON carries, the withholding on every key and value, the check, and the account of
+    what the check had to replace. A complete answer is partial when it replaced anything."""
+    doc = backstop(scrub_all(json.loads(json.dumps(doc, default=str))), "")
+    if BOUNDARY["replaced"] and isinstance(doc, dict):
+        note = {"strings_replaced_by_the_check": BOUNDARY["replaced"], "by_check": dict(BOUNDARY["by"]), "replaced_at": list(BOUNDARY["where"]),
+                "replaced_not_listed": BOUNDARY["not_listed"],
+                "note": "every key and value of this answer and of its table files was withheld by shape, then read back by a second check written "
+                        "apart from the first; a string the second check found suspect is <withheld: N bytes> and its place is in replaced_at"}
+        out = {}
+        for k, v in doc.items():
+            out[k] = v
+            if k == "status_basis":
+                out["boundary"] = note
+        if "boundary" not in out:
+            out["boundary"] = note
+        if out.get("status") == "complete":
+            out["status"] = "partial"
+            out["status_basis"] = "%s; %d string(s) held a secret-shaped text that the first withholding missed and were replaced at the output boundary (see boundary)" % (
+                out.get("status_basis") or "every directory was listed", BOUNDARY["replaced"])
+        doc = out
+    return doc
+
+
+def write_answer(doc):
+    print(json.dumps(release(doc), indent=2, default=str))
 
 
 # ---- what a delivery may hold besides copied files ---------------------------------------------------------------------
@@ -671,6 +978,7 @@ SKIP_TARGET_COLUMNS = ("sourcefile", "source", "filename", "file", "path")
 SKIP_REASON_COLUMNS = ("reason", "message", "error", "status")
 UPLOAD_TARGET_KEYS = ("Path", "StoredName", "vfs_path")
 UPLOAD_MARKERS = ("StoredName", "UploadId", "StoredSize", "Components")
+LOG_LEVEL_WORDS = ("TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL", "CRITICAL")
 
 
 class Survey:
@@ -786,7 +1094,7 @@ def handle_file(survey, entry, st, is_top):
         marker = ("velociraptor", "uploads" if name == "uploads.json" else "context", None)
     if marker is not None:
         if inside_collected_data(rel):
-            survey.collected_data_logs.append(rel)
+            survey.collected_data_logs.append(shown(rel, "log inside collected data"))
             survey.problem("log_inside_collected_data", rel, "a collector record inside collected data: it belongs to the source host, "
                            "not to this delivery, and is not read")
         elif marker[0] == "kape":
@@ -1233,7 +1541,8 @@ def read_velociraptor(survey, directory, files, failures):
                 for number, row in jsonl_rows(fh, sub, survey, "log.json"):
                     level = row.get("level")
                     level = level if isinstance(level, str) else "?"
-                    record["log_levels"][level] = record["log_levels"].get(level, 0) + 1
+                    word = level.upper() if level.upper() in LOG_LEVEL_WORDS else "other"       # a level is evidence: only the words of the log's own scale are keys
+                    record["log_levels"][word] = record["log_levels"].get(word, 0) + 1
                     message = row.get("message")
                     text = scrub(message if isinstance(message, str) else json.dumps(message, default=str), "log.json line %d" % number)
                     if level.upper() == "ERROR":
@@ -1428,7 +1737,7 @@ def main():
         "unrecognised_rows": unrecognised.page,
         "problems": problems.page,
     }
-    print(json.dumps(out, indent=2, default=str))
+    write_answer(out)
 
 
 if __name__ == "__main__":

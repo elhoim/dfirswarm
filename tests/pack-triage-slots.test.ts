@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runPySnippet } from "./tool-library-harness.ts";
-import { ID, INDEX, TOOLS, tool } from "./pack-triage-harness.ts";
+import { ID, INDEX, KAPE_COPY_HEADER, body, kapeCopyRow, put, tool, veloLogRow, veloResultRow, veloUploadsRow, withCwd } from "./pack-triage-harness.ts";
 import type { Json } from "./pack-triage-harness.ts";
 import { CANARY_PY } from "./pack-triage-canaries.ts";
 
@@ -323,6 +323,38 @@ test("collection_index: with the sanitiser removed, the independent check at the
   assert.deepEqual(leaks(results), []);
 });
 
-test("the tools used by this suite are the ones under test", () => {
-  assert.ok(TOOLS.length > 0);
+const GHP = "ghp_Zq7SxkP2mN4vB8cR1tY6wL3hD9fJ5aG0eUiO";
+
+test("collection_id: a log found inside collected data is named by a withheld path, and a log.json level is counted under its own word or under other", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, `inputs/t/[root]/${GHP}/uac.log`, "x");
+    await put(cwd, "inputs/t/v/uploads.json", veloUploadsRow("/C:/a") + "\n");
+    await put(cwd, "inputs/t/v/results/Art.json", veloResultRow("/C:/a") + "\n");
+    await put(cwd, "inputs/t/v/log.json", [veloLogRow("INFO", "a"), veloLogRow("info", "b"), veloLogRow(GHP, "c"), veloLogRow("ERROR", "d")].join("\n") + "\n");
+    const run = await tool(ID, cwd, { root: "inputs/t" });
+    const out = body(run);
+    assert.doesNotMatch(run.stdout, /Zq7SxkP2mN4vB8cR1tY6wL3hD9fJ5aG0eUiO/);
+    assert.equal(out.walk.logs_inside_collected_data_total, 1);
+    assert.match(out.walk.logs_inside_collected_data[0], /withheld/);
+    const velo = out.runs.find((r: Json) => r.collector === "Velociraptor").record;
+    assert.deepEqual(velo.log_levels, { INFO: 2, other: 1, ERROR: 1 });
+    assert.equal(velo.error_lines, 1);
+  });
+});
+
+test("collection_index: a copy log in a directory with a secret-shaped name is shown with a withheld directory and still maps its files", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, `inputs/t/${GHP}/20260101_CopyLog.csv`, `${KAPE_COPY_HEADER}\n${kapeCopyRow("C:\\Users\\a\\x.txt", "D:\\kape\\C\\Users\\a\\x.txt")}\n`);
+    await put(cwd, `inputs/t/${GHP}/C/Users/a/x.txt`, "x");
+    const run = await tool(INDEX, cwd, { root: "inputs/t" });
+    const out = body(run);
+    assert.doesNotMatch(run.stdout, /Zq7SxkP2mN4vB8cR1tY6wL3hD9fJ5aG0eUiO/);
+    const logs = out.source_paths.observed.logs;
+    assert.equal(logs.length, 1);
+    assert.match(logs[0].directory, /withheld/);
+    assert.equal(logs[0]._dir, undefined, "the raw directory is private to the lookup");
+    const mapped = out.entries.find((e: Json) => e.kind === "file" && /x\.txt/.test(e.in_collection));
+    assert.equal(mapped.source_path_mapping, "observed");
+    assert.equal(mapped.source_path_observed.path, "C:\\Users\\a\\x.txt");
+  });
 });

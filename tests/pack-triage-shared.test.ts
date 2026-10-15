@@ -138,7 +138,7 @@ function ascii(text: string): string {
 const NAMES = ["collection_id", "collection_index"];
 
 test("every manifest has a use, a raised version, the sha256 of its script and a description that says what is and is not measured", async () => {
-  const versions: Record<string, number> = { collection_id: 3, collection_index: 4 };
+  const versions: Record<string, number> = { collection_id: 4, collection_index: 5 };
   for (const name of NAMES) {
     const manifest: Json = JSON.parse(await readFile(join(TOOLS, name, "manifest.json"), "utf8"));
     assert.ok(manifest.use?.names?.length >= (name === "collection_id" ? 5 : 1), `${name} says what it reads`);
