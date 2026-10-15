@@ -485,7 +485,7 @@ test("SIGTERM during a run: one JSON answer that names the signal and the rows k
       const doc = JSON.parse(child.stdout());
       assert.equal(doc.status, "partial");
       assert.equal(doc.stopped_by_signal, "SIGTERM");
-      assert.ok(doc.paging_files_left.length >= 1, JSON.stringify(doc).slice(0, 300));
+      assert.ok(Array.isArray(doc.paging_files_left) && doc.paging_files_left.length >= 1, `${label}: ${JSON.stringify(doc).slice(0, 400)}`);
       const left = await readdir(dir);
       assert.equal(left.some((f) => f.startsWith(".")), false, `${label}: a temporary paging file was left: ${left.join(", ")}`);
       assert.ok(left.some((f) => f.endsWith(".partial")), `${label}: the rows kept are named .partial`);

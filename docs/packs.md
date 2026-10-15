@@ -269,9 +269,12 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say. `computer-forensics-base` names one, `base/router`: its
-disk profile (base, encrypted-containers, windows) does not fit the run's index
-budget without it.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`, and
+so do `windows-forensics`, `linux-forensics`, `memory-forensics`,
+`macos-forensics` and `ransomware-response` (`<platform>/router`): a run of the
+base pack with windows-forensics and linux-forensics has 2,860 tokens of index
+entries whole, over the run's 2,500; the base router alone brings it to 1,898,
+and with the other two routers as well the prompt carries three router lines.
 
 ### Tool help stays out of the context window
 

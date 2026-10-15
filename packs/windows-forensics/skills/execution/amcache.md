@@ -1,7 +1,7 @@
 ---
 id: execution/amcache
-title: Amcache inventory and amcache_apps
-when: You need to identify a file by path or hash from Amcache.hve, or say what an Amcache entry means.
+title: Amcache
+when: Identify a file by path or hash.
 needs: []
 tools: [amcache_apps]
 requires_host: []

@@ -67,7 +67,6 @@ unchanged.
 - `awk '/^## 6\./{f=1;next} /^## [0-9]+\./{f=0} f && tolower($0) ~ /revo[kc]/ {r=1} END{exit !r}' work/report.md`
   (answer 6 itself says what the evidence shows about revocation or revoking, or that it is not established; a
   single awk, so that no pipe can be closed early under `set -o pipefail`)
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

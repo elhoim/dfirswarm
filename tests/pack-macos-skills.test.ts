@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { estimateTokens, readPackIndex, readPackIndexes, renderSkillsSection, SKILL_BUDGET } from "../extensions/skills.ts";
 import { ROOT } from "./tool-library-harness.ts";
 
 const PACK = join(ROOT, "packs", "macos-forensics");
@@ -63,7 +64,7 @@ const SECRET_LEAVES = ["accounts/users", "artifacts/plists", "artifacts/knowledg
 
 test("every skill is a leaf within the budget, opens with Use when/only if ... Not for ..., has a short index entry, and old ids stay", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, OLD_IDS.length + Object.keys(CHILDREN).length);
+  assert.equal(skills.size, OLD_IDS.length + Object.keys(CHILDREN).length + 1, "the pack's leaves and its router");
   for (const id of OLD_IDS) assert.ok(skills.has(id), `old id ${id} is alive`);
   for (const s of skills.values()) {
     assert.ok(TOKENS(s.text) <= 800, `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
@@ -73,6 +74,8 @@ test("every skill is a leaf within the budget, opens with Use when/only if ... N
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
+    // The router reads no artefact: it names notes and holds no rule, so it shows nothing.
+    if (s.id === ROUTER) continue;
     assert.match(s.body, /\b(Shows|Does not show)[.:]/, `${s.id} says what it shows or does not show`);
     assert.match(s.body, /Does not show[.:*]/, `${s.id} has Does not show`);
     if (SECRET_LEAVES.includes(s.id)) assert.match(s.body, /Sensitive output/, `${s.id} has Sensitive output`);
@@ -197,4 +200,96 @@ test("no skill states an Apple version fact it cannot source, and the APFS time 
   assert.doesNotMatch(all, /\b(macOS|OS X|Mac OS X) ?(1[0-9]|2[0-9]|[0-9])(\.\d+)?\b/);
   assert.doesNotMatch(all, /\b(Sonoma|Ventura|Sequoia|Monterey|Big Sur|Catalina|Mojave|Tahoe)\b/);
   assert.match(all, /nanoseconds since the Unix epoch, not the Apple epoch/);
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+const ROUTER = "macos/router";
+const FAMILY = ["windows-forensics", "linux-forensics", "memory-forensics", "macos-forensics", "ransomware-response"];
+// The 17 ids the pack had before the router: other packs' `needs` and text name them, and every one still resolves.
+const BEFORE = [
+  "accounts/attribution-remote", "accounts/users", "artifacts/fsevents", "artifacts/fsevents-dating", "artifacts/knowledgec",
+  "artifacts/knowledgec-fields-time", "artifacts/plists", "artifacts/plists-archives-dates", "filesystem/apfs", "filesystem/apfs-encryption",
+  "filesystem/apfs-recovery", "logs/unified", "logs/unified-readers", "persistence/login-items-quieter", "persistence/mechanisms",
+  "triage/clocks-hardware", "triage/system-profile",
+];
+
+test("macos/router is the pack's only router, within 400 tokens, holds no rule, and names every other skill exactly once; every old id is alive", async () => {
+  const skills = await load(SKILLS);
+  const routers = [...skills.values()].filter((s) => s.meta.router === "true");
+  assert.deepEqual(routers.map((s) => s.id), [ROUTER], "one router, and it is macos/router");
+  const router = skills.get(ROUTER)!;
+  assert.ok(TOKENS(router.text) <= 400, `the router is ${Math.round(TOKENS(router.text))} tokens`);
+  assert.match(router.body.trim().split("\n")[0], /^Use when .*\bNot for\b/);
+  assert.deepEqual(router.meta.tools ?? [], [], "the router names no tool");
+  // No rule content: after its first line the body is group headings and lines that start with a skill id and say when to read it.
+  for (const line of router.body.trim().split("\n").slice(1)) {
+    if (!line.trim()) continue;
+    assert.match(line, /^(`[a-z0-9-]+\/[a-z0-9-]+`|[A-Z][A-Za-z, -]{0,30}$)/, `a router line is a heading or starts with an id: ${line}`);
+    assert.doesNotMatch(line, /\b(must|never|always|do not|don't|only if)\b/i, `a router holds no rule: ${line}`);
+  }
+  // Every other skill is named exactly once, by its whole id; none is missing and the router names nothing that is not a skill.
+  const named = [...router.body.matchAll(/`([a-z0-9-]+\/[a-z0-9-]+)`/g)].map((m) => m[1]);
+  assert.equal(new Set(named).size, named.length, `a skill is named twice: ${named.filter((n, i) => named.indexOf(n) !== i).join(", ")}`);
+  assert.deepEqual([...named].sort(), [...skills.keys()].filter((id) => id !== ROUTER).sort());
+  assert.equal(BEFORE.length, 17);
+  for (const id of BEFORE) assert.ok(skills.has(id), `${id} is still a skill`);
+  assert.equal(skills.size, BEFORE.length + 1, "the router is the only skill added");
+  // The generated index names it as the pack's router, which is the line the harness reads.
+  assert.match(await readFile(join(SKILLS, "INDEX.md"), "utf8"), /^Router: `macos\/router`$/m);
+});
+
+test("the pack index is at most 1,000 tokens counted as the harness counts it: the entry lines of INDEX.md, not the whole file", async () => {
+  // Past 1,000 the harness shows the pack by its router alone in every run, the pack alone included. The budget is on the entries
+  // (extensions/skills.ts readPackIndex): the file's header lines are not in it. The harness's entries are exactly the file's
+  // "- `id`" lines, each counted as bytes / 4.245 rounded up, and their sum is the pack's count.
+  const text = await readFile(join(SKILLS, "INDEX.md"), "utf8");
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => /^- `[^`]+`/.test(l));
+  const parsed = await readPackIndex(PACK);
+  assert.deepEqual(parsed.entries.map((e) => e.line), lines, "the harness reads every entry line of the file, and no other");
+  assert.equal(parsed.entries.length, BEFORE.length + 1);
+  assert.equal(parsed.router, ROUTER);
+  assert.equal(lines.reduce((n, l) => n + estimateTokens(l), 0), parsed.tokens);
+  assert.ok(parsed.tokens <= SKILL_BUDGET.pack, `the pack index is ${parsed.tokens} tokens of entries, over ${SKILL_BUDGET.pack}`);
+  assert.ok(parsed.entries.every((e) => e.tokens <= SKILL_BUDGET.entry), "every entry is within the entry budget");
+});
+
+test("a run that carries this pack with others is over the run's index budget, and the pack's router is what lets the harness shorten the pack", async () => {
+  const section = async (ids: string[], strip: string[] = []) => {
+    const packs = (await readPackIndexes(ids.map((p) => join(ROOT, "packs", p)))).map((p) => (strip.includes(p.id) ? { ...p, router: null } : p));
+    return renderSkillsSection(packs).report;
+  };
+  const BASE_ID = "computer-forensics-base";
+  const profiles = JSON.parse(await readFile(join(ROOT, "images", "profiles.json"), "utf8")).profiles as Record<string, string[] | { packs: string[] }>;
+  const members = (v: string[] | { packs: string[] }): string[] => (Array.isArray(v) ? v : v.packs);
+  // The combinations are this pack's family (the base pack with windows, linux, memory, macos and ransomware packs) and the profiles that
+  // carry the pack and are over the budget whole. Whatever the other packs have (the base pack's router, other packs' routers), these
+  // do not change: only the family's own indexes are counted for the run being over, and only this pack's router for this pack.
+  const combos: Array<[string, string[]]> = [
+    ["a family combination", [BASE_ID, "windows-forensics", "linux-forensics", "memory-forensics", "macos-forensics"]],
+    ["the full profile", [...new Set([BASE_ID, ...members(profiles.full!)])]],
+  ];
+  for (const [label, ids] of combos) {
+    assert.ok(ids.includes("macos-forensics"), `${label} carries the pack`);
+    const whole = await section(ids);
+    assert.ok(whole.index_tokens > SKILL_BUDGET.run, `${label}: the whole index is ${whole.index_tokens} tokens, over the run's ${SKILL_BUDGET.run}; that is what makes the router the entry shown`);
+    const mine = whole.packs.find((p) => p.id === "macos-forensics")!;
+    assert.equal(mine.shown, "router", `${label}: the pack is shown by its router`);
+    assert.equal(mine.router, ROUTER);
+    assert.ok(!whole.no_router.includes("macos-forensics"), `${label}: the pack can be shortened`);
+    // Without the router the harness cannot shorten the pack: it is shown whole, and the report names it.
+    const without = await section(ids, ["macos-forensics"]);
+    const bare = without.packs.find((p) => p.id === "macos-forensics")!;
+    assert.equal(bare.shown, "full", `${label}: without its router the pack is shown whole`);
+    assert.ok(without.no_router.includes("macos-forensics"), `${label}: without its router the report names the pack as one that cannot be shortened`);
+    const routerLine = (await readPackIndex(PACK)).entries.find((e) => e.id === ROUTER)!.tokens;
+    assert.equal(without.shown_tokens - whole.shown_tokens, mine.tokens - routerLine, `${label}: the section grows by the pack's index minus its router line`);
+  }
+  // The family on its own: with the family's routers the section fits the run's budget, without them it does not (the base pack's router, if it has one, is no help:
+  // the family's indexes alone are over the budget).
+  const family = [BASE_ID, ...FAMILY.filter((p) => ["windows-forensics", "linux-forensics", "memory-forensics"].includes(p) || p === "macos-forensics")];
+  const fits = await section(family);
+  assert.ok(fits.shown_tokens <= SKILL_BUDGET.run, `with the routers the section is ${fits.shown_tokens} tokens`);
+  const bare = await section(family, FAMILY);
+  assert.ok(bare.shown_tokens > SKILL_BUDGET.run, `without the family's routers the section is ${bare.shown_tokens} tokens, over the run's ${SKILL_BUDGET.run}`);
 });

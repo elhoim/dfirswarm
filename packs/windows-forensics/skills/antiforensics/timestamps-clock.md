@@ -1,7 +1,7 @@
 ---
 id: antiforensics/timestamps-clock
-title: Timestamp manipulation and clock changes
-when: File times disagree with other records, or the system clock may have been moved.
+title: Timestamp, clock changes
+when: File times disagree; clock moved?
 needs: [antiforensics/traces]
 tools: [mft_records, usn_journal, evtx_query]
 requires_host: []
