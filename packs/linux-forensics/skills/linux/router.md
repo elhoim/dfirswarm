@@ -15,7 +15,7 @@ Start
 Storage and files
 `filesystem/storage` volume layers, parser coverage
 `filesystem/storage-lvm-luks` LVM, LUKS headers
-`filesystem/storage-xfs-btrfs-virtual` XFS, Btrfs, VDI, VMDK, QCOW2, VHD
+`filesystem/storage-xfs-btrfs-virtual` XFS, VDI, VMDK, QCOW2, VHD
 `filesystem/ext` ext inode times
 `filesystem/ext-deleted` deleted inode, ext journal
 
@@ -37,7 +37,7 @@ Persistence
 
 Packages, containers, time
 `packages/integrity` files against the package database
-`packages/baseline` check coverage, outside baseline
+`packages/baseline` coverage of a check, outside baseline
 `containers/docker` Docker evidence scope
 `containers/layers-times` overlay layers, config times
 `containers/removed-logs` container gone, daemon log

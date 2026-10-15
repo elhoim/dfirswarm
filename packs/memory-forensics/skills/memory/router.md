@@ -10,10 +10,10 @@ Use when the index shows only this line and you need a memory note. Not for rule
 
 First
 `triage/what-you-have` classify the capture
-`triage/container-details` crash dump, LiME, .vmem, offsets
-`triage/paging-files` pagefile, swap, hiberfil.sys
+`triage/container-details` crash dump, LiME, VMware vmem, offsets
+`triage/paging-files` pagefile, swap, hibernation file
 `acquire/images` how a capture was made, trusted
-`acquire/avml-and-preserve` AVML, capture order, what to keep
+`acquire/avml-and-preserve` Linux live capture, order, what to keep
 
 Reading the image
 `triage/volatility` offline use, symbols, plugin choice
@@ -23,9 +23,9 @@ Reading the image
 `triage/no-framework` no usable framework
 `triage/carve-signatures` hives, logs, PE by signature
 
-Processes and strings
+Processes and text
 `processes/injection` what ran, injected code
-`processes/preserve-regions` keep a region before relying on it
+`processes/preserve-regions` preserving a region before relying on it
 `strings/discipline` a string is an observation
 `patterns/yara` rules or byte patterns over an image
 

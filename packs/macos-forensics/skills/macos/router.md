@@ -17,7 +17,7 @@ Volumes
 `filesystem/apfs-recovery` deleted APFS file, file times
 
 Records
-`logs/unified` unified log decoding, coverage
+`logs/unified` unified logging decode, coverage
 `logs/unified-readers` reader fails or partial, version
 `artifacts/fsevents` filesystem changes, relative order
 `artifacts/fsevents-dating` order, date, flags, external volume
