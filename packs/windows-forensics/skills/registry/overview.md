@@ -1,7 +1,7 @@
 ---
 id: registry/overview
-title: Registry hives: acquire, hive state, control set
-when: You are about to read an offline hive and must keep its state and time meaning.
+title: Registry hives
+when: Offline hive: state, control set.
 needs: []
 tools: [regkv, icat_extract]
 requires_host: []

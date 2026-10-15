@@ -1,7 +1,7 @@
 ---
 id: filesystem/mft
-title: Reading MFT records and their state
-when: You need names, streams, allocation or deletion state of NTFS files from the $MFT.
+title: MFT records
+when: Names, streams, allocation, deletion state.
 needs: []
 tools: [mft_records, icat_extract, extract_stream]
 requires_host: [fls, istat, fsntfsinfo, MFTECmd]
