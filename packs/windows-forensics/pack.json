@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -83,9 +83,9 @@
       "tools/jumplist/run.py": "0377cf283c9be09f8884517e056fa8f97a33e91e9328b5c8127560104cc080f7",
       "tools/mam_scan/manifest.json": "464fb8d030bc16faf07b2d6aec51918c68ab887e4b52571f1573edbda9d8538d",
       "tools/mam_scan/run.py": "42f1fe6c482a0fd24f9f2dae5e8a70b7b59d9d5529ab08319af955fe14e9e804",
-      "goals/data-left-the-building.md": "755c30341017f6f9392b2434237e1359bbdc5a5155275dd98ca5040f3b934480",
-      "goals/hidden-data.md": "1d9c0354de41e4141a9c0f971b42da447b423fc0e3e6d91d5910e215ca4b1e09",
-      "goals/intrusion-triage.md": "7644e21e0965eb78bd6bf91a694a46d863ed2a0aa25561b7a5183cbe990798f2",
+      "goals/data-left-the-building.md": "34c94782b1a636d54eac5d6d2397a482059374909b7f93ee96433f9c3668b68e",
+      "goals/hidden-data.md": "14ee963bede22cf69b96033e483fad57ead72abd20e04ae7ccc1153de265fb78",
+      "goals/intrusion-triage.md": "ef8e8936a146915f13d2330a59ad16d8ae9789999860dc7653e6e28d01248c1e",
       "skills/artifacts/jumplists.md": "93296ac9caa90dcb6fa4b0e81b747ba2a743b2b294ef8574f4c5b2280ee6dd67",
       "skills/artifacts/links.md": "91f51ad3ec8c1146eab02d5ff00e275c138e26742c8fbddf254711ed2d023552",
       "skills/artifacts/shell.md": "d3ec6dd4e58a79c837f5342cb7113c763cd2d32346b928b744224ef47c41d61f",

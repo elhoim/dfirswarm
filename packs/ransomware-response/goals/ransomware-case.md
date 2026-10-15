@@ -71,8 +71,8 @@ has recorded `attest` or `dispute` on each answer, saying what they verified.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8 9; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'UTC' work/report.md`
-- `awk '/^## 2\./,/^## 3\./' work/report.md | grep -qiE 'exfiltration conclusion:[*_ ]*(established|partial|bounded[ -]negative|not[ -]determinable)'`
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
+- `awk '/^## [0-9]+\./{s=/^## 2\./} s && tolower($0) ~ /exfiltration conclusion:[*_ ]*(established|partial|bounded[ -]negative|not[ -]determinable)/{f=1} END{exit !f}' work/report.md`
+  (answer 2 itself states the outcome: one awk reads that section only, and no pipe, so that a long answer 2 cannot end a `grep -q` early and fail the check on a closed pipe)
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,9,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
