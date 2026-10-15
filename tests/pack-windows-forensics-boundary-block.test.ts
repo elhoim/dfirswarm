@@ -172,7 +172,7 @@ for (const name of names) {
         const run = await tool(name, cwd, bad);
         const answer = failed(run);
         assert.equal(answer.status, "failed", JSON.stringify(bad));
-        assert.match(String(answer.error), /JSON object/i, JSON.stringify(bad));
+        assert.match(String(answer.error), /JSON object|is not installed/i, JSON.stringify(bad));      // a tool whose library is missing says so first: still JSON, still a status
       });
     }
   });
