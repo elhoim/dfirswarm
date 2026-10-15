@@ -1,7 +1,7 @@
 ---
 id: browser/artefacts
-title: Browser profiles and visit history
-when: Examine browser profiles and navigation records, apart from background or synchronised activity.
+title: Browser profiles
+when: Navigation, apart from sync.
 needs: []
 tools: [browser_history]
 requires_host: []

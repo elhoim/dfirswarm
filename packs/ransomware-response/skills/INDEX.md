@@ -2,6 +2,8 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `ransomware/router`
+
 - `encryptor/backup-infrastructure` Backup servers, immutable storage and hypervisors: A backup server, immutable store, hypervisor or recovery setting was affected.
 - `encryptor/destroyed-backups` Recovery impairment and surviving recovery paths: Backups, snapshots, catalogues or recovery services may have been altered.
 - `encryptor/samples-and-notes` Recovered samples, tails and note placement: You hold a recovered binary or script, repeated tails, or note placement.
@@ -11,6 +13,7 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `exfil/measure-and-claims` What a transfer measure means, and adversary claims: You quote a byte count, tie content to a transfer, or weigh a leak-site listing.
 - `identify/family` Identifying a ransomware family without overstating attribution: Artefacts may support a family classification or a public recovery option.
 - `identify/samples-and-decryptors` Samples, behaviour and public decryptors: A sample survives, behaviour is attributed, or public decryptors are checked.
+- `ransomware/router` Ransomware notes by question: Pick one when none is listed, or you cannot choose.
 - `recovery/routes-and-decryptors` Partial damage, deleted originals, decryptors: Files are partly encrypted, originals may be deleted, or a decryptor is to be tested.
 - `recovery/what-is-possible` Assessing and validating recovery without destroying evidence: The organisation needs a defensible recovery position and restoration plan.
 - `reporting/conclusions-and-controls` Conclusions by phase, and control findings: Writing conclusions by phase, a negative exfiltration finding or insurance findings.

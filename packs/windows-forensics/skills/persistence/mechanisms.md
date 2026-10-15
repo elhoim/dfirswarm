@@ -1,7 +1,7 @@
 ---
 id: persistence/mechanisms
-title: Services, run keys, startup: configured versus fired
-when: You sweep for ways something runs again, or must tell configuration from execution.
+title: Services, run keys, startup
+when: Configured or fired.
 needs: []
 tools: [regkv, icat_extract, file_type]
 requires_host: [fls]

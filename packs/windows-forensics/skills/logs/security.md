@@ -1,7 +1,7 @@
 ---
 id: logs/security
-title: Reading an event log with evtx_query
-when: You are about to read, filter or quote records from an .evtx file.
+title: Reading .evtx
+when: Read, filter or quote .evtx records.
 needs: []
 tools: [evtx_query]
 requires_host: [evtxexport, EvtxECmd, dotnet, MFTECmd, RECmd]

@@ -1,7 +1,7 @@
 ---
 id: execution/esedb
-title: Reading an ESE database with esedb_query
-when: You export tables from SRUDB.dat, WebCacheV01.dat, spartan.edb or another ESE database.
+title: ESE databases
+when: Export tables from SRUDB.dat and others.
 needs: []
 tools: [esedb_query]
 requires_host: [esedbexport]
