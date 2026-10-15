@@ -1,7 +1,7 @@
 ---
 id: memory/hibernation-pagefile
-title: Hibernation files and pagefiles
-when: A hiberfil.sys, pagefile.sys or swap file is the memory source.
+title: Hibernation, pagefile
+when: hiberfil.sys, pagefile.sys, swap.
 needs: [memory/windows]
 tools: [evtx_carve, mam_scan]
 requires_host: [vol]

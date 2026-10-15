@@ -1,7 +1,7 @@
 {
   "id": "memory-forensics",
   "name": "Memory Forensics Pack",
-  "version": "1.5.1",
+  "version": "1.6.1",
   "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -28,7 +28,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "1942dba3075bef70bcbec3b441e69d8a3762c4343815935c7640f1192e5bf2e7",
+      "README.md": "1eb87f308375ddbf45537ec82fa1541845b5a7e69e6f7ec8476b8a1b2e253bc5",
       "tools/mem_carve/manifest.json": "0bc4efee2fbbfe236512724b66b888f2f5325d0928fd31a3c3ef542ac096cd2e",
       "tools/mem_carve/run.py": "6d664d29366a7ef104b782ede7eaba5ed2103b514542a3a9e60317563b204613",
       "tools/mem_profile/manifest.json": "c8f39b38447139404d34577a63dd22203272fd323ab57bdbfef4d60af2febc08",
@@ -37,6 +37,7 @@
       "tools/mem_fs/run.py": "583be63985ec5711001e50a7754b147b6312d4385df6bce9397aadb900657e76",
       "goals/memory-triage.md": "e5ed9781488b1099248ab353b2ac152cb7be4ab3d6330b6bbe5e71e4832a1c1b",
       "skills/strings/discipline.md": "c33bacce4c1586a72a3894f674ef5622ce67bc1ffe9685b1c21bf24bb6bb29a6",
+      "skills/memory/router.md": "d4db11f8423442b29f33a5c55890808eb0c6c7d3bcad22110149a60eb6f5cc65",
       "skills/patterns/yara.md": "0cea61e4a0bc111f696fec70ed47de888637cd241779f389c5915e8837d0945c",
       "skills/processes/injection.md": "1ebcee919230e1df158728c4360fb9f1f52d32952c69a0c709a6b52da1fbd93a",
       "skills/processes/preserve-regions.md": "1000d646187047d52e70da792293639e05805ddd2c20280cec8ebfe8a347a53e",
@@ -53,12 +54,12 @@
       "skills/triage/what-you-have.md": "e53aaa1e9821336ea998eabbd5404885ade95eaf390aa0c85216b59cf3c35154",
       "skills/acquire/avml-and-preserve.md": "d40ce2e11177261201ee6d3dd120caac30c4aae432b089cf5510d253515200cd",
       "skills/acquire/images.md": "a85d6f80e4bd8d7ea635d01c3147f480700882fe7b8d80232df4d0942abadd3a",
-      "skills/credentials/key-schedules.md": "a842b6792e48368313b7a4937f5c360901a4adafbe119e6b65c9369190c71c1d",
+      "skills/credentials/key-schedules.md": "c1b81365a424ced1b91853d7cceeeedf678470e4b00f3d7350184680ce3409a3",
       "skills/credentials/material.md": "99908d5b8ab136743cdc72d5ac785faf0a2e6dfacd2acbca2ed37a39542a75d2",
       "requires/host.json": "30964776820986c3bd16bd5a99f16545dfd9ea2984d43e680e7a97d8aba1de40",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "dd27febf64c0c6bcf13ca6154cd88ee37ec42eb3e185fce6566a5c3fbc598358"
+      "skills/INDEX.md": "1f5a26ecef65eadb6ae7b3e16a3930ff3fbdc475c3e7853f2ff7b9134a57a1e9"
     }
   },
   "tools": [
@@ -66,7 +67,7 @@
     "mem_fs",
     "mem_profile"
   ],
-  "skills": 19,
+  "skills": 20,
   "method_only": [
     {
       "path": "skills/acquire/images.md",
@@ -83,6 +84,10 @@
     {
       "path": "skills/triage/volatility-catalogue.md",
       "why": "a method leaf about reading the kickoff catalogue's receipts; it names no tool or program of this pack (the recipe belongs to the base pack)"
+    },
+    {
+      "path": "skills/memory/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
     }
   ]
 }

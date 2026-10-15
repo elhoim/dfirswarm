@@ -1,7 +1,7 @@
 ---
 id: logs/hunting
-title: Rule-based event review with sigma_hunt
-when: You search collected logs with a ruleset and must interpret detections and a clean result.
+title: Sigma review
+when: Rule search over logs; read detections.
 needs: []
 tools: [sigma_hunt, evtx_query, evtx_carve]
 requires_host: [zircolite, hayabusa]

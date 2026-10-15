@@ -1,7 +1,7 @@
 ---
 id: registry/readers
-title: Reading a regkv answer, and a second reader
-when: You read a key with regkv and must know what its answer covers and withholds.
+title: Reading with regkv
+when: What it withholds; a second reader.
 needs: [registry/overview]
 tools: [regkv]
 requires_host: [regfexport, RECmd, regripper]

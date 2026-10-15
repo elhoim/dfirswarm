@@ -11,6 +11,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { routerChecks } from "./pack-router-checks.ts";
 import { ROOT } from "./tool-library-harness.ts";
 
 const PACK = join(ROOT, "packs", "mobile-forensics");
@@ -44,17 +45,22 @@ async function load(root: string): Promise<Map<string, Skill>> {
   return out;
 }
 
+// The pack's one router: shown alone when a run's index is over budget, and names every other skill once (routerChecks below).
+const ROUTER = "mobile/router";
+
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., and has a short index entry", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, 10);
+  assert.equal(skills.size, 11);
   for (const s of skills.values()) {
-    assert.ok(TOKENS(s.text) <= 800, `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
+    assert.ok(TOKENS(s.text) <= (s.id === ROUTER ? 400 : 800), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
     assert.ok(s.text.split("\n").length <= 300, `${s.id} lines`);
     const first = s.body.trim().split("\n")[0];
     assert.match(first, /^Use (when|only if) /, `${s.id} opens with Use when`);
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
+    // The router reads no artefact: it names notes and holds no rule, so it has none of the four parts.
+    if (s.id === ROUTER) continue;
     for (const part of ["Shows", "Does not show", "Record", "Sensitive output"]) {
       if (part === "Sensitive output" && s.id === "apps/fragments") continue;
       assert.match(s.body, new RegExp(`^${part}:`, "m"), `${s.id} has ${part}`);
@@ -222,4 +228,16 @@ test("the split pass: apps/fragments is a second-level leaf reached by a pointer
     const total = [...seen].reduce((n, i) => n + TOKENS(all.get(i)?.text ?? ""), 0);
     assert.ok(total <= 1900, `${id} chain is ${Math.round(total)} tokens`);
   }
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+routerChecks({
+  pack: "mobile-forensics",
+  router: ROUTER,
+  before: [
+    "android/artifacts", "apps/databases", "apps/fragments", "extractions/backup-detail", "extractions/what-you-have", "ios/artifacts",
+    "ios/biome-segb", "ios/containers-and-time", "ios/unified-logs", "location/sources",
+  ],
+  profiles: ["mobile", "full"],
 });

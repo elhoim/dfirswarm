@@ -1,7 +1,7 @@
 ---
 id: accounts/sessions
-title: From account to logon session to person
-when: You tie activity to an account or logon session, or someone asks who was at the keyboard.
+title: Account, session, person
+when: Tie activity to an account or session.
 needs: [accounts/logons]
 tools: [evtx_query]
 requires_host: []

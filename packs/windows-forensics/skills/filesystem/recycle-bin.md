@@ -1,7 +1,7 @@
 ---
 id: filesystem/recycle-bin
-title: Recycle Bin $I records
-when: You need the original path, size and time of items sent to the Recycle Bin.
+title: Recycle Bin $I
+when: Original path, size, time.
 needs: [filesystem/deleted]
 tools: [recyclebin_i, usn_journal]
 requires_host: []

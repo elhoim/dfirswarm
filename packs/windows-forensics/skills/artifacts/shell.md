@@ -1,7 +1,7 @@
 ---
 id: artifacts/shell
-title: Links, Jump Lists and ShellBags: which to read
-when: Trace a path, volume or share through what the shell kept, without claiming an action.
+title: Links, Jump Lists, ShellBags
+when: Which one traces a path or share.
 needs: []
 tools: [lnk_parse, jumplist, shellbags]
 requires_host: [lnkinfo, olecfexport]

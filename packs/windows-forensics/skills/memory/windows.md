@@ -1,7 +1,7 @@
 ---
 id: memory/windows
-title: Windows memory sources: what this pack's tools can say
-when: A memory image, dump, hibernation file or pagefile needs a format, a route and its limits.
+title: Windows memory
+when: Image, dump, hiberfil: format, route, limits.
 needs: []
 tools: [file_type, mam_scan, evtx_carve, ioc_scan, sig_carve, yara_scan, utf16_urls, regkv]
 requires_host: [strings, yara, vol, memprocfs]

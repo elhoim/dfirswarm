@@ -256,6 +256,12 @@ matter, optional and at most one a pack:
 
     router: true
 
+The base pack is not the only one: `encrypted-containers`, `triage-collection`,
+`mobile-forensics`, `network-forensics` and `cloud-forensics` each name one too
+(`encrypted/router`, `triage/router`, `mobile/router`, `network/router` and
+`cloud/router`), and a router names no program, tool or rule, only which note
+answers which question.
+
 `pack.sh seal` refuses a value that is not `true` or `false`, and a second
 router. When there is one, the generated `skills/INDEX.md` carries a line
 ``Router: `<id>` `` above the entries; a pack with no router has no such line and
@@ -263,9 +269,12 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say. `computer-forensics-base` names one, `base/router`: its
-disk profile (base, encrypted-containers, windows) does not fit the run's index
-budget without it.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`, and
+so do `windows-forensics`, `linux-forensics`, `memory-forensics`,
+`macos-forensics` and `ransomware-response` (`<platform>/router`): a run of the
+base pack with windows-forensics and linux-forensics has 2,860 tokens of index
+entries whole, over the run's 2,500; the base router alone brings it to 1,898,
+and with the other two routers as well the prompt carries three router lines.
 
 ### Tool help stays out of the context window
 
@@ -841,7 +850,10 @@ header says how it matches a name and where that is wrong.
    and no tool provides is either added as a tool or taken out of the skill.
    What counts as a naming is the skill's text, front matter included, without
    `mentions:`, `id:` and `needs:`: an id is a path (`id: aws/cloudtrail`) and
-   does not name the program `aws`.
+   does not name the program `aws`; nor does a skill of the same pack cited by
+   its id (a router cites every leaf), but only a whole id with a `/` that is
+   set off by white space, quotes, brackets or punctuation: `aws/cloudtrail.py`,
+   `--src=aws/cloudtrail` and another pack's id still name the program.
 4. **A skill names something of its own pack, or says why it does not.** Every
    skill names at least one tool, program or package of the pack that ships it.
    A skill that legitimately names none (a method leaf about citing a claim,

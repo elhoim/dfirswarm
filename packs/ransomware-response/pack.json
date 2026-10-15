@@ -1,7 +1,7 @@
 {
   "id": "ransomware-response",
   "name": "Ransomware Response Pack",
-  "version": "1.2.1",
+  "version": "1.3.1",
   "description": "Evidence-led ransomware examination: preserve and scope the incident, reconstruct its phases, assess possible exfiltration and recovery impairment, identify supported family candidates, validate recovery options, and prepare qualified findings for notification and response decisions.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -58,13 +58,17 @@
     {
       "path": "skills/scope/phase-timeline.md",
       "why": "a method leaf about keeping a phase timeline; it names no tool or program"
+    },
+    {
+      "path": "skills/ransomware/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
     }
   ],
   "secrets": [],
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "aec010eaccf33de37846313f53f9a965da76ea4e6bae66c33983d2e70f3582f7",
+      "README.md": "9684278c9556adaa81a14eb9e899884215c0233559338a642b184cc8dae19a18",
       "tools/ransom_note_scan/manifest.json": "fdb727ac2fa1273e56de80ddb670ec808ceefb1adbddd27483a49f665a05e38e",
       "tools/ransom_note_scan/run.py": "23ec5d7ee4c2e6a35a3eb39a9556ce0cfc7f2558f33880a72a2425524d634a46",
       "tools/encrypted_survey/manifest.json": "f149c7543f41967fbb752be07e4ab61c18696babed4c5589c7e3fd684906ec6c",
@@ -87,14 +91,15 @@
       "skills/scope/first-hour.md": "cec879bfca6d5dbd754bcf314f247a0ae679259e4fe77a3d6659eca9b788d686",
       "skills/scope/phase-timeline.md": "fadd923ba83a6b5ca7f9aecbe967094bddc74c6afcde2d572e79fbc59e7bf5a8",
       "skills/scope/triage-tools.md": "49acac7ac989d776a0b9a9bf3e54c7f510569915c62940743175a538cb40c39b",
+      "skills/ransomware/router.md": "0b7606ddaf3d8f63262d343927b83127c71a97ce7d3afee8499c8bccc18624f4",
       "requires/host.json": "d5e732d918bec998617a63372b8e801afef1a3b20e842c233d29bdec92261d77",
       "requires/python.txt": "5a396319de276d1ea51953493ef8e4f2dd0d7cb87c67aac6fbd0e63c096d63b6",
-      "skills/INDEX.md": "f83b805b79d2fa42f433cc87ab078442043a950510052f8a4f1da40ff7b5b3d2"
+      "skills/INDEX.md": "0c96f21e287894d8530c426eb9b754036e6bdcb60dc2f23d6bd803902bc9afe9"
     }
   },
   "tools": [
     "encrypted_survey",
     "ransom_note_scan"
   ],
-  "skills": 17
+  "skills": 18
 }

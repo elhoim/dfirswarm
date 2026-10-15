@@ -1,7 +1,7 @@
 ---
 id: logs/coverage
-title: What a silent or gapped event log shows
-when: You are about to write that an event is absent, a channel empty or a record id missing.
+title: Gapped logs
+when: Before saying an event or channel is absent.
 needs: []
 tools: [evtx_query, regkv]
 requires_host: []

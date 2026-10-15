@@ -1,7 +1,7 @@
 ---
 id: registry/clock
-title: Windows clocks, zone rules, converting a time
-when: You convert or compare a Windows time, or a local-time value enters a timeline.
+title: Windows clocks
+when: Convert or compare a Windows time.
 needs: []
 tools: [mft_records, regkv]
 requires_host: [istat]
