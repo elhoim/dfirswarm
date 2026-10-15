@@ -387,10 +387,11 @@ KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
 # before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
-# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has. The GitHub and
+# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has, and twelve
+# characters, or four where the string or a path component ends (a name cut by a declared length ends there). The GitHub and
 # Slack prefixes are matched in any case: a resource compiler upper-cases a string resource name, and `XOXB-<digits>-...` keeps the digits.
 TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
-                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))|eyJ[A-Za-z0-9_-]{6,}")
 # The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
 # as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
 PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
