@@ -21,6 +21,6 @@ Run `doc_structure` in a job; read `status`, `problems`, `limits_hit` and `cover
 **RTF**
 6. `structure` (open groups, stray braces, trailing bytes) and `objects`: kind, class, hex length, data `signature` (no byte printed), OLE 1.0 header; a compound-file payload is in `nested_compound_file`. `fields`: `instruction_word` (a known field type, `=` a formula) and length; `templates`: a redacted target and length. Each is a row of `rtf_fields` or `rtf_templates`, whole in the values file with `write_values`; one past its bound is cut, a limit. `\bin` data is skipped by its length.
 
-Sensitive output: scripts, targets and embedded files can hold credentials: `secret_output: true` with `extract` or `write_values` (else targets are redacted); cite object, finding id, length.
+Sensitive output: scripts, targets and embedded files can hold credentials: `secret_output: true` with `extract` or `write_values` (else targets are redacted by shape); cite object, finding id, length.
 
 Shows: structure, actions and triggers, where embedded content is. Does not show: that an action ran or a fetch happened, what encrypted content holds. Record: status, problems, `structure_source`, revisions, object numbers, extracted files.
