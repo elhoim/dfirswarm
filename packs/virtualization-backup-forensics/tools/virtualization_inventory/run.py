@@ -939,7 +939,7 @@ def _free_once(text, kind):
 
 
 # ---- layer 1: the allow-list ---------------------------------------------------------------------------------------------
-_NAME_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%-]*")
+_NAME_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%$-]*")
 _PATH_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%{}$-]*")
 _VERSION_PLAIN = re.compile(r"[A-Za-z0-9 ._()+\[\]'#,&~%/-]*")
 _SEP_DIGITS = re.compile(r"(?<=[0-9])[:/](?=[0-9])")
@@ -960,7 +960,7 @@ _ID_EMBEDDED = re.compile(
 _ID_FORMS = re.compile(
     r"\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?|[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|(?:[0-9A-Fa-f]{2} ){7}[0-9A-Fa-f]{2}-(?:[0-9A-Fa-f]{2} ){7}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2} ){15}[0-9A-Fa-f]{2}"
-    r"|[0-9A-Fa-f]{1,16}|[0-9A-Fa-f]{32}|[0-9]{1,18}|(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}"
+    r"|[0-9A-Fa-f]{1,16}|[0-9A-Fa-f]{32}|[0-9]{1,18}|(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}"
     r"|naa\.[0-9a-fA-F]{16,32}|eui\.[0-9a-fA-F]{16}|wwn-0x[0-9a-fA-F]{16}|vml\.[0-9a-fA-F]{20,40}|mpx\.vmhba[0-9]+:C[0-9]+:T[0-9]+:L[0-9]+"
     r"|[A-Za-z][A-Za-z0-9_.-]{0,15}[0-9]{0,6}")
 _DENY_IN_IDENT = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_|xox[abeprs]-|glpat-|(?:sk|rk|pk)_(?:live|test)_|SG\.[A-Za-z0-9_-]{8,}"
