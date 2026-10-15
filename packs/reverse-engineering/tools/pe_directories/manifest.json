@@ -50,7 +50,7 @@
     },
     "max_seconds": {
       "type": "integer",
-      "description": "The tool's own time limit in seconds, from 1 to 110 (default 100); a read that reaches it stops, reports what it read and says so"
+      "description": "The tool's own time limit for reading, in seconds, from 1 to 90 (default 70); a read that reaches it stops, reports what it read and says so. The answer is built after it and takes up to some seconds more (a call that has not answered within 105 s ends with a failed answer saying so, before the manifest's 120 s limit)"
     }
   },
   "runtime": "python3",
@@ -60,5 +60,5 @@
   "by": "maintainer",
   "at": "2026-10-14T09:00:00.000Z",
   "version": 1,
-  "sha256": "169593659b3e49b0e333a338fe05ad5fa247086d85ed8633b42c4b55f07239d8"
+  "sha256": "9f8ed1481bacb77f442c7b13419c83254bc63a20fb086a7bb33c61c0e11d2ae6"
 }
