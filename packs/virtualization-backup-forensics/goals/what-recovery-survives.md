@@ -71,7 +71,7 @@ answer, saying what they verified. `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'UTC' work/report.md`
-- `awk '/^## 7\./,/^## 8\./' work/report.md | grep -qiE 'recovery position:[*_ ]*(restorable and tested|present with chain whole and untested|present with chain incomplete|absent in the listings examined|unknown)'`
+- `awk '/^## [0-9]+\./{s=/^## 7\./} s && tolower($0) ~ /recovery position:[*_ ]*(restorable and tested|present with chain whole and untested|present with chain incomplete|absent in the listings examined|unknown)/{f=1} END{exit !f}' work/report.md`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

@@ -26,9 +26,9 @@ Each marker is a candidate with its observation beside it. Read the observation 
 1. **Corroborate with the platform's own records** of the operation: the task or event for a snapshot remove, consolidate or power operation (`hypervisor/activity`). A marker without such a record stays a candidate.
 2. **Compare file times** on the delta, the parent and the configuration, remembering that a copy sets times as well as an edit. Hash the files before touching them.
 3. **Internal QCOW2 snapshots** list name, id and a host-side creation time with their entries; the names are what their creator wrote. They show the image contained snapshots, not who removed one.
-4. **What would weaken a reading:** the same flag on a clean copy made by the same procedure, a second copy of the file without it, a task record showing a normal shutdown.
+4. **What would weaken a reading:** the same flag on a clean copy made the same way, a second copy without it, a task record of a normal shutdown.
 5. **Do not name a cause** ("tampering", "failed backup") from a marker. Say what the files show, what else would show it, and what you asked for.
 
 **Shows.** A flag, bit or leftover file as written. **Does not show.** Who or what caused it, when, or whether data was lost.
 **Record.** Marker, source id, the observation verbatim, corroborating or contradicting records, and the alternatives.
-**Sensitive output.** Run `snapshot_chain_check` as a job with `secret_output: true`; names in the answer are shape-checked, not secret-proof.
+**Sensitive output.** Run `snapshot_chain_check` as a job with `secret_output: true`. A name, path or id is shown only if plain (no `=` or `@`, no token-like run; GUIDs, VMFS and `naa.` ids stay), else `<withheld: N bytes, field F>`; a short password used as a name passes unseen.

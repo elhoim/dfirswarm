@@ -46,6 +46,25 @@ test("the recovery-position check passes on a stated position in answer 7 and on
   assert.equal(await passes(REPORT("Recovery position: restorable - vm1")), false, "restorable without the test is not a state");
 });
 
+test("the check is one awk pass bound to answer 7: no pipe, no SIGPIPE under pipefail on a 300 KB report, and no event-count minimum in the template", async () => {
+  const text = await readFile(GOAL, "utf8");
+  assert.doesNotMatch(await check(), /\s\|\s|\|\s*(grep|tail|head|wc)/, "the check has no pipe to another command");
+  assert.doesNotMatch(text.slice(text.indexOf("## Checks")), /wc -l|-ge [0-9]|events\.jsonl.*(count|wc)/, "no event-count minimum");
+  const dir = await mkdtemp(join(tmpdir(), "goal-big-"));
+  try {
+    await mkdir(join(dir, "work"));
+    const filler = "A line of evidence about a chain that is whole in the set.\n".repeat(5000);          // about 290 KB
+    const report = `## 1.\n${filler}## 6.\nStates.\n## 7.\nRecovery position: unknown - vm100\n${filler}## 8.\nUnknowns.\n`;
+    assert.ok(report.length > 300_000);
+    await writeFile(join(dir, "work", "report.md"), report);
+    assert.equal(spawnSync("bash", ["-c", `set -euo pipefail; ${await check()}`], { cwd: dir }).status, 0);
+    await writeFile(join(dir, "work", "report.md"), `## 7.\n${filler}## 8.\nRecovery position: unknown - vm1\n`);
+    assert.notEqual(spawnSync("bash", ["-c", `set -euo pipefail; ${await check()}`], { cwd: dir }).status, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the definition of done names the five states, forbids a credential or a hash of a secret in the report, and the checks do not weaken what the harness holds", async () => {
   const text = await readFile(GOAL, "utf8");
   const done = text.slice(text.indexOf("## Definition of done"), text.indexOf("## Checks"));
