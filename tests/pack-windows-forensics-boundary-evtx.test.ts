@@ -74,16 +74,37 @@ for (const shape of shapes) {
   });
 }
 
-test("evtx_query and evtx_carve: contains is looked for in what is shown, so a needle cannot be used to test a withheld value", async () => {
+test("evtx_query and evtx_carve: contains is looked for in what is shown, so a needle cannot be used to test a withheld value, and the answer says what it could not see", async () => {
   await withCwd(async (cwd) => {
     const secret = "AKIAQWERTYUIOPASDFGH";
     const records = [{ number: 1, xml: eventXml({ eid: 4688, rec: 1, data: [["CommandLine", `aws configure set aws_access_key_id ${secret} --profile p`]] }) }, { number: 2, xml: eventXml({ eid: 4688, rec: 2, data: [["CommandLine", "whoami /all"]] }) }];
-    const env = await put(cwd, records);
+    const matched = (a: Answer): number => a.events_matched ?? a.record_count;
+    const blind = (a: Answer): number => a.contains_blind_records;
     for (const [name, p] of [["evtx_query", "work/Security.evtx"], ["evtx_carve", "work/blob.bin"]] as const) {
+      const env = await put(cwd, records);
       const hit = body<Answer>(await tool(name, cwd, { path: p, contains: secret.slice(0, 12) }, env));
-      assert.equal(hit.events_matched ?? hit.record_count, 0, `${name}: a needle that is part of a withheld value matches nothing`);
+      assert.equal(matched(hit), 0, `${name}: a needle that is part of a withheld value matches nothing`);
+      // ... and the answer does not say "complete, none": one record was not matched and has text withheld in it
+      assert.equal(blind(hit), 1, `${name}: the record whose text is withheld is counted`);
+      assert.equal(hit.status, "partial", name);
+      assert.match(JSON.stringify(hit.problems ?? hit.problem_page ?? hit), /contains looks only in the text that is shown/, name);
+      // the count does not depend on the needle: it is no way to test a guess
+      const other = body<Answer>(await tool(name, cwd, { path: p, contains: "no-such-needle-at-all" }, env));
+      assert.equal(blind(other), 1, `${name}: the same count for another needle`);
+      assert.equal(matched(other), 0);
+      // the shown text is searchable; the record with withheld text did not match, so it is still counted
       const shown = body<Answer>(await tool(name, cwd, { path: p, contains: "aws_access_key_id" }, env));
-      assert.equal(shown.events_matched ?? shown.record_count, 1, `${name}: the shown text is searchable`);
+      assert.equal(matched(shown), 1, `${name}: the shown text is searchable`);
+      assert.equal(blind(shown), 0, `${name}: the record that matched is not blind`);
+      assert.equal(shown.status, "complete", name);
+      // text nowhere withheld: an absence is an absence
+      const none = body<Answer>(await tool(name, cwd, { path: p, contains: "whoami", event_ids: [4688] }, env));
+      assert.equal(matched(none), 1);
+      const nothingHidden = await put(cwd, [{ number: 1, xml: eventXml({ eid: 4688, rec: 1, data: [["CommandLine", "whoami /all"]] }) }]);
+      const absent = body<Answer>(await tool(name, cwd, { path: p, contains: "zzz-not-there" }, nothingHidden));
+      assert.equal(matched(absent), 0);
+      assert.equal(blind(absent), 0);
+      assert.equal(absent.status, "complete", `${name}: nothing is withheld, so none is none`);
     }
   });
 });
