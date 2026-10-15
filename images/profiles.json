@@ -1,9 +1,13 @@
 {
   "profiles": {
     "base": [],
+    "core": [
+      "computer-forensics-base"
+    ],
     "disk": [
       "computer-forensics-base",
       "encrypted-containers",
+      "virtualization-backup-forensics",
       "windows-forensics"
     ],
     "memory": [
@@ -22,6 +26,15 @@
     "mobile": [
       "mobile-forensics"
     ],
+    "macos": [
+      "macos-forensics"
+    ],
+    "cloud": [
+      "cloud-forensics"
+    ],
+    "triage": [
+      "triage-collection"
+    ],
     "full": [
       "cloud-forensics",
       "encrypted-containers",
@@ -33,6 +46,7 @@
       "ransomware-response",
       "reverse-engineering",
       "triage-collection",
+      "virtualization-backup-forensics",
       "windows-forensics"
     ],
     "web": {

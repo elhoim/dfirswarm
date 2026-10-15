@@ -44,7 +44,7 @@ import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sa
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
-import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
+import { declaredSecretOutput, derivedFrom, derivedSensitivity, ownSensitivity, parseSecretDeclaration, recipeSecretRefusal, sensitiveIndex, snapshotObjects, type SecretDeclaration, type Sensitivity } from "./output-hygiene.ts";
 import { execRefused, execRefusedWords, type ExecRefused } from "./job-exec-refused.ts";
 import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
@@ -219,10 +219,13 @@ export type JobSpec = {
   independent?: boolean;
   /**
    * Every output this job seals is sensitive (docs/adr/0016): its result
-   * may hold a secret. Said by the agent; the harness never reads the bytes
-   * to decide.
+   * may hold a secret. Said by the agent, or declared by the tool's manifest
+   * (secret_output_by); the harness never reads the bytes to decide. The
+   * job's process is told with SECRET_OUTPUT=1.
    */
   secret_output?: boolean;
+  /** The tool's manifest declared this job secret output (a "secret_output" key it reads: output-hygiene.ts parseSecretDeclaration), whether or not the agent said so. */
+  secret_output_by?: "tool_manifest";
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -328,6 +331,8 @@ export type RecipeInfo = {
   capability?: string;
   exclusions?: string[];
   unavailable?: string;
+  /** Why the recipe is never run: it carries a secret_output declaration, which only tool jobs honour (recipeSecretRefusal). */
+  refused?: string;
 };
 
 /** The requester the derived catalogue's work runs as: the lowest lane. */
@@ -737,12 +742,13 @@ export class JobService {
         if (pid !== m[1]) continue;
         const dir = join(pack, "recipes", m[2]);
         try {
-          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }>; version?: string; description?: string; purpose?: string; capability?: string; exclusions?: unknown[]; unavailable?: string };
+          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }>; version?: string; description?: string; purpose?: string; capability?: string; exclusions?: unknown[]; unavailable?: string; secret_output?: unknown };
           const entry = join(dir, String(r.entry ?? ""));
           const sha = sha256Hex(await readFile(entry));
           if (r.sha256 && r.sha256 !== sha) return null;
           const broad = r.purpose === "broad_extraction";
           const unavailable = typeof r.unavailable === "string" && r.unavailable.trim() ? r.unavailable.trim() : undefined;
+          const refused = recipeSecretRefusal(id, Object.hasOwn(r, "secret_output"));
           return {
             id,
             dir,
@@ -750,8 +756,9 @@ export class JobService {
             entry,
             sha256: sha,
             seconds: Number(r.limits?.seconds ?? 900),
-            // A recipe the images cannot run is never triggered.
-            auto: unavailable ? [] : (r.auto ?? []),
+            // A recipe the images cannot run, or that carries a declaration it cannot honour, is never triggered.
+            auto: unavailable || refused ? [] : (r.auto ?? []),
+            ...(refused ? { refused } : {}),
             minBytes: Number(r.min_bytes ?? 0) || 0,
             ...(Array.isArray(r.suffixes) ? { suffixes: r.suffixes.map((x) => String(x).toLowerCase()) } : {}),
             ...(Array.isArray(r.magic) ? { magic: r.magic.filter((m) => Number.isInteger(m.offset) && /^([0-9a-f]{2})+$/i.test(m.hex ?? "")).map((m) => ({ offset: Number(m.offset), bytes: Buffer.from(String(m.hex), "hex") })) } : {}),
@@ -772,12 +779,13 @@ export class JobService {
     if (/^tool:[a-z0-9_]+$/.test(id) && this.o.forging) {
       const name = id.slice(5);
       try {
-        const man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8")) as { recipe?: boolean; runtime?: string; entry?: string; sha256?: string; timeout_seconds?: number };
+        const man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8")) as { recipe?: boolean; runtime?: string; entry?: string; sha256?: string; timeout_seconds?: number; secret_output?: unknown };
         if (man.recipe !== true) return null;
         const entry = join(this.S, "tools", name, String(man.entry ?? ""));
         const sha = sha256Hex(await readFile(entry));
         if (man.sha256 !== sha) return null;
-        return { id, dir: join(this.S, "tools", name), runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, seconds: Math.min(Number(man.timeout_seconds ?? 900), TIMEOUT_MAX_SECONDS), auto: [], experimental: true };
+        const refused = recipeSecretRefusal(id, Object.hasOwn(man, "secret_output"));
+        return { id, dir: join(this.S, "tools", name), runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, seconds: Math.min(Number(man.timeout_seconds ?? 900), TIMEOUT_MAX_SECONDS), auto: [], experimental: true, ...(refused ? { refused } : {}) };
       } catch {
         return null;
       }
@@ -802,16 +810,16 @@ export class JobService {
       }
       for (const name of names) {
         const r = await this.recipe(`${pid}/${name}`);
-        if (r && (trigger === "request" || r.auto.includes(trigger))) out.push(r);
+        if (r && !r.refused && (trigger === "request" || r.auto.includes(trigger))) out.push(r);
       }
     }
     return out;
   }
 
   /** A pack or forged tool, sealed as its manifest says, and its arguments checked against the manifest's params. */
-  private async toolCheck(name: string, args: Record<string, unknown>): Promise<{ ok: true; runtime: string; entry: string; sha256: string } | { ok: false; reason: string }> {
+  private async toolCheck(name: string, args: Record<string, unknown>): Promise<{ ok: true; runtime: string; entry: string; sha256: string; secret: boolean } | { ok: false; reason: string }> {
     if (!/^[a-z0-9_]{1,64}$/.test(name)) return { ok: false, reason: `${name} is not a tool name` };
-    let man: { runtime?: string; entry?: string; sha256?: string; params?: Record<string, { type?: string; required?: boolean; enum?: string[] }> };
+    let man: { runtime?: string; entry?: string; sha256?: string; secret_output?: unknown; params?: Record<string, { type?: string; required?: boolean; enum?: string[] }> };
     try {
       man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8"));
     } catch {
@@ -826,6 +834,8 @@ export class JobService {
     }
     if (man.sha256 !== sha) return { ok: false, reason: `tool ${name}'s script does not match its manifest's sha256` };
     for (const [key, p] of Object.entries(man.params ?? {})) {
+      // A parameter that is not an object (null, a number, a list) cannot be read: refused, never a TypeError out of submit.
+      if (!p || typeof p !== "object" || Array.isArray(p)) return { ok: false, reason: `tool ${name}: its manifest's parameter ${key} is not an object` };
       const v = args[key];
       if (v === undefined || v === null) {
         if (p.required) return { ok: false, reason: `tool ${name} needs ${key}` };
@@ -836,8 +846,14 @@ export class JobService {
       if (!ok) return { ok: false, reason: `tool ${name}: ${key} must be ${t === "integer" ? "an integer" : `a ${t}`}` };
       if (p.enum && !p.enum.includes(String(v))) return { ok: false, reason: `tool ${name}: ${key} must be one of ${p.enum.join(", ")}` };
     }
-    for (const key of Object.keys(args)) if (!(key in (man.params ?? {}))) return { ok: false, reason: `tool ${name} takes no ${key}` };
-    return { ok: true, runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha };
+    for (const key of Object.keys(args)) if (!Object.hasOwn(man.params ?? {}, key)) return { ok: false, reason: `tool ${name} takes no ${key}` };
+    // Its manifest's word on secret output (a job of the tool is run as the
+    // agent's secret_output would run it): read here, from the manifest this
+    // job runs, and refused when it is not understood.
+    const declared = parseSecretDeclaration(man.secret_output, man.params, Object.hasOwn(man, "secret_output"));
+    if (!declared.ok) return { ok: false, reason: `tool ${name}: ${declared.reason}` };
+    const secret = declaredSecretOutput(declared.declaration as SecretDeclaration | null, args);
+    return { ok: true, runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, secret };
   }
 
   /**
@@ -1034,6 +1050,8 @@ export class JobService {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
       if (!checked.ok) return { reason: checked.reason };
+      // The tool's manifest says this job is secret output: so it is, whatever the agent said (false included).
+      if (checked.secret) return { ...base, secret_output: true, secret_output_by: "tool_manifest", tool: String(raw.tool), args };
       return { ...base, tool: String(raw.tool), args };
     }
     if (kind === "command") {
@@ -1064,6 +1082,7 @@ export class JobService {
     if (kind === "recipe") {
       const r = raw.recipe ? await this.recipe(String(raw.recipe)) : null;
       if (!r) return { reason: `no recipe ${raw.recipe ?? "(none named)"} in this run's packs${this.o.forging ? " (a forged tool is named tool:<name> and must declare \"recipe\": true)" : ""}` };
+      if (r.refused) return { reason: r.refused };
       if (r.unavailable) return { reason: `${r.id} is declared by its pack but cannot run in this run's job images: ${r.unavailable}. Its preparation of each source it applies to is recorded declined with that why; read the source with the tools the images hold` };
       const target = raw.target;
       if (!target || !Array.isArray(target.paths) || !target.paths.length) return { reason: "a recipe job needs a target" };
@@ -1327,10 +1346,13 @@ export class JobService {
       observe
         ? [...pip, ...HEARTBEAT_LINES, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), HEARTBEAT_STOP, ...pipAfter]
         : [...pip, ...HEARTBEAT_LINES, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", HEARTBEAT_STOP, ...pipAfter];
-    const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`];
+    // SECRET_OUTPUT=1 for a job run as secret output (the agent's flag, or its tool's manifest), so a tool can refuse a values mode in a job that is not; unset for any other, whatever the image carries.
+    const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`, job.spec.secret_output === true ? "export SECRET_OUTPUT=1" : "unset SECRET_OUTPUT"];
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
       if (!checked.ok) throw new Error(checked.reason);
+      // The manifest now declares what the job's spec, taken at acceptance, does not carry: not run unsealed.
+      if (checked.secret && job.spec.secret_output !== true) throw new Error(`tool ${job.spec.tool}: its manifest declares this job secret output, but the job was accepted without that (the manifest changed since); ask for it again`);
       // A tool that writes files takes an output path: the agent cannot know
       // the job's directory before it is accepted, so {OUT} names it.
       const out = this.outPath(job);
@@ -1349,6 +1371,8 @@ export class JobService {
     if (job.spec.kind === "recipe") {
       const r = await this.recipe(job.spec.recipe ?? "");
       if (!r) throw new Error(`recipe ${job.spec.recipe} is no longer what it was when accepted`);
+      // The manifest or recipe.json may carry the key now, though it did not when the job was accepted: not run.
+      if (r.refused) throw new Error(r.refused);
       await writeFile(join(ctl, "target.json"), JSON.stringify(job.spec.target));
       return { lines: [...head, ...run(`${r.runtime} ${q(r.entry)} run --target /job/target.json --out "$OUT"`)], tool_sha256: r.sha256 };
     }
@@ -1452,7 +1476,7 @@ export class JobService {
       maxDurationSec: job.spec.timeout_seconds + 120,
       workdir: this.S,
       mounts: placed.mounts,
-      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(net?.env ?? {}) },
+      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(job.spec.secret_output === true ? { SECRET_OUTPUT: "1" } : {}), ...(net?.env ?? {}) },
       network,
       ...(net ? { hostPorts: [net.port] } : {}),
       command: ["bash", "/job/run.sh"],
@@ -2687,7 +2711,7 @@ export function describe(job: JobRecord): string {
 /** What a sensitive job's outputs mean for whoever uses them, in one sentence. */
 export function sensitiveWords(job: Pick<JobRecord, "id" | "sensitive">): string {
   if (!job.sensitive) return "";
-  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? "it ran with secret_output" : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
+  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? `it ran with secret_output${job.sensitive.declared === "tool_manifest" ? ", which the tool's manifest declares" : ""}` : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
 }
 
 
@@ -2720,6 +2744,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
+    ...(job.spec.secret_output_by ? { secret_output_by: job.spec.secret_output_by } : {}),
     ...(job.sensitive ? { sensitive: sensitiveWords(job) } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;

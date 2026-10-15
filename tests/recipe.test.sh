@@ -30,18 +30,330 @@ export DFIRSWARM_HOME="$TMP/home"
 [[ "$(python3 "$R" profile-for memory-forensics)" == memory ]] || fail "memory-forensics should be memory"
 got="$(python3 "$R" profile-for ransomware-response)"
 [[ "$got" == re ]] || fail "ransomware-response is held by re, which beats memory, a smaller image that covers it only by chance; got $got"
-[[ "$(python3 "$R" profile-for macos-forensics)" == mobile ]] || fail "macos-forensics is held by mobile, as mobile-forensics' dependency"
-[[ "$(python3 "$R" profile-for triage-collection)" == full ]] || fail "triage-collection is held by full alone and covered by nothing smaller"
+[[ "$(python3 "$R" profile-for macos-forensics)" == macos ]] || fail "macos-forensics has its own profile; mobile holds it only as mobile-forensics' dependency"
+[[ "$(python3 "$R" profile-for mobile-forensics)" == mobile ]] || fail "mobile-forensics should be mobile"
+[[ "$(python3 "$R" profile-for cloud-forensics)" == cloud ]] || fail "cloud-forensics has its own profile"
+[[ "$(python3 "$R" profile-for triage-collection)" == triage ]] || fail "triage-collection has its own profile"
 [[ "$(python3 "$R" profile-for no-such-pack)" == full ]] || fail "an unknown pack cannot be covered by anything smaller than full"
+# The base pack alone has the `core` image (the pack and its programs, the
+# Sleuth Kit among them, and no other pack's); a run with no packs at all has
+# the agents' bare image.
+[[ "$(python3 "$R" profile-for computer-forensics-base)" == core ]] || fail "the base pack alone should be core: $(python3 "$R" profile-for computer-forensics-base)"
+[[ "$(python3 "$R" profile-for)" == base ]] || fail "a run with no packs should be base"
+jp="$(python3 "$R" job-profiles computer-forensics-base)"
+jq -e '. == {"computer-forensics-base": "core"}' <<<"$jp" >/dev/null || fail "a run whose only job-needing pack is the base pack should boot core: $jp"
 # A run's job images: each pack in its own profile, and a dependency every
 # profile holds with its dependents, not in the smallest image that holds it.
 jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics mobile-forensics encrypted-containers macos-forensics)"
-jq -e '. == {"computer-forensics-base": "disk", "windows-forensics": "disk", "mobile-forensics": "mobile", "encrypted-containers": "disk", "macos-forensics": "mobile"}' <<<"$jp" >/dev/null \
-  || fail "the base pack of a disk and mobile run should run in disk, not in memory: $jp"
+# disk and mobile each hold three of the run's packs (the base pack with two of the others); the tie goes to the profile of the
+# fewest packs, and disk holds four since virtualization-backup-forensics joined it, so the base pack runs in mobile (it was disk).
+jq -e '. == {"computer-forensics-base": "mobile", "windows-forensics": "disk", "mobile-forensics": "mobile", "encrypted-containers": "disk", "macos-forensics": "mobile"}' <<<"$jp" >/dev/null \
+  || fail "the base pack of a disk and mobile run should run in mobile (three of the run's packs, the fewest packs of the tie), not in memory or disk: $jp"
 jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics encrypted-containers linux-forensics)"
 [[ "$(jq -r '."computer-forensics-base"' <<<"$jp")" == disk ]] || fail "the base pack goes where most of the run's packs are (disk, two), not linux (one): $jp"
 [[ "$(python3 "$R" job-profiles computer-forensics-base memory-forensics | jq -r '."computer-forensics-base"')" == memory ]] || fail "with memory-forensics alone, the base pack runs in memory"
-pass "the smallest profile that holds or covers the packs is chosen, and full only when nothing smaller serves"
+# A plain mobile-forensics run boots ONE job image: swarm.sh hands recipe.py the
+# run's packs with their dependencies, the base pack and macos-forensics beside
+# mobile-forensics. macos-forensics has a profile of its own now, and the base
+# pack, which every profile holds, must go where the run's packs ended up and
+# not be given `macos` (or `memory`) for itself.
+jp="$(python3 "$R" job-profiles computer-forensics-base macos-forensics mobile-forensics)"
+jq -e '. == {"computer-forensics-base": "mobile", "macos-forensics": "mobile", "mobile-forensics": "mobile"}' <<<"$jp" >/dev/null \
+  || fail "a mobile-forensics run (with the base pack and macos-forensics) should boot one job image, mobile: $jp"
+jp="$(python3 "$R" job-profiles computer-forensics-base macos-forensics)"
+jq -e '. == {"computer-forensics-base": "macos", "macos-forensics": "macos"}' <<<"$jp" >/dev/null \
+  || fail "a macos-forensics run should boot one job image, macos: $jp"
+jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics macos-forensics)"
+jq -e '. == {"computer-forensics-base": "macos", "windows-forensics": "disk", "macos-forensics": "macos"}' <<<"$jp" >/dev/null \
+  || fail "the base pack goes to the profile of the fewest packs that holds it (macos, two; disk, three): $jp"
+pass "a pack goes to the smallest profile that holds it, a pack no profile lists to the smallest that covers it, and full only when nothing smaller serves"
+
+# The invariants of images/profiles.json. `full` holds every pack under
+# packs/ (images/README.md says so, and a pack added without a line in `full`
+# fails here). Every pack resolves, by profile-for, to a profile that holds it
+# (it and its dependencies are among the profile's packs): never to a profile
+# that merely names the same programs, which is every profile for a pack of
+# stdlib Python. A pack with an image of its own gets it.
+python3 - "$ROOT" <<'PYEOF'
+import json, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "images"))
+import recipe
+
+packs = sorted(p.parent.name for p in (root / "packs").glob("*/pack.json"))
+assert len(packs) >= 12, f"found only {packs}"
+table = recipe.profiles()
+members = {n: set(recipe.resolve(recipe.PACKS, v["packs"])) for n, v in table.items() if not v.get("apt")}
+missing = [p for p in packs if p not in members["full"]]
+assert not missing, f"packs missing from profiles.json's full: {missing}"
+unknown = sorted({m for v in table.values() for m in v["packs"]} - set(packs))
+assert not unknown, f"profiles.json names packs that are not under packs/: {unknown}"
+chosen = {}
+for p in packs:
+    out = subprocess.run([sys.executable, str(root / "images" / "recipe.py"), "profile-for", p],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    chosen[p] = out
+    assert out in members, f"{p}: profile-for gave {out!r}, which is no profile"
+    assert p in members[out], f"{p}: profile-for gave {out}, which does not hold it ({sorted(members[out])})"
+    smaller = [n for n, m in members.items() if n != "full" and p in m and len(m) < len(members[out])]
+    assert not smaller, f"{p}: {out} is not the smallest holder; {smaller} hold it with fewer packs"
+for pack, profile in {"macos-forensics": "macos", "cloud-forensics": "cloud", "triage-collection": "triage",
+                      "mobile-forensics": "mobile", "windows-forensics": "disk", "memory-forensics": "memory",
+                      "reverse-engineering": "re", "ransomware-response": "re", "network-forensics": "network",
+                      "linux-forensics": "linux", "encrypted-containers": "disk", "computer-forensics-base": "core"}.items():
+    assert chosen[pack] == profile, f"{pack}: expected {profile}, got {chosen[pack]}"
+# The images a run boots (the default image, which holds every pack, and the
+# job images) against tests/fixtures/job-images-main.json, frozen from the
+# recipe and profiles before the macos, cloud and triage profiles: every pack,
+# every pair and twelve larger runs, each as swarm.sh hands it to recipe.py
+# (the packs with their dependencies). The only differences allowed are the
+# ones this change makes on purpose.
+NEW_PROFILES = {"macos", "cloud", "triage"}
+NEW_PACKS = {"macos-forensics", "cloud-forensics", "triage-collection"}
+BASE_PACK = "computer-forensics-base"
+# Documented in the changelog and images/README.md: no profile but full holds
+# these pairs, which a smaller one used to serve by chance.
+BY_HOLDING = {"encrypted-containers+ransomware-response", "memory-forensics+ransomware-response",
+              "ransomware-response+windows-forensics"}
+# Where the base pack's own jobs run (the third value of each entry). The set
+# of images a run boots does not change for a run without a pack of the new
+# profiles, but the base pack, which every profile holds, runs in another image
+# of that set in ten of these runs, and in `core` when it is the run's only
+# pack. It was `memory` whenever `memory` was booted, wherever the other packs
+# ran; it is now the image most of the run's packs run in, then the one of the
+# fewest packs, then the name. Documented in images/README.md. Any other move of
+# the base pack fails here.
+PLACED = {
+    BASE_PACK: ("memory", "core"),
+    "computer-forensics-base+linux-forensics+memory-forensics+network-forensics": ("memory", "linux"),
+    "computer-forensics-base+memory-forensics+reverse-engineering+ransomware-response": ("memory", "re"),
+    "computer-forensics-base+windows-forensics+encrypted-containers+memory-forensics+reverse-engineering+ransomware-response+network-forensics": ("memory", "re"),
+    "computer-forensics-base+windows-forensics+memory-forensics+network-forensics+linux-forensics+mobile-forensics": ("memory", "mobile"),
+    "linux-forensics+memory-forensics": ("memory", "linux"),
+    "memory-forensics+mobile-forensics": ("memory", "mobile"),
+    # `disk` holds virtualization-backup-forensics beside its three packs, so a tie it used to win on the fewest packs goes to `re`.
+    "encrypted-containers+ransomware-response": ("disk", "re"),
+    "encrypted-containers+reverse-engineering": ("disk", "re"),
+    "ransomware-response+windows-forensics": ("disk", "re"),
+    "reverse-engineering+windows-forensics": ("disk", "re"),
+}
+
+def booted(run, base_job=False):
+    full = recipe.resolve(recipe.PACKS, run)
+    default = recipe.profile_for(recipe.PACKS, full)
+    jobs = recipe.job_profiles(recipe.PACKS, full)
+    images = sorted(set(jobs.values()) | {default})
+    return (default, images, jobs[BASE_PACK]) if base_job else (default, images)
+
+frozen = json.loads((root / "tests" / "fixtures" / "job-images-main.json").read_text())
+assert len(frozen) >= 90, len(frozen)
+assert BY_HOLDING <= set(frozen) and BASE_PACK in frozen, "the frozen table lacks a documented run"
+differing, placed = set(), set()
+for key, (old_default, old_images, old_base) in frozen.items():
+    new_default, new_images, new_base = booted(key.split("+"), base_job=True)
+    # `core` is booted for a run whose job-needing pack is the base pack alone
+    # and for no other run: a run that booted a domain image on main boots no
+    # extra image, and no run without a pack of the new profiles (or one of the
+    # three pairs below) boots more images than it did.
+    assert "core" not in new_images or key == BASE_PACK, (key, new_images)
+    assert key in BY_HOLDING or NEW_PACKS & set(key.split("+")) or len(new_images) <= len(old_images), (key, old_images, new_images)
+    if not NEW_PACKS & set(key.split("+")) and new_base != old_base:
+        assert PLACED.get(key) == (old_base, new_base), (key, "the base pack's jobs moved from", old_base, "to", new_base)
+        placed.add(key)
+    if (new_default, new_images) == (old_default, old_images):
+        continue
+    differing.add(key)
+    if key in BY_HOLDING:
+        assert new_default == "full" and new_images == sorted(set(old_images) | {"full"}), (key, old_default, old_images, new_default, new_images)
+    elif key == BASE_PACK:
+        assert (new_default, new_images) == ("core", ["core"]), (key, new_default, new_images)
+    elif NEW_PACKS & set(key.split("+")):
+        assert set(new_images) - set(old_images) <= NEW_PROFILES and new_default in NEW_PROFILES | {old_default}, \
+            (key, "may differ only by a new profile", old_default, old_images, new_default, new_images)
+    else:
+        raise AssertionError(f"{key}: booted {old_default} {old_images} before the new profiles, {new_default} {new_images} now")
+assert BY_HOLDING | {BASE_PACK} <= differing, "a documented difference no longer differs: " + str(sorted((BY_HOLDING | {BASE_PACK}) - differing))
+assert placed == set(PLACED), "a documented move of the base pack's jobs no longer happens, or a new one does: " + str(sorted(placed ^ set(PLACED)))
+# What the table cannot say for the runs that name a new profile's pack.
+assert booted(["mobile-forensics"]) == ("mobile", ["mobile"]), booted(["mobile-forensics"])
+assert booted([BASE_PACK, "macos-forensics", "mobile-forensics"]) == ("mobile", ["mobile"])
+assert booted([BASE_PACK, "macos-forensics"]) == ("macos", ["macos"])
+assert booted(["macos-forensics"]) == ("macos", ["macos"])
+assert booted(["cloud-forensics"]) == ("cloud", ["cloud"]) and booted(["triage-collection"]) == ("triage", ["triage"])
+
+# `core` holds the base pack and nothing else: its programs (the Sleuth Kit,
+# plaso, dissect, bulk_extractor, ...) and no other pack's. It is the profile of
+# the fewest packs of those that hold the base pack, so the tie rule gives it
+# the base pack alone; the base pack alone was `memory` on main, and `cloud`
+# with the rule and without `core`.
+assert table["core"]["packs"] == [BASE_PACK] and members["core"] == {BASE_PACK}, members["core"]
+# The tie rule: of the profiles that hold what the run needs, full last, then
+# the fewest packs, then the fewest programs those packs name, then the name.
+# The base pack alone is held by ten profiles of one to three packs. Pinned:
+# a change of the result is a decision (change this, images/README.md and the
+# changelog together), not an accident of the order of profiles.json.
+named = lambda n: len(recipe.needs_of(recipe.PACKS, sorted(members[n]))[1])
+holders = sorted(n for n, m in members.items() if n not in ("full", "base") and BASE_PACK in m)
+assert len(holders) == 10 and "core" in holders, holders
+expected = min(holders, key=lambda n: (len(members[n]), named(n), n))
+assert chosen[BASE_PACK] == expected == "core", (chosen[BASE_PACK], expected)
+# Unlisted packs (an installed pro or third-party pack that no profile lists)
+# are matched by what they name, and `core`, the smallest profile, covers
+# what the base pack covers:
+#  - stdlib Python that depends on the base pack and names no program -> core;
+#  - a pack naming only Sleuth Kit programs (the base pack's) -> core, with or
+#    without the dependency on the base pack;
+#  - a pack that names nothing and depends on nothing -> base (bare image);
+#  - a pack that names a program the base pack does not (vol, tshark, pwsh)
+#    -> the smallest profile that names it, never core;
+#  - a pack that names programs only `full` has together -> full.
+import tempfile
+with tempfile.TemporaryDirectory() as unlisted:
+    def unlisted_pack(name, deps, binaries=()):
+        (Path(unlisted) / name / "requires").mkdir(parents=True)
+        (Path(unlisted) / name / "pack.json").write_text(json.dumps({"id": name, "depends": deps}))
+        (Path(unlisted) / name / "requires" / "host.json").write_text(json.dumps({"binaries": [{"name": b, "optional": True} for b in binaries]}))
+    unlisted_pack("stdlib-on-base", [BASE_PACK])
+    unlisted_pack("stdlib-alone", [])
+    unlisted_pack("tsk-only", [], ["fls", "icat", "mmls"])
+    unlisted_pack("tsk-only-on-base", [BASE_PACK], ["fls", "mactime"])
+    unlisted_pack("wants-vol", [BASE_PACK], ["vol"])
+    unlisted_pack("wants-tshark", [], ["tshark"])
+    unlisted_pack("wants-pwsh", [BASE_PACK], ["pwsh"])
+    unlisted_pack("wants-vol-and-tshark", [BASE_PACK], ["vol", "tshark"])
+    search = [Path(unlisted), recipe.PACKS]
+    want = {"stdlib-on-base": "core", "stdlib-alone": "base", "tsk-only": "core", "tsk-only-on-base": "core",
+            "wants-vol": "memory", "wants-tshark": "network", "wants-pwsh": "cloud", "wants-vol-and-tshark": "full"}
+    for pack_name, profile in want.items():
+        got_profile = recipe.profile_for(search, [pack_name])
+        assert got_profile == profile, (pack_name, got_profile, profile)
+    # Core covers no more than the base pack names: nothing it lacks is promised.
+    assert recipe.needs_of(recipe.PACKS, [BASE_PACK])[1] >= {"fls", "icat", "mmls", "mactime"}
+    assert not {"vol", "tshark", "pwsh"} & recipe.needs_of(recipe.PACKS, [BASE_PACK])[1]
+    # The jobs of an unlisted pack that depends on the base pack: the base pack
+    # joins the pack's profile when that is not full, and boots core alone when
+    # the pack went to full (so the image set is the same size as before).
+    jp = recipe.job_profiles(search, recipe.resolve(search, ["wants-vol"]))
+    assert jp == {BASE_PACK: "memory", "wants-vol": "memory"}, jp
+    jp = recipe.job_profiles(search, recipe.resolve(search, ["wants-vol-and-tshark"]))
+    assert jp == {BASE_PACK: "core", "wants-vol-and-tshark": "full"}, jp
+# The order of profiles.json decides nothing: the resolutions of every pack,
+# every pair and the base pack with each, and the jobs of each run, are the same
+# under the file's order reversed, sorted, and five shuffles.
+import random
+real_profiles, table0 = recipe.profiles, recipe.profiles()
+resolutions = [[p] for p in packs] + [[a, b] for i, a in enumerate(packs) for b in packs[i + 1:]]
+def settle():
+    return [(recipe.profile_for(recipe.PACKS, r), recipe.profile_for(recipe.PACKS, recipe.resolve(recipe.PACKS, r)),
+             recipe.job_profiles(recipe.PACKS, recipe.resolve(recipe.PACKS, r))) for r in resolutions]
+baseline = settle()
+rng = random.Random(152)
+names0 = list(table0)
+for order in [names0[::-1], sorted(names0)] + [rng.sample(names0, len(names0)) for _ in range(5)]:
+    recipe.profiles = lambda order=order: {k: table0[k] for k in order}
+    assert settle() == baseline, f"the order of profiles.json changed a resolution: {order}"
+recipe.profiles = real_profiles
+# mobile depends on macos-forensics and still resolves to itself; macos is held by both.
+assert "macos-forensics" in members["mobile"] and "macos-forensics" in members["macos"]
+# Each own profile lists its pack alone, so it holds that pack and the base.
+for name, pack in (("macos", "macos-forensics"), ("cloud", "cloud-forensics"), ("triage", "triage-collection")):
+    assert table[name]["packs"] == [pack], f"{name} should list only {pack}: {table[name]}"
+    assert members[name] == {"computer-forensics-base", pack}, members[name]
+
+# The rule itself, on profiles and packs made for it: a pack that names
+# nothing beyond the base's is covered by every profile, and must still go to
+# the profile that holds it (a pack listed in `disk` and in `full` -> disk;
+# one listed in `full` alone -> full), while a pack no profile lists is
+# matched by what it names. Written in a scratch directory; recipe.profiles
+# is pointed at a table made for the test.
+import tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    d = Path(tmp)
+    def pack(name, deps, binaries=()):
+        (d / name / "requires").mkdir(parents=True)
+        (d / name / "pack.json").write_text(json.dumps({"id": name, "depends": deps}))
+        (d / name / "requires" / "host.json").write_text(json.dumps({"binaries": [{"name": b, "optional": True} for b in binaries]}))
+    pack("b", [], ["fls"])
+    pack("mem", ["b"], ["vol"])
+    pack("held-by-disk", ["b"])
+    pack("held-by-full", ["b"])
+    pack("unlisted", ["b"], ["vol"])
+    pack("unlisted-big", ["b"], ["vol", "fls", "other"])
+    recipe.profiles = lambda: {
+        "memory": {"packs": ["mem"]},
+        "disk": {"packs": ["held-by-disk"]},
+        "full": {"packs": ["mem", "held-by-disk", "held-by-full"]},
+    }
+    got = lambda *names: recipe.profile_for(d, list(names), images=d)
+    assert got("held-by-disk") == "disk", got("held-by-disk")
+    assert got("held-by-full") == "full", "a pack only full lists goes to full, not to memory, which covers it by chance: " + got("held-by-full")
+    assert got("mem") == "memory"
+    assert got("held-by-disk", "mem") == "full", got("held-by-disk", "mem")
+    assert got("unlisted") == "memory", "a pack no profile lists is matched by what it names: " + got("unlisted")
+    assert got("unlisted-big") == "full", got("unlisted-big")
+    # Ties: the same number of packs, then the programs they name, then the
+    # name; whatever the order of the table.
+    pack("x", ["b"], ["fls", "a1", "a2"])
+    pack("y", ["b"], ["fls", "c1"])
+    pack("z", ["b"], ["fls", "c1"])
+    pack("lone", [])
+    pack("std", ["b"])
+    for order in (("zz", "yy", "xx"), ("xx", "yy", "zz"), ("yy", "xx", "zz")):
+        spec = {"xx": ["x"], "yy": ["y"], "zz": ["z"]}
+        recipe.profiles = lambda order=order, spec=spec: {
+            "base": {"packs": []}, **{k: {"packs": spec[k]} for k in order}, "full": {"packs": ["x", "y", "z"]}}
+        assert got("b") == "yy", ("fewest programs, then the name", order, got("b"))
+        assert got("std") == "yy", ("an unlisted stdlib pack on the base pack: the same tie", order, got("std"))
+        assert got("lone") == "base", got("lone")
+        assert got("x") == "xx" and got("z") == "zz"
+    # A profile of the base pack alone has the fewest packs of any holder: it
+    # takes the base pack alone, and an unlisted pack that depends on it and
+    # names nothing more, whatever the order of the table or the programs the
+    # others name; a pack that names more goes to the profile that holds it.
+    for order in (("zz", "cc", "xx"), ("cc", "xx", "zz"), ("xx", "zz", "cc")):
+        spec = {"xx": ["x"], "zz": ["z"], "cc": ["b"]}
+        recipe.profiles = lambda order=order, spec=spec: {
+            "base": {"packs": []}, **{k: {"packs": spec[k]} for k in order}, "full": {"packs": ["x", "z", "b"]}}
+        assert got("b") == "cc", ("the base pack alone has its own profile", order, got("b"))
+        assert got("std") == "cc", ("an unlisted stdlib pack on the base pack: the same", order, got("std"))
+        assert got("lone") == "base", got("lone")
+        assert got("x") == "xx" and got("z") == "zz"
+        jp = recipe.job_profiles(d, ["b"], images=d)
+        assert jp == {"b": "cc"}, jp
+PYEOF
+[[ "$?" == 0 ]] || fail "the profile invariants do not hold (see above)"
+pass "full holds every pack under packs/, every pack resolves to a profile that holds it, and macos, cloud and triage have images of their own"
+# The workflows that build and boot the images list the profiles; a profile
+# added to profiles.json and not there is never built.
+python3 - "$ROOT" <<'PYEOF'
+import re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "images"))
+import recipe
+want = sorted(recipe.profiles())
+for wf in ("images.yml", "image-boot.yml"):
+    text = (root / ".github" / "workflows" / wf).read_text()
+    found = re.findall(r"^\s*profile: \[([^\]]*)\]", text, re.M)
+    assert len(found) == 1, f"{wf}: expected one profile matrix, found {len(found)}"
+    listed = sorted(x.strip() for x in found[0].split(","))
+    assert listed == want, f"{wf} builds {listed}, profiles.json has {want}"
+    # The arm64 entries (`include:`) name profiles that exist and that the
+    # matrix builds for amd64, once each.
+    extra = re.findall(r"^\s*- \{ profile: ([a-z0-9-]+), arch: ([a-z0-9]+) \}", text, re.M)
+    assert len(extra) == len(set(extra)), f"{wf}: an include entry is listed twice: {extra}"
+    # Counted by the text, not by the flow style: an entry written as a block
+    # (`- profile: linux` / `arch: arm64` on two lines) is one the regex above
+    # does not read, and must be caught.
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert len(extra) == code.count("arch: arm64"), f"{wf}: an include entry the check does not read ({code.count('arch: arm64')} arm64 entries in the file, {len(extra)} read)"
+    for profile, arch in extra:
+        assert profile in want and profile in listed, f"{wf}: include entry {profile}/{arch} names a profile that is not in the matrix"
+        assert arch == "arm64", f"{wf}: include entry {profile}/{arch}: only arm64 is added to the amd64 matrix"
+PYEOF
+[[ "$?" == 0 ]] || fail "the images workflows do not build exactly the profiles in profiles.json"
+pass "the images and image-boot workflows build every profile in profiles.json and no other"
 
 # An installed pack this repository does not carry (a pro or third-party one):
 # found where pack.sh installs it, or at the path given, and matched by what it

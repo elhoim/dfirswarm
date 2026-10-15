@@ -6579,6 +6579,16 @@ export function findNearDuplicate(
   return undefined;
 }
 
+/** Whether a stored tool manifest carries the harness-enforced `secret_output` key (parseManifest keeps no such key, so a rewrite would drop it). */
+function declaresSecretOutput(raw: string): boolean {
+  try {
+    const m = JSON.parse(raw) as unknown;
+    return typeof m === "object" && m !== null && Object.hasOwn(m, "secret_output");
+  } catch {
+    return false;
+  }
+}
+
 export async function forgeTool(ctx: SwarmContext, rawSpec: unknown): Promise<ForgeResult> {
   const checked = validateToolSpec(rawSpec);
   if (!checked.ok) return { ok: false, reason: checked.reason };
@@ -6603,7 +6613,13 @@ export async function forgeTool(ctx: SwarmContext, rawSpec: unknown): Promise<Fo
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     created = false;
-    const existing = parseManifest(await readFile(join(dir, TOOL_MANIFEST), "utf8").catch(() => ""));
+    const rawExisting = await readFile(join(dir, TOOL_MANIFEST), "utf8").catch(() => "");
+    const existing = parseManifest(rawExisting);
+    if (existing && (existing.pack || declaresSecretOutput(rawExisting))) {
+      // A tool a pack (or a seeded library) put in the run is not an agent's to rewrite, whoever the manifest says wrote it:
+      // the manifest carries what the harness enforces (secret_output), and a forge writes none.
+      return { ok: false, reason: `"${spec.name}" is a tool of the run's packs or library${existing.pack ? ` (${existing.pack})` : ""}, not an agent's: forge your own under another name.` };
+    }
     if (!existing) {
       // The directory is there but its manifest is not: someone else won the
       // mkdir a moment ago and is still writing. Two writers of one tool is
