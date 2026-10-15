@@ -1,7 +1,7 @@
 {
   "id": "encrypted-containers",
   "name": "Encrypted Containers Pack",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Telling one kind of encryption from another: volume headers and their key protectors, LUKS key slots, the container that has no signature at all, password-protected archives and documents, and where key material the case supplies may already be.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -51,7 +51,7 @@
       "tools/archive_probe/run.py": "f146f0dd3f9fb879ee5206ed0f3d8a0c3c79c9b77df651a08d1580a6947c7606",
       "tools/crypto_id/manifest.json": "5817332c72e356f8388e2f7e75363f7563c605bee6ffac75c060cbc3e7257d8c",
       "tools/crypto_id/run.py": "9a76104010171d123a015ccc115a09c2752d61d64cc32c8c9c0cb4c2f874049e",
-      "goals/what-is-locked.md": "3ed28eab04f82469872e34d729384e19b1e4f057ec27baa42ffcda0f72ff8687",
+      "goals/what-is-locked.md": "96d96032370ffe6390b4f6f6804f7e65e9dec5589f4787592abe13950ce9e2ed",
       "skills/identify/by-format.md": "849c2408eb2165fb3c2d267126f8d6f0b46715e3def1e641d9a040762f54ca08",
       "skills/identify/headers.md": "c86b8301a8c34b452b222776bc305848302740a5cb7c45cae7a6f5d2be84f984",
       "skills/archives/formats.md": "408edd6d140671a4fb8cfb52178cf4db74611a1bb418190c93ecbc6d1431e8ec",
