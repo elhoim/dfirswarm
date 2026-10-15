@@ -490,7 +490,7 @@ def _mark(n, label, unit="characters"):
     return "<withheld %d %s: %s>" % (n, unit, label)
 
 
-_MARK = re.compile(r"<withheld \d+ (?:characters|bytes)(?:: [a-z][a-z ,-]{0,60})?>")
+_MARK = re.compile(r"<withheld \d+ (?:characters|bytes)(?:: [a-z][a-z ,-]{0,60})?>|\[withheld: \d+ characters\]")
 _VALUES = {"fh": None, "shown": None, "written": 0, "seen": set(), "count": 0}
 
 
@@ -860,7 +860,7 @@ def _layer2_once(s, field):
 
 def _outside(text, pattern, fn):
     """`fn` applied to the parts of `text` that `pattern` does not match; the matches are kept as they are."""
-    if "<" not in text:
+    if "<" not in text and "[" not in text:
         return fn(text)
     out, last = [], 0
     for m in pattern.finditer(text):
@@ -1033,7 +1033,7 @@ _S_USERINFO = re.compile(r"[^\s/@:<>\"']{1,64}:[^\s/<>\"']{1,128}@[^\s/@<>\"']")
 _S_RUN = re.compile(r"[A-Za-z0-9+/_-]{20,}")
 _S_HEX = re.compile(r"[0-9A-Fa-f-]+")
 _S_IDS = re.compile(r"\{?[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}?|S-1-[0-9]{1,2}(?:-[0-9]{1,10}){1,15}|[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+Z?")
-_S_MARK = re.compile(r"<withheld[^<>]{0,120}>")
+_S_MARK = re.compile(r"<withheld[^<>]{0,120}>|\[withheld: \d+ characters\]")
 _S_DIGEST_LABEL = re.compile(r"(?i)(?:md5|sha-?1|sha-?256|sha-?384|sha-?512|imphash|hashes?|filehash|ssdeep|tlsh)[\"'=:> \t]{1,6}(?:(?:md5|sha-?1|sha-?256|imphash)=)?[0-9a-f]{32,128}")
 _TYPED_KINDS = frozenset(("guid", "digest", "sid", "mac", "ip", "time", "number", "version", "hex"))
 
