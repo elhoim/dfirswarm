@@ -419,7 +419,7 @@ test("the way out is one block, the same text in the three tools", async () => {
   for (const p of [INVENTORY, AUDIT]) assert.equal(await blockOf(p), first);
   for (const p of [CHAIN, INVENTORY, AUDIT]) {
     const code = (await readFile(p, "utf8")).replace(/^\s*#.*$/gm, "");
-    assert.equal((code.match(/print\(/g) ?? []).length, 3, `${p}: one print for the answer, one for an error answer and one for the last word after a signal, all through answer_text`);
+    assert.equal((code.match(/print\(/g) ?? []).length, 4, `${p}: one print for the answer, one for an error answer and two for the last word after a signal (the answer through answer_text, and a short JSON when that could not be made)`);
     assert.match(code, /print\(answer_text\(\{"error"/);
     assert.match(code, /print\(answer_text\(\{"tool": TOOL, "parser": PARSER, "status": "partial"/);
     assert.doesNotMatch(code, /sys\.stdout\.write|sys\.stderr\.write/);
