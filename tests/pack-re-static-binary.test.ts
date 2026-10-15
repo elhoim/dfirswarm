@@ -220,10 +220,11 @@ test("a recipe killed alone leaves no tool running past its budget", { skip: pro
     const sample = await put(cwd, "inputs/big.exe", buildPe({}).file);
     await truncate(sample, 2 ** 35); // 32 GiB of hole: the pass would run for many minutes if nothing ended it
     const dir = join(cwd, "catalog");
-    // The recipe's budget (60 seconds) is the clock the child is given: it must be long enough for a loaded machine to start the
+    // The recipe's budget (120 seconds) is the clock the child is given: it must be long enough for a loaded machine to start the
     // recipe and reach its tool inside it, and short against the pass over the hole (many minutes), so that a child that outlived
-    // the recipe would still be running at the end of the wait below.
-    const run = startDetached(RECIPE, cwd, {}, {}, undefined, ["run", "--target", JSON.stringify({ paths: [sample] }), "--out", dir, "--seconds", "60"]);
+    // the recipe would still be running at the end of the wait below. (The tool is found by polling `ps`, which a loaded machine can
+    // answer late: a budget this long keeps the child alive until the poll has seen it.)
+    const run = startDetached(RECIPE, cwd, {}, {}, undefined, ["run", "--target", JSON.stringify({ paths: [sample] }), "--out", dir, "--seconds", "120"]);
     // entropy_map creates its profile file as it starts: from then on it is the running child. The wait is for that state.
     const until = Date.now() + 120_000;
     let kids: number[] = [];
@@ -239,7 +240,7 @@ test("a recipe killed alone leaves no tool running past its budget", { skip: pro
     await run.closed;
     try {
       // Linux ends the child with its parent; elsewhere the child ends at its own clock, which the recipe set from its budget.
-      for (const pid of kids) assert.equal(await gone(pid, 150_000), true, `the tool ${pid} outlived the recipe's budget`);
+      for (const pid of kids) assert.equal(await gone(pid, 170_000), true, `the tool ${pid} outlived the recipe's budget`);
     } finally {
       for (const pid of kids) try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
     }
