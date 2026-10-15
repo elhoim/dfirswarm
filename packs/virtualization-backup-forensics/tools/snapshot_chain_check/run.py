@@ -284,13 +284,18 @@ def fail(message, **extra):
 
 def stop_word(signum):
     """The tool's last word when SIGTERM, SIGINT or SIGHUP ends it: one JSON answer through the one way out, naming the signal
-    and any paging file it leaves."""
-    left = paging_left()
+    and any paging file it leaves. If the answer cannot be made (the signal came in the middle of the way out itself), a short
+    one that says so."""
     name = {signal.SIGTERM: "SIGTERM", signal.SIGINT: "SIGINT", signal.SIGHUP: "SIGHUP"}.get(signum, "signal %d" % signum)
-    print(answer_text({"tool": TOOL, "parser": PARSER, "status": "partial",
-                       "status_basis": "the tool was stopped by %s before it finished: nothing after the stop was read or written" % name,
-                       "stopped_by_signal": name, "paging_files_left": left,
-                       "paging_files_note": "the rows written before the stop, sealed as they were written, kept under the name that says so" if left else "no paging file was open"}))
+    try:
+        left = paging_left()
+        print(answer_text({"tool": TOOL, "parser": PARSER, "status": "partial",
+                           "status_basis": "the tool was stopped by %s before it finished: nothing after the stop was read or written" % name,
+                           "stopped_by_signal": name, "paging_files_left": left,
+                           "paging_files_note": "the rows written before the stop, sealed as they were written, kept under the name that says so" if left else "no paging file was open"}))
+    except BaseException as exc:  # noqa: BLE001 - the last word is best effort, and never silent
+        print(json.dumps({"tool": TOOL, "parser": PARSER, "status": "partial", "stopped_by_signal": name,
+                          "status_basis": "the tool was stopped by %s; the full last word could not be made (%s)" % (name, type(exc).__name__)}))
     sys.stdout.flush()                      # the caller leaves with os._exit, which flushes nothing
 
 
