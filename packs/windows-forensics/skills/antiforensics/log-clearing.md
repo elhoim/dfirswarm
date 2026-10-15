@@ -1,7 +1,7 @@
 ---
 id: antiforensics/log-clearing
 title: Cleared logs
-when: A log is empty or cleared; no snapshots.
+when: Empty or cleared log; missing snapshots.
 needs: [antiforensics/traces]
 tools: [evtx_query, evtx_carve, regkv, vss_stores]
 requires_host: []

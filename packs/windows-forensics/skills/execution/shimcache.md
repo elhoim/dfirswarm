@@ -1,7 +1,7 @@
 ---
 id: execution/shimcache
-title: ShimCache
-when: Compatibility cache records of files.
+title: ShimCache, AppCompatCache
+when: Records of files seen.
 needs: []
 tools: [regkv]
 requires_host: []

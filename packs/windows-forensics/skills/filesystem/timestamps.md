@@ -1,7 +1,7 @@
 ---
 id: filesystem/timestamps
 title: NTFS time sets
-when: They disagree, or you quote an NTFS time.
+when: Two sets disagree, or you quote an NTFS time.
 needs: [filesystem/mft]
 tools: [mft_records, usn_journal]
 requires_host: []

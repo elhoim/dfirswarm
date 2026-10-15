@@ -1,7 +1,7 @@
 ---
 id: logs/coverage
 title: Gapped logs
-when: Before writing an event or channel is absent.
+when: Before saying an event or channel is absent.
 needs: []
 tools: [evtx_query, regkv]
 requires_host: []

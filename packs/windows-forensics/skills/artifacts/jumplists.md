@@ -1,7 +1,7 @@
 ---
 id: artifacts/jumplists
 title: Jump Lists
-when: Read automatic or customDestinations-ms.
+when: Recent and pinned items.
 needs: [artifacts/shell]
 tools: [jumplist, lnk_parse]
 requires_host: [olecfexport]

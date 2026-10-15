@@ -1,7 +1,7 @@
 ---
 id: persistence/mechanisms
-title: Persistence
-when: Services, run keys: configured or fired.
+title: Services, run keys, startup
+when: Configured or fired.
 needs: []
 tools: [regkv, icat_extract, file_type]
 requires_host: [fls]

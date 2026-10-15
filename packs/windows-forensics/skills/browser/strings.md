@@ -1,7 +1,7 @@
 ---
 id: browser/strings
-title: URL strings
-when: URL text in raw bytes or memory.
+title: URL strings, SQLite
+when: URL text in raw bytes; read a SQLite file.
 needs: [browser/artefacts]
 tools: [utf16_urls, sqlite_query]
 requires_host: []

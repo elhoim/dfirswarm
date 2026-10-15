@@ -1,7 +1,7 @@
 ---
 id: logs/powershell-history
 title: PowerShell history
-when: ConsoleHost_history.txt, -EncodedCommand.
+when: ConsoleHost_history.txt, -EncodedCommand, engine 2.
 needs: [logs/powershell]
 tools: [mft_records, evtx_query]
 requires_host: []

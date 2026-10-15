@@ -266,8 +266,9 @@ packs have routers, and how long a router may be, are the pack standard's and
 the pack lint's to say. `computer-forensics-base` names one, `base/router`, and
 so do `windows-forensics`, `linux-forensics`, `memory-forensics`,
 `macos-forensics` and `ransomware-response` (`<platform>/router`): a run of the
-base pack with windows-forensics and linux-forensics does not fit the run's
-index budget without them.
+base pack with windows-forensics and linux-forensics has 2,860 tokens of index
+entries whole, over the run's 2,500; the base router alone brings it to 1,898,
+and with the other two routers as well the prompt carries three router lines.
 
 ### Tool help stays out of the context window
 
@@ -538,16 +539,16 @@ checksummed, and installs and verifies in the test suite.
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
 | `computer-forensics-base` | 29 | 16 | — | the method true of any platform; everything else depends on it |
-| `windows-forensics` | 53 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
-| `linux-forensics` | 26 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
-| `macos-forensics` | 18 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
+| `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
+| `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
+| `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
 | `mobile-forensics` | 10 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
-| `memory-forensics` | 20 | 3 | 1 | containers, what works with no framework, injection, credentials |
+| `memory-forensics` | 19 | 3 | 1 | containers, what works with no framework, injection, credentials |
 | `network-forensics` | 12 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
 | `reverse-engineering` | 12 | 4 | 1 | static triage of a binary or a document, under quarantine |
 | `encrypted-containers` | 11 | 3 | 1 | which scheme, which protectors, and where the key already is |
 | `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
-| `ransomware-response` | 18 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
+| `ransomware-response` | 17 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
 | `triage-collection` | 14 | 2 | 1 | a collector's output, which is how most cases arrive |
 
     scripts/pack.sh install packs/computer-forensics-base
