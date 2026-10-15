@@ -3,7 +3,6 @@ id: memory/router
 title: Memory notes by question
 when: Pick one when none is listed, or you cannot choose.
 router: true
-mentions: [yara]
 ---
 
 Use when the index shows only this line and you need a memory note. Not for rules: each note holds its own.

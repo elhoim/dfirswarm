@@ -33,6 +33,10 @@
     {
       "path": "skills/execution/overview.md",
       "why": "a method leaf that weighs the execution sources against each other; the readers are in the leaves it points to, and it names no tool or program"
+    },
+    {
+      "path": "skills/windows/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
     }
   ],
   "checksums": {
@@ -129,7 +133,7 @@
       "skills/registry/overview.md": "ff6c9c5bd0b1575c03df380b509cdd594aa54d26af35066b51f3bf95a5fe44e7",
       "skills/registry/readers.md": "1c9d5d7e981d934b0ac50b612e10403b46610fd1be628796d802989e2a7f9903",
       "skills/registry/system-profile.md": "11da6ac71cbf5a91ab562c5504e591d94d1a048f4a8513451f584df877a79468",
-      "skills/windows/router.md": "8678e7111b98e87a18999a58ba16d6dcdc2f520e0f165e798ac42f4e268b338f",
+      "skills/windows/router.md": "874eb0c29bada978b799c263125e6b161206618d1d94f60ff81030d94f8e819e",
       "skills/antiforensics/controls.md": "dadfa60a9409d0308899487284b20202cf8822176b5922d36e0dc156545b57d5",
       "skills/antiforensics/log-clearing.md": "c873579fa1433550cf9c8f531b3a4fec1aa493f6fdce762f15aa154b8e54dc7e",
       "skills/antiforensics/timestamps-clock.md": "89e87e55ec0a184d989373193aa1746387a1b39f91a7c321bd8ec2552ccdf50c",

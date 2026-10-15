@@ -3,7 +3,6 @@ id: windows/router
 title: Windows notes by question
 when: Pick one when none is listed, or you cannot choose.
 router: true
-mentions: [shellbags]
 ---
 
 Use when the index shows only this line and you need a Windows note. Not for rules: each note holds its own.
