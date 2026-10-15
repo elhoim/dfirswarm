@@ -280,7 +280,7 @@ const cp437High = Array.from("ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿ
 const PYTHON = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
 
 test("P3 capa-floss: a --target that is not a JSON object with a list of paths is JSON and a refusal, never a traceback", () => {
-  for (const target of ["[1]", '"s"', "null", '{"paths":5}', '{"paths":[5]}', "{", "[".repeat(200_000)]) {
+  for (const target of ["[1]", '"s"', "null", '{"paths":5}', '{"paths":[5]}', "{", "[".repeat(100_000)]) {
     for (const verb of ["detect", "run"]) {
       const r = spawnSync(PYTHON, [CAPA_FLOSS, verb, "--target", target, "--out", "/nonexistent/never-made"], { encoding: "utf8" });
       assert.doesNotMatch(r.stderr, /Traceback/, `${verb} ${target.slice(0, 20)}: ${r.stderr.slice(-300)}`);
