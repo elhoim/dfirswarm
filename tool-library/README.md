@@ -24,9 +24,13 @@ scripts/swarm.sh start … --tools-from tool-library
 and put a finished run's own tools back with
 `scripts/swarm.sh tools <id> --save tool-library`.
 
-**Copies of the computer-forensics-base pack's tools.** `file_carver`, `catalog_search`,
-`sig_carve`, `ioc_scan`, `chunk_needles` and `sqlite_query` here are the pack's own, byte for byte (a test
-holds them equal), and so they answer as the pack's do. Run as a job, a tool that writes
+**Copies of the packs' tools.** Every tool here that a pack also holds
+(`packs/*/tools/<name>`, among them `file_carver`, `catalog_search`,
+`sig_carve`, `ioc_scan`, `chunk_needles`, `sqlite_query`, `check_inputs` and `icat_extract` of the
+computer-forensics-base pack) is the pack's own, byte for byte, `run.py` and `manifest.json` (one
+test, `tests/tool-library-twins.test.ts`, holds them equal; a difference would have to be declared
+there with its reason, and none is), and so it answers as the pack's does. A pack change to such a
+tool updates the copy in the same PR. Run as a job, a tool that writes
 (`file_carver`, and the scanners' result files) writes only under `$OUT` and refuses
 a path outside it: give `{OUT}/<name>`, or a path under your own `work/<you>/`, which the
 harness maps there. `ioc_scan` and the other scanners return locators, and write the bytes
@@ -120,7 +124,7 @@ or `tools/`.
 | `browser_history` | python3 | `maintainer` | 3 | Query a browser history database from a copy of it and its -wal, -shm and -journal sidecars, made under the j… |
 | `catalog_grep` | python3 | `s864a02` | 1 | Grep catalog/AF-Case2.E01/p0/filelist.txt for a pattern; return matching lines. |
 | `catalog_search` | python3 | `sd1d100` | 10 | Search the evidence catalogue with a regex: a disk's filelist, timeline, bodyfile, fsstat or partitions, or a… |
-| `check_inputs` | python3 | `sfcc304` | 2 | Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs. |
+| `check_inputs` | python3 | `sfcc304` | 4 | Diff inputs/ against inputs.json (size and sha256). The manifest is validated whole first: a malformed entry,… |
 | `chunk_needles` | python3 | `sd1d102` | 7 | Scan a local file, or one inode streamed from an image through icat, for ASCII and UTF-16LE needles; return p… |
 | `contact_sheet` | python3 | `s10d40e` | 1 | Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place… |
 | `csearch` | python3 | `sf6df06` | 2 | Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) f… |
@@ -137,7 +141,7 @@ or `tools/`.
 | `grep_filelist` | python3 | `s864a08` | 4 | Search the catalog filelist for a pattern (case-insensitive). Returns the first 100 matching lines as a JSON … |
 | `guest_syslog` | python3 | `s5d1001` | 1 | Extract unique syslog-like lines from a binary (Kali/rsyslog) matching a month-day prefix; drop kernel lines. |
 | `hdfs_node_icat` | python3 | `s9a5f03` | 2 | Extract an inode from a cluster node's image with icat and hash what it wrote. node picks one of the HDFS cas… |
-| `icat_extract` | python3 | `s864a08` | 3 | Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha2… |
+| `icat_extract` | python3 | `s864a08` | 8 | Extract one Sleuth Kit address (an inode, or inode-type-id for an NTFS stream such as 168-128-4) from a disk … |
 | `icat_root` | python3 | `s9d8306` | 5 | Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-sector offset are t… |
 | `ioc_scan` | python3 | `s183900` | 5 | Stream a large binary for ASCII and UTF-16LE needles and return locators: for every occurrence an id, its sta… |
 | `ledger_timeline` | python3 | `se5fdcd` | 3 | Write a run's dated ledger entries as one timeline in time order (Markdown table, CSV or JSON Lines). Leaves … |
