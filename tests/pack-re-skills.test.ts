@@ -354,7 +354,8 @@ test("the review's wording fixes are in the leaves and the goal, and the goal's 
   assert.match(macros, /path under `\$OUT`/);
   assert.match(macros, /`parts\[\]\.modified`[^.]*no zone, two-second resolution/);
   assert.match(macros, /does not provide: record the comparison as not made/);
-  assert.match(macros, /`vbaProject\.bin`[^.]*OLE compound file/);
+  assert.match(macros, /OOXML VBA project part \(by content type\) is an OLE compound file/);
+  assert.match(macros, /A token-shaped part name is withheld, by shape only;/);
   assert.match(macros, /`AutoOpen`, `Document_Open` and `Workbook_Open`/);
   assert.match(text("documents/external-and-active-content"), /`\/JavaScript` and `\/JS`[^.]*`\/EmbeddedFile`/);
   // Rules.
