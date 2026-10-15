@@ -428,21 +428,76 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
-# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@`) is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^?\s<>]*)(?=@)", re.I)
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@` within
+# MAILTO_SPAN characters, no `?`, space, `<` or `>` before it) is withheld here. It is found with one pass over the `mailto:name:`
+# heads and a search for `@` inside a fixed window after each, so that a million `mailto:a:` cost a million small steps and not their
+# square: a password of more than MAILTO_SPAN characters in a mailto: address is not withheld by this rule (the shared rules for a
+# token-shaped run still read it).
+MAILTO_HEAD = re.compile(r"mailto:[^:@?/\s]*:", re.I)
+MAILTO_STOP = re.compile(r"[?\s<>]")
+MAILTO_SPAN = 512
+
+
+def mailto_userinfo(text):
+    out, last = [], 0
+    for m in MAILTO_HEAD.finditer(text):
+        if m.start() < last:
+            continue
+        begin = m.end()
+        window = min(len(text), begin + MAILTO_SPAN + 1)
+        at = text.rfind("@", begin, window)
+        if at >= 0:
+            stop = MAILTO_STOP.search(text, begin, at)
+            if stop:
+                at = text.rfind("@", begin, stop.start())
+        if at < 0:
+            continue
+        out.append(text[last:begin])
+        out.append(_withheld("userinfo", at - begin, "urls"))
+        last = at
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
 # shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A password may hold `@`: the user-info
 # runs to the last `@` before the host, as a URL's does (RFC 3986 3.2.1). A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
-# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
-# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
-# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
-KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
-                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
-                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
-                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
-                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+# A URL's user-info whose password holds `/`, `?` or `#` (files hold them raw, though RFC 3986 3.2.1 asks for percent-encoding): the
+# first `@` of such a string follows a `/`, `?` or `#`, which no authority holds, so the password is read to the last `@` of the same
+# whitespace-delimited token. A port (`host:8080/path@x`) is not one: only digits and then `/`, `?`, `#` or the end after the `:`. The
+# bare form (`name:pass/word@host`, no `//`) is not read: a path with an `@` in it (`C:/Dir/icon@2x.png`) is not user-info.
+SLASH_USERINFO = re.compile(r"(?<=//)[\w.%+-]{1,64}:(?!\d{1,5}(?:[/?#]|$))(?=[^\s@/?#]{0,256}[/?#][^\s@]{0,256}@)(?:[^\s@]|@(?=[^\s@]*@)){1,512}(?=@)")
+
+
+def slash_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` withheld (shown_path reads it too; a URL's query is split
+    off before the sanitiser sees it, so this is also run first on a target)."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), text)
+
+
+def plain_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` replaced by a plain name of the same length, which
+    redact_url (it splits a URL at the first `?` and `#` and its authority at the first `/`) then withholds as user-info."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: "x" * len(m.group()), text)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`, `"token": "..."`): after `=`, or
+# after `:` for the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so their `:` form counts only
+# when the key itself is quoted, as in JSON), quoted (to its closing quote; an opening quote nothing closes is dropped and the rest is
+# the value) or not (to `;`, a space or the end: a `,` `&` `<` `>` stays in the value, as a password may hold them). The short names
+# (`pw`, `pass`, `auth`) only where no letter or digit precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value
+# made only of `%` conversions is a format. A password that holds `;` or a space, or a quote of the other kind, is withheld up to it.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+                             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:"
+                             r"|[\"'](?:token|secret|credentials?|auth|sig)[\"'][ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
@@ -582,8 +637,29 @@ def _slash_spans(text):
 # \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
 _HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 _MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
-# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info
-_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)}
+# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info; and the
+# characters that print as nothing without being a format or combining mark: the line and paragraph separators, the braille blank, the
+# Hangul fillers (U+115F, U+1160, U+3164, U+FFA0)
+_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029,
+                               0x202F, 0x205F, 0x2800, 0x3000, 0x115F, 0x1160, 0x3164, 0xFFA0)}
+_NON_ASCII_RUN = re.compile(r"[^\x00-\x7f]+")
+
+
+def _redecoded(text, encoding):
+    """text with each run of non-ASCII characters that is the UTF-8 of something, read by a tool as 8-bit text (Latin-1, CP437) and
+    shown as the three or two characters it came to, put back to what the bytes mean (the three bytes of a zero-width space read as
+    Latin-1 are three visible characters, and a token split by them is split unseen). None when no run is."""
+    changed = [False]
+
+    def back(m):
+        try:
+            fixed = m.group().encode(encoding).decode("utf-8")
+        except UnicodeError:
+            return m.group()
+        changed[0] = True
+        return fixed
+    out = _NON_ASCII_RUN.sub(back, text)
+    return out if changed[0] else None
 
 
 def unhidden(text):
@@ -596,6 +672,19 @@ def unhidden(text):
     return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
 
 
+def hidden_copies(text):
+    """The copies of the text a token may be split in unseen: without the hidden characters, and the same after the UTF-8 that was
+    read as Latin-1 or CP437 is put back."""
+    if not _MAYBE_HIDDEN.search(text):
+        return ()
+    copies = [unhidden(text)]
+    for encoding in ("latin-1", "cp437"):
+        back = _redecoded(text, encoding)
+        if back is not None:
+            copies.append(unhidden(back))
+    return copies
+
+
 def _whole_withheld(m, kind="names"):
     return _withheld("token-shaped text", len(m.group()), kind)
 
@@ -604,7 +693,7 @@ def _shown_pass(out):
     if "-----BEGIN " in out:
         out = PEM_BODY.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if ":" in out:
-        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+        out = mailto_userinfo(out)
     if "@" in out:
         out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     if "=" in out or ":" in out:
@@ -618,7 +707,7 @@ def _shown_pass(out):
         # host a split would remove; then each component alone
         found = [(s, e, "token-shaped text") for s, e in _slash_spans(out)]
         found += [(m.start(), m.end(), "token-shaped text") for rule in (GLUED, JWT_TAIL) for m in rule.finditer(out)]
-        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO) for m in rule.finditer(out)]
+        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO, SLASH_USERINFO) for m in rule.finditer(out)]
         if found:
             found.sort()
             merged = []
@@ -715,13 +804,13 @@ def shown_path(text):
         return text
     if text in _CLEAN:
         return text
-    bare = unhidden(text)
-    if bare != text and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
+    for bare in hidden_copies(text):
+        if bare != text and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
     out, passes = _shown(text)
-    bare = unhidden(out)
-    if bare != out and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
+    for bare in hidden_copies(out):
+        if bare != out and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
     if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
         _CLEAN.add(out)
     return out
