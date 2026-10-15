@@ -48,5 +48,15 @@
     "snapshot_chain_check",
     "virtualization_inventory"
   ],
-  "skills": 11
+  "skills": 11,
+  "method_only": [
+    {
+      "path": "skills/router/start.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
+    },
+    {
+      "path": "skills/evidence/boundaries.md",
+      "why": "a method leaf about the planes of virtualization evidence and how to handle them; it names the base pack's check_inputs and runs no tool or program of this pack"
+    }
+  ]
 }
