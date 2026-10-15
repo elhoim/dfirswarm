@@ -222,8 +222,11 @@ run (the first named, where a tool is made from several).
   package unless the hit is a sensitive ledger entry citing it, or the scan
   ran as a `secret_output` job) and the answer gives the offset, size,
   layout and the key file's name: record the finding's offset and key file
-  name, never a digest of the key, which neither tool prints or writes. A hit
-  is a lead, and the tools say so.
+  name, never a digest of the key, which neither tool prints or writes. A key
+  that is found again, in a later window or call on the same `out_dir`, names
+  the file it already has; only a plain file holding exactly the key is reused
+  (and made private), and a directory, a symlink or a file of another key at a
+  name is passed over. A hit is a lead, and the tools say so.
 - `encoded_literal_scan` — three Python scanners made in run `s3472f0`
   (`encoded_flag_scan`, `base32_flag_literals`, seat `s3472f003`, and
   `utf32_flag_literals`, seat `s3472f004`), each with the opening of the

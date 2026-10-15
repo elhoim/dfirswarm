@@ -257,22 +257,59 @@ fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
 const counters = { prefilter: 0, full: 0 };
 const hits = [];
 const seen = new Set();
-// One private file a key; the same key found again (at another offset or in another layout) names the same file.
-// The name comes from where the key was first found and never from the key: no hash of it, whole or in part, is
-// printed, written or used in a path.
+// One private file a key. The same key found again (at another offset, in another layout, or in a later call on the
+// same out_dir) names the same file. The name comes from where the key was first found and never from the key: no
+// hash of it, whole or in part, is printed, written or used in a path.
 const keyFiles = new Map();
-/** The file that holds this key in out_dir, written now (mode 0600) when it is not there yet. */
+const KEY_FILE_SCAN_CAP = 256; // the most key-*.bin files of one size looked at when a key is not known yet
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
+/**
+ * True when this out_dir path is a plain file (no symlink is followed, no directory, no pipe) that holds exactly this
+ * key; its mode is then made 0600. Never throws: whatever is in the way is simply not this key's file.
+ */
+function holdsKey(file, key) {
+  const p = path.join(outDir, file);
+  let fd = null;
+  try {
+    if (!fs.lstatSync(p).isFile()) return false;
+    fd = fs.openSync(p, fs.constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size !== key.length) return false;
+    const held = Buffer.alloc(key.length);
+    if (fs.readSync(fd, held, 0, key.length, 0) !== key.length || !held.equals(key)) return false;
+    fs.fchmodSync(fd, 0o600);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) try { fs.closeSync(fd); } catch { /* nothing to do */ }
+  }
+}
+/** The file that holds this key in out_dir: one from this or an earlier call, or one written now (mode 0600). */
 function keyFileFor(offset, keyBytes, key) {
   const known = keyFiles.get(key.toString("latin1"));
   if (known) return known;
+  const bits = keyBytes * 8;
+  const wanted = new RegExp(`^key-[0-9a-f]+-${bits}(-[0-9]+)?\\.bin$`);
+  let earlier = [];
+  try {
+    earlier = fs.readdirSync(outDir).filter((f) => wanted.test(f)).sort().slice(0, KEY_FILE_SCAN_CAP);
+  } catch { /* an unreadable directory has no earlier file; the write below says what is wrong */ }
+  for (const file of earlier) {
+    if (holdsKey(file, key)) {
+      keyFiles.set(key.toString("latin1"), file);
+      return file;
+    }
+  }
   for (let n = 0; ; n++) {
-    const file = `key-${offset.toString(16)}-${keyBytes * 8}${n ? `-${n + 1}` : ""}.bin`;
+    const file = `key-${offset.toString(16)}-${bits}${n ? `-${n + 1}` : ""}.bin`;
     try {
       fs.writeFileSync(path.join(outDir, file), key, { flag: "wx", mode: 0o600 });
     } catch (e) {
       if (e.code !== "EEXIST") fail("cannot write a key file", { reason: String(e.code ?? e.message) });
-      // A file of that name from an earlier call holds this key (use it) or another (try the next name).
-      if (!fs.readFileSync(path.join(outDir, file)).equals(key)) continue;
+      // The name is taken (a file, a directory, a symlink, even a dangling one): by this key, use it; else the next name.
+      if (!holdsKey(file, key)) continue;
     }
     keyFiles.set(key.toString("latin1"), file);
     return file;

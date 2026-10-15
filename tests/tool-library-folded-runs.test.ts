@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createCipheriv, createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -384,6 +384,79 @@ test("the AES scanners print and write no digest of a key: no 64-hex string, no 
         }
       });
     }
+  }
+});
+
+/** The schedule of a key in the layout the given scanner reads. */
+function aesPiece(tool: string, key: Buffer): Buffer {
+  return tool === SCHEDULE_TOOL ? expandKey(key) : inverseSchedule(key, { reverseRounds: true, reverseWords: false });
+}
+
+test("the AES scanners give a key found in a later call the file an earlier call wrote, at another offset too", async () => {
+  for (const tool of [SCHEDULE_TOOL, INVERSE_TOOL]) {
+    await inTemp(async (cwd) => {
+      const k128 = keyFor(16, "xw-a"), k256 = keyFor(32, "xw-b");
+      // The same two keys at 1000 and 30000 (window 1 holds the first of each, window 2 the second), and a third key only late.
+      const image = plant(60000, "xw", [[1000, aesPiece(tool, k128)], [2001, aesPiece(tool, k256)], [30000, aesPiece(tool, k128)], [31001, aesPiece(tool, k256)]]);
+      await writeFile(join(cwd, "inputs", "mem.raw"), image);
+      const one = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 0, length: 10000 }));
+      const two = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 10000, length: 40000 }));
+      assert.deepEqual(one.hits.map((h) => h.offset), [1000, 2001]);
+      assert.deepEqual(two.hits.map((h) => h.offset), [30000, 31001]);
+      assert.deepEqual(two.hits.map((h) => h.key_file), one.hits.map((h) => h.key_file), "the same key names the same file in the next call");
+      const files = (await readdir(join(cwd, "work", "t1", "aes"))).filter((f) => f.startsWith("key-")).sort();
+      assert.deepEqual(files, ["key-3e8-128.bin", "key-7d1-256.bin"], "two keys, two files, however many calls");
+      // A same-size file of the same pattern that holds another key is passed over, not read as this key's.
+      await writeFile(join(cwd, "work", "t1", "aes", "key-1-128.bin"), keyFor(16, "xw-other"), { mode: 0o600 });
+      const three = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 29000, length: 3000 }));
+      assert.deepEqual(three.hits.map((h) => h.key_file), ["key-3e8-128.bin", "key-7d1-256.bin"]);
+      assert.deepEqual(await readFile(join(cwd, "work", "t1", "aes", "key-1-128.bin")), keyFor(16, "xw-other"), "a file of another key is left as it was");
+    });
+  }
+});
+
+test("the AES scanners reuse a key file only when it is a plain file holding the key: a directory, a symlink or a wrong file at the name never costs a trace or a follow", async () => {
+  for (const tool of [SCHEDULE_TOOL, INVERSE_TOOL]) {
+    await inTemp(async (cwd) => {
+      const kA = keyFor(16, "sq-a"), kB = keyFor(32, "sq-b"), kC = keyFor(16, "sq-c"), kD = keyFor(16, "sq-d");
+      await writeFile(join(cwd, "inputs", "mem.raw"), plant(30000, "sq", [[1001, aesPiece(tool, kA)], [5003, aesPiece(tool, kB)], [9007, aesPiece(tool, kC)], [13001, aesPiece(tool, kD)]]));
+      const dir = join(cwd, "work", "t1", "aes");
+      await mkdir(dir, { recursive: true });
+      // 0x3e9 = 1001: a directory at the name. 0x138b = 5003: a dangling symlink. 0x232f = 9007: a symlink to a world-readable
+      // file that holds exactly the key. 0x34c9 = 13001: a plain file of the key with a loose mode.
+      await mkdir(join(dir, "key-3e9-128.bin"));
+      await symlink(join(cwd, "missing-target"), join(dir, "key-138b-256.bin"));
+      const decoy = join(cwd, "decoy.bin");
+      await writeFile(decoy, kC);
+      await chmod(decoy, 0o644);
+      await symlink(decoy, join(dir, "key-232f-128.bin"));
+      await writeFile(join(dir, "key-34c9-128.bin"), kD, { mode: 0o644 });
+      await chmod(join(dir, "key-34c9-128.bin"), 0o644);
+
+      const res = await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes" });
+      assert.equal(res.stderr, "", "no stack trace, nothing on stderr");
+      const scan = ok<Scan>(res);
+      assert.deepEqual(scan.hits.map((h) => [h.offset, h.key_file]), [
+        [1001, "key-3e9-128-2.bin"],
+        [5003, "key-138b-256-2.bin"],
+        [9007, "key-232f-128-2.bin"],
+        [13001, "key-34c9-128.bin"],
+      ]);
+      for (const [file, key] of [["key-3e9-128-2.bin", kA], ["key-138b-256-2.bin", kB], ["key-232f-128-2.bin", kC], ["key-34c9-128.bin", kD]] as const) {
+        const st = await lstat(join(dir, file));
+        assert.ok(st.isFile() && !st.isSymbolicLink(), `${file} is a plain file`);
+        assert.deepEqual(await readFile(join(dir, file)), key);
+        assert.equal(st.mode & 0o077, 0, `${file} is private to its owner, also when it was there before`);
+      }
+      assert.ok((await lstat(join(dir, "key-3e9-128.bin"))).isDirectory(), "the directory is left alone");
+      assert.ok((await lstat(join(dir, "key-138b-256.bin"))).isSymbolicLink(), "the dangling symlink is left alone");
+      assert.ok((await lstat(join(dir, "key-232f-128.bin"))).isSymbolicLink(), "the symlink is left alone");
+      assert.equal((await stat(decoy)).mode & 0o777, 0o644, "what a symlink points at is never touched");
+      // A second call changes nothing and finds the same names.
+      const again = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes" }));
+      assert.deepEqual(again.hits.map((h) => h.key_file), scan.hits.map((h) => h.key_file));
+      assert.deepEqual((await readdir(dir)).sort(), ["key-138b-256-2.bin", "key-138b-256.bin", "key-232f-128-2.bin", "key-232f-128.bin", "key-34c9-128.bin", "key-3e9-128-2.bin", "key-3e9-128.bin", `${tool === SCHEDULE_TOOL ? "aes_schedule_scan" : "aes_inverse_scan"}.0.json`].sort());
+    });
   }
 });
 
