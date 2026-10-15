@@ -1,7 +1,7 @@
 ---
 id: browser/strings
-title: URL strings in raw bytes, and direct SQLite queries
-when: URL-shaped text turns up in a pagefile, memory image, unallocated space or raw extract.
+title: URL strings
+when: URL text in raw bytes or memory.
 needs: [browser/artefacts]
 tools: [utf16_urls, sqlite_query]
 requires_host: []

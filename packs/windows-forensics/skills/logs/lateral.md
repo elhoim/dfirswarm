@@ -1,7 +1,7 @@
 ---
 id: logs/lateral
-title: Shares, services, WMI and tasks across hosts
-when: A session may have moved or run something on another machine, or arrived from one.
+title: Lateral movement
+when: Shares, services, WMI, tasks across hosts.
 needs: [logs/remote-access]
 tools: [evtx_query, mft_records]
 requires_host: []

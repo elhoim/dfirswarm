@@ -1,7 +1,7 @@
 ---
 id: persistence/tasks-com-wmi
-title: Tasks, COM, WMI and replaced system binaries
-when: Persistence may sit in a task, COM, WMI or a substituted system program.
+title: Tasks, COM, WMI
+when: Persistence there, or in a replaced binary.
 needs: [persistence/mechanisms]
 tools: [regkv, evtx_query, ioc_scan, mft_records]
 requires_host: []

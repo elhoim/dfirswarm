@@ -1,7 +1,7 @@
 ---
 id: logs/remote-access
-title: Remote Desktop records, inbound and outbound
-when: You need to say whether and from where a Remote Desktop session reached this machine, or left it.
+title: Remote Desktop
+when: Whether, and from where, a session came.
 needs: []
 tools: [evtx_query, regkv]
 requires_host: []

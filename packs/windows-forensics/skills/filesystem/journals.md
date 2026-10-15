@@ -1,7 +1,7 @@
 ---
 id: filesystem/journals
-title: The NTFS change journal and the transaction log
-when: You need what changed on an NTFS volume, under which name, and the order the journal gives.
+title: NTFS journals
+when: What changed on a volume, in order.
 needs: []
 tools: [usn_journal, extract_stream]
 requires_host: [fls, istat]

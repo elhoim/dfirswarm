@@ -1,7 +1,7 @@
 ---
 id: execution/srum
-title: SRUM resource accounting and its limits
-when: You need an application's byte counts, CPU or network figures from SRUDB.dat, or its limits.
+title: SRUM
+when: Application byte counts, CPU, network; limits.
 needs: [execution/esedb]
 tools: [esedb_query]
 requires_host: []

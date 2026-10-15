@@ -1,7 +1,7 @@
 ---
 id: logs/powershell-history
-title: PowerShell history, encoded commands
-when: You meet ConsoleHost_history.txt, an -EncodedCommand argument or an engine 2 request.
+title: PowerShell history
+when: ConsoleHost_history.txt, -EncodedCommand.
 needs: [logs/powershell]
 tools: [mft_records, evtx_query]
 requires_host: []

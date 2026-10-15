@@ -1,7 +1,7 @@
 ---
 id: antiforensics/controls
-title: Security-control changes and deleted VMs
-when: An exclusion, disabled protection or deleted VM disk suggests a changed control.
+title: Controls changed
+when: Exclusion, disabled protection, deleted VM disk.
 needs: [antiforensics/traces]
 tools: [regkv, evtx_query, evtx_carve]
 requires_host: []
