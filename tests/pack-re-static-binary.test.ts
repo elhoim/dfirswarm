@@ -197,10 +197,10 @@ test("recipe.json offers every magic that detect accepts, so a derived file of e
 test("the recipe's own budget is handed to each tool as that tool's clock: --seconds ends a long pass as a partial result, not a kill", async () => {
   await withCwd(async (cwd) => {
     const sample = await put(cwd, "inputs/big.exe", buildPe({}).file);
-    await truncate(sample, 2 ** 33); // a hole of 8 GiB: the entropy pass takes several minutes
+    await truncate(sample, 2 ** 35); // a hole of 32 GiB: the entropy pass takes many minutes, however fast the machine
     const dir = join(cwd, "catalog");
     const started = Date.now();
-    // The recipe's budget is 20 seconds, and the pass over the hole needs several minutes: the pass is cut by the tool's own clock,
+    // The recipe's budget is 20 seconds, and the pass over the hole needs many minutes: the pass is cut by the tool's own clock,
     // and what is asked is the tool's own report of that (status partial, fewer bytes than the file), not how long the wall clock
     // took. The budget is long enough for a loaded machine to reach the entropy pass inside it (a shorter one is used up first), and
     // the wall bound only says the recipe did not wait for the whole pass.
@@ -210,7 +210,7 @@ test("the recipe's own budget is handed to each tool as that tool's clock: --sec
     const coverage = JSON.parse(await readFile(join(dir, "coverage.json"), "utf8")) as Json;
     assert.equal(coverage.status, "partial");
     assert.equal(coverage.entropy_map.status, "partial", JSON.stringify(coverage.entropy_map));
-    assert.ok(coverage.entropy_map.bytes_processed >= 0 && coverage.entropy_map.bytes_processed < 2 ** 33);   // how far it got depends on the machine
+    assert.ok(coverage.entropy_map.bytes_processed >= 0 && coverage.entropy_map.bytes_processed < 2 ** 35);   // how far it got depends on the machine
     assert.ok(coverage.limits_hit.some((l: string) => /entropy/.test(l)));
   });
 });
@@ -218,10 +218,10 @@ test("the recipe's own budget is handed to each tool as that tool's clock: --sec
 test("a recipe killed alone leaves no tool running past its budget", { skip: process.platform === "win32" }, async () => {
   await withCwd(async (cwd) => {
     const sample = await put(cwd, "inputs/big.exe", buildPe({}).file);
-    await truncate(sample, 2 ** 33); // 8 GiB of hole: the pass would run for several minutes if nothing ended it
+    await truncate(sample, 2 ** 35); // 32 GiB of hole: the pass would run for many minutes if nothing ended it
     const dir = join(cwd, "catalog");
     // The recipe's budget (60 seconds) is the clock the child is given: it must be long enough for a loaded machine to start the
-    // recipe and reach its tool inside it, and short against the pass over the hole (several minutes), so that a child that outlived
+    // recipe and reach its tool inside it, and short against the pass over the hole (many minutes), so that a child that outlived
     // the recipe would still be running at the end of the wait below.
     const run = startDetached(RECIPE, cwd, {}, {}, undefined, ["run", "--target", JSON.stringify({ paths: [sample] }), "--out", dir, "--seconds", "60"]);
     // entropy_map creates its profile file as it starts: from then on it is the running child. The wait is for that state.

@@ -70,7 +70,10 @@ function standIn(mode: string, vms: string[]): string {
   return D;
 }
 
-const NAME = "dfs-s000000-job-j000001-1";
+// The fence finds the process making a worker by the worker's name across the whole machine's process table, so a name that two
+// runs of this suite (or two checkouts) share lets one kill the other's stand-in: the names carry this process's own pid.
+const RUN = `s${String(process.pid).padStart(6, "0")}`;
+const NAME = `dfs-${RUN}-job-j000001-1`;
 
 /**
  * Waits until `ps` shows `needle` in the command line of a process just spawned: a spawned process is its parent's image until
@@ -124,7 +127,7 @@ test("a list that is not a list of named VMs is no answer", async () => {
 
 test("the process making a worker is stopped before msb is asked, found by the worker's name", async () => {
   standIn("normal", [NAME]);
-  const other = "dfs-s000000-job-j000002-1";
+  const other = `dfs-${RUN}-job-j000002-1`;
   const maker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "worker-once", "--name", NAME], { stdio: "ignore" });
   const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "worker-once", "--name", other], { stdio: "ignore" });
   const exited = new Promise((r) => maker.on("exit", r));
