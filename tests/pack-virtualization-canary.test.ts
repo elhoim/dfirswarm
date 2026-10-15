@@ -12,10 +12,11 @@
  * The shapes and the slots are written here from the formats' public descriptions (tests/pack-virtualization-harness.ts),
  * never from a tool's output. VIRT_CANARY_SHAPES=a,b narrows the shapes for a quick run.
  *
- * The backstop: the three tools seal every key and value at the way out and then check what they wrote. The last test
- * removes the seal on purpose (the tool is loaded in-process and its `seal` replaced by a function that lets everything
- * through) and shows that the check still catches a planted token in the answer and in a paging file, replaces it by
- * <withheld: N bytes>, and makes the answer partial.
+ * The backstop: the three tools seal every key and value at the way out and then check what they wrote. Two tests remove
+ * the seal and the shape check on purpose (the tool is loaded in-process and its `seal` replaced by a function that lets
+ * everything through): one shows that the check still catches a planted token in the answer and in a paging file,
+ * replaces it by <withheld: N bytes> and makes the answer partial; the other plants every shape in every slot and finds
+ * no canary anywhere. tests/pack-virtualization-review2.test.ts also removes the rules, to show the second check alone.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -41,6 +42,9 @@ function shapes(): Record<string, Shape> {
     value, secret, fileSafe: !value.includes("/") && value.length <= 200, nameLike: /^[A-Za-z0-9_]+$/.test(value), colonFree: !value.includes(":"),
   });
   const s40a = mixed(13) + "/" + mixed(7) + "/" + mixed(18), s40b = mixed(20) + "/" + mixed(19);
+  const s40c = mixed(13) + "/" + mixed(26), s40d = mixed(9) + "/" + mixed(15) + "/" + mixed(14), pw2 = mixed(16), pw3 = mixed(17);
+  const ghp2 = "ghp_" + mixed(36), akia2 = "AKIA" + pick(UP + DIG, 16), b88 = pick(AL + "+/", 86) + "==";
+  const jwt2 = "eyJ" + mixed(24) + "." + "eyJ" + mixed(36) + "." + mixed(43);
   return {
     aws_key: make("AKIA" + pick(UP + DIG, 16)),
     aws_key_after_letter: make("Q" + "AKIA" + pick(UP + DIG, 16)),
@@ -62,13 +66,30 @@ function shapes(): Record<string, Shape> {
     path_userinfo: make(`/mnt/svc:${pw}@nas/share`, pw),
     long129: make(mixed(129)),
     long600: make(mixed(600)),
+    // shapes of the second review: a name shaped like the tool's own paging or values file with a token inside the id, a
+    // secret right after a name and `=`, a JWT inside a path, user-info that starts `UPID:` or holds an `@` in the password,
+    // prefixes the shared block does not know, and a run of digits (also planted where a tool reads an integer)
+    own_path_work: make(`work/${ghp2}/tool-output/a_b-c-0123456789012345.jsonl`, ghp2),
+    own_path_store: make(`store/jobs/${akia2}/out/x-values.jsonl`, akia2),
+    key_after_eq: make(`key=${s40c}`, s40c),
+    aws_secret_after_eq: make(`aws_secret_access_key=${s40d}`, s40d),
+    account_key: make(`AccountKey=${b88}`, b88),
+    password_after_eq: make(`Password=${pw2}`, pw2),
+    jwt_in_path: make(`dd/${jwt2}/vm.vmdk`, jwt2),
+    upid_userinfo: make(`UPID:node:0:svc:${pw3}@host.example.test`, pw3),
+    at_in_password: make(`svc:p@${pw3}@host.example.test`, pw3),
+    gitlab: make("glpat-" + mixed(20)),
+    stripe: make("sk_live_" + mixed(24)),
+    sendgrid: make("SG." + mixed(22) + "." + mixed(43)),
+    digits40: make(pick(DIG, 40)),
+    zero_width_split: ((k: string): Shape => make(k.slice(0, 13) + "\u200b" + k.slice(13, 26) + "\u200b" + k.slice(26), k))(mixed(39)),
   };
 }
 
 /** The pieces a leak would show: every 12 characters of the secret (past a fixed prefix), its base64 and its digests. */
 function needles(shape: Shape): string[] {
   const s = shape.secret;
-  const from = /^(AKIA|ghp_|github_pat_|xoxb-|sk-proj-|eyJ)/.exec(s)?.[0].length ?? 0;
+  const from = /^(AKIA|ghp_|github_pat_|xoxb-|sk-proj-|eyJ|glpat-|sk_live_|SG\.)/.exec(s)?.[0].length ?? 0;
   const out = new Set<string>();
   for (let k = from; k + 12 <= s.length; k++) for (const v of [s.slice(k, k + 12), s.slice(k, k + 12).toLowerCase(), s.slice(k, k + 12).toUpperCase()]) out.add(v);
   out.add(Buffer.from(s).toString("base64").slice(0, 16));
@@ -92,11 +113,12 @@ function chainFiles(c: Shape): Files {
   f["vm/cid.vmdk"] = desc([`CID=${v}`, `parentCID=${v}`, 'createType="monolithicFlat"', 'RW 8 ZERO']);
   f["vm/ddb.vmdk"] = desc(["CID=aabbccd5", "parentCID=ffffffff", `encoding="${v}"`, `isNativeSnapshot="${v}"`, 'RW 8 ZERO', `ddb.uuid = "${v}"`, `ddb.adapterType = "${v}"`]);
   f["vm/version.vmdk"] = desc([`version=${v}`, "CID=aabbccd6", "parentCID=ffffffff", 'RW 8 ZERO']);
+  if (/^[0-9]+$/.test(v)) f["vm/sectors.vmdk"] = desc(["CID=aabbccda", "parentCID=ffffffff", `RW ${v} FLAT "x" ${v}`, `RW ${v} ZERO`]);    // integers a tool reads
   f["vm/sparse.vmdk"] = vmdkSparse({ descriptor: desc(["CID=aabbccd7", "parentCID=aabbccd0", `parentFileNameHint="${v}"`, `RW 8 SPARSE "${v}"`]) });
   f["vm/vm.vmx"] = `.encoding = "UTF-8"\ndisplayName = "${v}"\nscsi0:0.fileName = "${v}"\nide1:0.fileName = "${v}"\n`;
   f["vm/vm.vmsd"] = [".encoding = \"UTF-8\"", `snapshot.lastUID = "${v}"`, `snapshot.current = "${v}"`, `snapshot.numSnapshots = "${v}"`,
     `snapshot0.uid = "${v}"`, `snapshot0.filename = "${v}"`, `snapshot0.displayName = "${v}"`, `snapshot0.description = "${v}"`, `snapshot0.parent = "${v}"`,
-    `snapshot0.createTimeHigh = "${v}"`, `snapshot0.createTimeLow = "${v}"`, `snapshot0.disk0.fileName = "${v}"`, `snapshot0.type = "${v}"`].join("\n") + "\n";
+    `snapshot0.createTimeHigh = "${v}"`, `snapshot0.createTimeLow = "${v}"`, `snapshot0.disk0.fileName = "${v}"`, `snapshot0.type = "${v}"`, ...(/^[0-9]+$/.test(v) ? [`snapshot${v}.displayName = "x"`] : [])].join("\n") + "\n";
   f["vm/delta-vm.vmx"] = `scsi0:0.fileName = "hint.vmdk"\n`;
   f["q/backing.qcow2"] = qcow2({ backing: v });
   f["q/format.qcow2"] = qcow2({ backing: "backing.qcow2", backingFormat: v });
@@ -130,7 +152,7 @@ function inventoryFiles(c: Shape): Files {
     `RemoteDisplay.vnc.password = "${v}"`, `annotation = "${v}"`, ...(c.nameLike ? [`x.${v}.password = "y"`, `${v} = "y"`] : [])].join("\n") + "\n";
   f["vm/web.vmsd"] = [".encoding = \"UTF-8\"", `snapshot.numSnapshots = "${v}"`, `snapshot.current = "${v}"`, `snapshot.lastUID = "${v}"`, `snapshot0.uid = "${v}"`,
     `snapshot0.filename = "${v}"`, `snapshot0.displayName = "${v}"`, `snapshot0.parent = "${v}"`, `snapshot0.createTimeHigh = "${v}"`, `snapshot0.createTimeLow = "${v}"`,
-    `snapshot0.disk0.fileName = "${v}"`, `snapshot0.type = "${v}"`].join("\n") + "\n";
+    `snapshot0.disk0.fileName = "${v}"`, `snapshot0.type = "${v}"`, ...(/^[0-9]+$/.test(v) ? [`snapshot${v}.displayName = "x"`] : [])].join("\n") + "\n";
   f["lv/domain.xml"] = `<domain type='${v}'><name>${v}</name><uuid>${v}</uuid><memory unit='${v}'>${v}</memory><vcpu>${v}</vcpu><os><type arch='${v}' machine='${v}'>hvm</type></os><devices>`
     + `<disk type='file' device='${v}'><driver name='qemu' type='${v}'/><source file='${v}'/><backingStore type='file'><format type='${v}'/><source file='${v}'/><backingStore/></backingStore><target dev='${v}' bus='${v}'/></disk>`
     + `<disk type='network' device='disk'><source protocol='${v}' name='${v}'/><target dev='vdb'/></disk><graphics type='vnc' passwd='${v}'/></devices></domain>`;
@@ -330,6 +352,36 @@ test("the backstop: with the seal and the shape check removed on purpose, the ch
       });
     }
   }
+});
+
+test("the backstop alone, for every shape in every slot: with the seal and the shape check removed on purpose, no canary reaches the answer, an error answer, a paging file or a file name", async () => {
+  let runs = 0, replaced = 0;
+  const leaks: string[] = [];
+  for (const [label, script, build] of [
+    ["snapshot_chain_check", CHAIN, (c: Shape): AuditCall[] => [{ args: { root: "inputs" }, files: chainFiles(c) }]],
+    ["virtualization_inventory", INVENTORY, (c: Shape): AuditCall[] => [{ args: { root: "inputs" }, files: inventoryFiles(c) }]],
+    ["backup_audit_normalise", AUDIT, auditCalls],
+  ] as const) {
+    for (const [name, shape] of PICKED) {
+      const calls = build(shape);
+      await withCwd(async (cwd) => {
+        for (const call of calls) await plant(cwd, call.files);
+        for (const call of calls) {
+          const run = await unsealed(script, cwd, { ...call.args, limit: 1 });
+          runs += 1;
+          assert.doesNotMatch(run.stderr, /Traceback/, `${label} ${name}: ${run.stderr.slice(-300)}`);
+          const doc: Json = JSON.parse(run.stdout);
+          replaced += doc.boundary?.strings_replaced_by_the_check ?? 0;
+          const texts: [string, string][] = [["stdout", run.stdout]];
+          for (const [rel, bytes] of await made(cwd)) texts.push([`name of ${rel}`, rel], [rel, bytes]);
+          for (const [where, text] of texts) for (const n of needles(shape)) if (text.includes(n)) leaks.push(`${label} ${name} ${JSON.stringify(call.args).slice(0, 60)}: ${where} holds "${n}"`);
+        }
+      });
+    }
+  }
+  console.log(`# backstop alone: ${runs} runs, ${PICKED.length} shapes, ${replaced} string(s) replaced, ${leaks.length} leak(s)`);
+  assert.ok(replaced > 0);
+  assert.deepEqual(leaks.slice(0, 20), [], `${leaks.length} leak(s)`);
 });
 
 test("the way out is one block, the same text in the three tools", async () => {
