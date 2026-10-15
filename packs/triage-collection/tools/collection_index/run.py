@@ -1852,8 +1852,10 @@ class Mapping:
         if not hits:
             return None, ("mapping_capped" if self.capped else "no_row_matched")
         sources = {tail_key(h[2]).lower() for h in hits}
-        if len(sources) > 1 or reasons or self._siblings(root, rel) > 1:
-            why = "the rows name different sources" if len(sources) > 1 else reasons[0] if reasons else "the file shares its name, letters of case apart, with a sibling"
+        siblings = self._siblings(root, rel) > 1
+        if len(sources) > 1 or reasons or siblings:
+            why = ("the rows name different sources" if len(sources) > 1 else
+                   "the file shares its name, letters of case apart, with a sibling" if siblings else reasons[0])
             return {"candidates": [{"path": scrub(h[2], "copy log row"), "log": self.logs[h[0]]["log"], "row": h[1], "line": h[5]} for h in hits],
                     "candidate_count": len(hits), "why": why}, "ambiguous"
         first = hits[0]
