@@ -54,8 +54,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-TOOL = {"name": "suricata_run", "version": 4}
-PARSER = "suricata_run/4"
+TOOL = {"name": "suricata_run", "version": 5}
+PARSER = "suricata_run/5"
 TEST_SECONDS = 120
 MAX_TIMEOUT = 1000            # the manifest's limit is 1200: --build-info (30 s) and the configuration test (120 s) come first
 DEFAULT_HOME_NET = ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
@@ -234,7 +234,7 @@ def in_job():
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": scrub(message), "tool": TOOL, **extra}))
+    print(json.dumps({"error": scrub(message), "tool": TOOL, "status": "failed", "status_basis": "the tool stopped with an error (see error)", **extra}))
     raise SystemExit(1)
 
 
@@ -262,7 +262,7 @@ def resolve_output(out, what="output"):
 
 
 # BEGIN SHARED PROCESS
-# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
+# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-withholding.test.ts
 # holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
@@ -290,8 +290,33 @@ def spawn(argv, **kwargs):
     return subprocess.Popen(argv, **kwargs)
 
 
+def _children_libproc(pid):
+    """The direct children of `pid` on macOS and the BSDs, from libproc (a library call: no program is started and
+    nothing can be slow); None when the library is not there."""
+    try:
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+        lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listchildpids.restype = ctypes.c_int
+        size = 256
+        while size <= 1 << 16:
+            buf = (ctypes.c_int * size)()
+            lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+            found = []
+            for value in buf:
+                if value <= 0:
+                    break
+                found.append(int(value))
+            if len(found) < size:
+                return found
+            size *= 4
+        return found
+    except Exception:  # noqa: BLE001 - no library, no symbol: the caller falls back
+        return None
+
+
 def descendants(pid):
-    """Every process below `pid`, from /proc where there is one, else from ps."""
+    """Every process below `pid`: from /proc where there is one, else from libproc, else from ps (given three seconds)."""
     kids = {}
     try:
         if os.path.isdir("/proc/self"):
@@ -303,8 +328,16 @@ def descendants(pid):
                         kids.setdefault(int(fields[1]), []).append(int(entry))
                     except (OSError, IndexError, ValueError):
                         continue
+        elif _children_libproc(pid) is not None:
+            found, stack = [], [pid]
+            while stack and len(found) < 4096:
+                for child in _children_libproc(stack.pop()) or []:
+                    if child not in found and child != pid:
+                        found.append(child)
+                        stack.append(child)
+            return found
         else:
-            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=3).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
@@ -383,6 +416,64 @@ def install_signal_handlers():
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, _on_signal)
 # END SHARED PROCESS
+
+
+def note_problem(handle, out_dir, line, why):
+    """Append one EVE line that was not read as an event to eve-problems.jsonl (created on the first); returns the handle."""
+    if handle is None:
+        fd = os.open(os.path.join(out_dir, "eve-problems.jsonl"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    handle.write(json.dumps({"line": line, "why": why}) + "\n")
+    return handle
+
+
+def shown_address(value):
+    """An address field of an event: an IP address as it is, anything else through the block."""
+    if value is None or isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    try:
+        ipaddress.ip_address(text)
+        return text
+    except ValueError:
+        return scrub(text)
+
+
+def shown_number(value):
+    """A port, an id, a count: a number as it is; text that is digits as it is; anything else through the block."""
+    if value is None or isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    return text if re.fullmatch(r"-?\d{1,20}", text) else scrub(text)
+
+
+def shown_text(value):
+    if value is None or isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    return scrub(str(value))
+
+
+def shown_time(value):
+    """An EVE timestamp (ISO 8601 with an offset) as it is; anything else through the block."""
+    text = value if isinstance(value, str) else None
+    if text is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})", text):
+        return text
+    return shown_text(value)
+
+
+PROGRESS = {"stage": "arguments", "out_dir": None}
+
+
+def last_word(signum):
+    """What a stopped run says on stdout: partial, which stage it was in, and what is on disk."""
+    out_dir = PROGRESS.get("out_dir")
+    try:
+        files = sorted(os.listdir(out_dir)) if out_dir else []
+    except OSError:
+        files = []
+    print(json.dumps({"tool": TOOL, "parser": PARSER, "status": "partial", "ok": False,
+                      "status_basis": "the tool was stopped by signal %d while it was %s; the engine, if it was running, was killed with what it had started, and eve.json is only as far as it got" % (signum, PROGRESS["stage"]),
+                      "interrupted_by_signal": signum, "stage": PROGRESS["stage"], "out_dir": out_dir, "files_on_disk": files}), flush=True)
 
 
 def file_sha256(path):
@@ -474,6 +565,7 @@ def configuration(out_dir, home_net):
 
 
 def main():
+    STATE["last_word"] = last_word
     install_signal_handlers()
     try:
         args = json.load(sys.stdin)
@@ -488,6 +580,7 @@ def main():
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: an empty directory under work/ (in a job, under $OUT)")
     out_dir = resolve_output(out_dir, "out_dir")
+    PROGRESS["out_dir"] = out_dir
     try:
         if os.path.exists(out_dir) and os.listdir(out_dir):
             fail("out_dir already holds files", out_dir=out_dir)
@@ -503,11 +596,12 @@ def main():
     home_net = args.get("home_net", DEFAULT_HOME_NET)
     if (not isinstance(home_net, list) or not home_net or len(home_net) > 64 or any(not isinstance(n, str) for n in home_net)):
         fail("home_net must be a non-empty list of addresses or networks, such as [\"10.0.0.0/8\"]")
-    for n in home_net:
+    for position, n in enumerate(home_net):
         try:
             ipaddress.ip_network(n, strict=False)
         except ValueError:
-            fail("home_net names something that is not an address or a network", home_net_entry=scrub(n)[:80])
+            # The caller has the entry; it is named by position and length, not echoed (and so not cut).
+            fail("home_net names something that is not an address or a network", home_net_index=position, home_net_entry_length=len(n))
     checksum_mode = str(args.get("checksum_mode") or "none").lower()
     if checksum_mode not in ("none", "all"):
         fail("checksum_mode must be none or all", checksum_mode=checksum_mode)
@@ -535,6 +629,7 @@ def main():
     except OSError as exc:
         fail("the output directory could not be created (%s)" % describe(exc), out_dir=out_dir)
 
+    PROGRESS["stage"] = "reading the build information"
     build_code, build_out, build_err, _ = preflight([binary, "--build-info"], PREFLIGHT_SECONDS)
     build_path = os.path.join(out_dir, "suricata-build-info.txt")
     try:
@@ -569,6 +664,7 @@ def main():
     common = ["-c", os.path.abspath(config_path), "-S", os.path.abspath(rules), "-l", os.path.abspath(out_dir), "-k", checksum_mode, "-v"]
     test_argv = [binary, "-T"] + common
     test_out, test_err = os.path.join(out_dir, "suricata-test.stdout"), os.path.join(out_dir, "suricata-test.stderr")
+    PROGRESS["stage"] = "testing the configuration"
     test_code, test_timed_out = run_to_files(test_argv, test_out, test_err, TEST_SECONDS)
     if test_code != 0:
         fail("the configuration test (suricata -T) %s, so nothing was run" % ("did not finish in time" if test_timed_out else "failed with exit code %s" % test_code),
@@ -579,6 +675,7 @@ def main():
 
     argv = [binary, "-r", os.path.abspath(path)] + common
     stdout_path, stderr_path = os.path.join(out_dir, "suricata.stdout"), os.path.join(out_dir, "suricata.stderr")
+    PROGRESS["stage"] = "running Suricata"
     code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout)
     for name in os.listdir(out_dir):
         full = os.path.join(out_dir, name)
@@ -594,8 +691,11 @@ def main():
     if not os.path.isfile(eve):
         fail("suricata wrote no eve.json", exit_code=code, command=argv, stdout=stdout_path, stderr=stderr_path, out_dir=out_dir)
 
+    PROGRESS["stage"] = "reading eve.json"
     event_types, signatures = collections.Counter(), collections.Counter()
     alerts, bad_lines, not_objects, no_type, too_long = [], [], 0, 0, []
+    problem_total = 0
+    problems_file = None                 # every EVE line that was not read as an event, whole, in a file of its own
     invalid = 0
     tls_events = tls_ja3 = tls_ja4 = 0
     other_with_fingerprint = 0
@@ -614,20 +714,27 @@ def main():
                         break
                 if len(too_long) < 10:
                     too_long.append(lines)
+                problem_total += 1
+                problems_file = note_problem(problems_file, out_dir, lines, "longer than %d bytes: located, not read" % MAX_LINE)
                 continue
             if not raw.strip():
                 continue
             try:
                 event = json.loads(raw.decode("utf-8", "surrogateescape"))
-            except ValueError:
+            except (ValueError, RecursionError) as exc:
                 invalid += 1
+                why = "nested deeper than the parser reads" if isinstance(exc, RecursionError) else "not valid JSON"
                 if len(bad_lines) < 10:
-                    bad_lines.append({"line": lines, "why": "not valid JSON"})
+                    bad_lines.append({"line": lines, "why": why})
+                problem_total += 1
+                problems_file = note_problem(problems_file, out_dir, lines, why)
                 continue
             if not isinstance(event, dict):
                 not_objects += 1
                 if len(bad_lines) < 10:
                     bad_lines.append({"line": lines, "why": "valid JSON that is not an object"})
+                problem_total += 1
+                problems_file = note_problem(problems_file, out_dir, lines, "valid JSON that is not an object")
                 continue
             kind = event.get("event_type")
             if not isinstance(kind, str) or not kind:
@@ -635,19 +742,22 @@ def main():
                 kind = "no_event_type"
                 if len(bad_lines) < 10:
                     bad_lines.append({"line": lines, "why": "an object with no event_type"})
-            event_types[kind] += 1
+                problem_total += 1
+                problems_file = note_problem(problems_file, out_dir, lines, "an object with no event_type")
+            event_types[scrub(kind)] += 1
             if kind == "alert":
                 alert = event.get("alert") if isinstance(event.get("alert"), dict) else {}
-                label = str(alert.get("signature") or alert.get("signature_id") or "unknown")
+                label = scrub(str(alert.get("signature") or alert.get("signature_id") or "unknown"))
                 if label in signatures or len(signatures) < MAX_SIGNATURES:
                     signatures[label] += 1
                 else:
                     signature_overflow += 1
                 if len(alerts) < limit:
-                    alerts.append({"line": lines, "timestamp": event.get("timestamp"), "flow_id": event.get("flow_id"),
-                                   "src_ip": event.get("src_ip"), "src_port": event.get("src_port"),
-                                   "dest_ip": event.get("dest_ip"), "dest_port": event.get("dest_port"),
-                                   "proto": event.get("proto"), "signature_id": alert.get("signature_id"), "signature": alert.get("signature")})
+                    alerts.append({"line": lines, "timestamp": shown_time(event.get("timestamp")), "flow_id": shown_number(event.get("flow_id")),
+                                   "src_ip": shown_address(event.get("src_ip")), "src_port": shown_number(event.get("src_port")),
+                                   "dest_ip": shown_address(event.get("dest_ip")), "dest_port": shown_number(event.get("dest_port")),
+                                   "proto": shown_text(event.get("proto")), "signature_id": shown_number(alert.get("signature_id")),
+                                   "signature": shown_text(alert.get("signature"))})
             elif kind == "tls":
                 tls = event.get("tls") if isinstance(event.get("tls"), dict) else {}
                 tls_events += 1
@@ -656,6 +766,8 @@ def main():
             if kind != "tls" and isinstance(event.get("tls"), dict) and (event["tls"].get("ja3") or event["tls"].get("ja4")):
                 other_with_fingerprint += 1
 
+    if problems_file is not None:
+        problems_file.close()
     loads = {"configuration_test": rule_load_counts(test_out, test_err), "run": rule_load_counts(stdout_path, stderr_path)}
     load_failed = any(v and v["failed"] for v in loads.values())
     problems = []
@@ -671,8 +783,11 @@ def main():
     if invalid or not_objects or too_long or no_type:
         problems.append("%d EVE lines were not read as events" % (invalid + not_objects + len(too_long) + no_type))
     ok = not problems
+    basis = ("the engine exited 0, its configuration test passed, every rule loaded and every EVE line was read as an event" if ok else
+             "; ".join(problems[:6]) + (" (and %d more, all in problems)" % (len(problems) - 6) if len(problems) > 6 else "") + ": eve.json is whole in out_dir")
     print(json.dumps({
         "tool": TOOL, "parser": PARSER,
+        "status": "complete" if ok else "partial", "status_basis": basis,
         "path": path, "out_dir": out_dir, "eve_json": eve,
         "suricata_version": version_line, "build_info": build_path, "build_info_exit_code": build_code,
         "command": argv,
@@ -706,6 +821,8 @@ def main():
         "tls_with_ja3": tls_ja3, "tls_with_ja4": tls_ja4,
         "eve_lines": lines, "invalid_eve_lines": invalid, "eve_lines_not_objects": not_objects, "events_without_event_type": no_type,
         "eve_lines_over_limit": too_long, "eve_line_problems": bad_lines,
+        "eve_problem_lines_total": problem_total, "eve_problems_file": "eve-problems.jsonl" if problem_total else None,
+        "eve_problems_note": "eve_line_problems and eve_lines_over_limit show the first ten; every one is in eve_problems_file with its line number",
         "stdout": stdout_path, "stderr": stderr_path,
         "problems": problems,
         "ok": ok,
@@ -719,7 +836,7 @@ def main():
                  "the caller's, and no ruleset ships with this pack. Checksum validation defaults to none because capture offload commonly leaves "
                  "invalid TCP checksums; use all to test integrity. JA3 and JA4 are pivots, not unique identities of a program."),
     }, indent=2))
-    return 0 if ok else 1
+    return 0
 
 
 if __name__ == "__main__":

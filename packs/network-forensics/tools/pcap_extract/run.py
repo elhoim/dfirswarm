@@ -387,7 +387,7 @@ class SecretValues:
 
 
 # BEGIN SHARED PROCESS
-# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
+# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-withholding.test.ts
 # holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
@@ -415,8 +415,33 @@ def spawn(argv, **kwargs):
     return subprocess.Popen(argv, **kwargs)
 
 
+def _children_libproc(pid):
+    """The direct children of `pid` on macOS and the BSDs, from libproc (a library call: no program is started and
+    nothing can be slow); None when the library is not there."""
+    try:
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+        lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listchildpids.restype = ctypes.c_int
+        size = 256
+        while size <= 1 << 16:
+            buf = (ctypes.c_int * size)()
+            lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+            found = []
+            for value in buf:
+                if value <= 0:
+                    break
+                found.append(int(value))
+            if len(found) < size:
+                return found
+            size *= 4
+        return found
+    except Exception:  # noqa: BLE001 - no library, no symbol: the caller falls back
+        return None
+
+
 def descendants(pid):
-    """Every process below `pid`, from /proc where there is one, else from ps."""
+    """Every process below `pid`: from /proc where there is one, else from libproc, else from ps (given three seconds)."""
     kids = {}
     try:
         if os.path.isdir("/proc/self"):
@@ -428,8 +453,16 @@ def descendants(pid):
                         kids.setdefault(int(fields[1]), []).append(int(entry))
                     except (OSError, IndexError, ValueError):
                         continue
+        elif _children_libproc(pid) is not None:
+            found, stack = [], [pid]
+            while stack and len(found) < 4096:
+                for child in _children_libproc(stack.pop()) or []:
+                    if child not in found and child != pid:
+                        found.append(child)
+                        stack.append(child)
+            return found
         else:
-            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=3).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():

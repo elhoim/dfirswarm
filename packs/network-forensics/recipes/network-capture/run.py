@@ -23,8 +23,15 @@ http2.tsv and quic.tsv are listed only after `tshark -G fields` shows that the i
 ones it does not have are named in the step (fields_missing) and left out. Nothing is assumed about what a version
 supports.
 
-SENSITIVE: http.tsv holds request URIs, hosts and user agents, which can carry credentials and tokens. The receipt
-marks it (secret_bearing); run the recipe's job as a sensitive output when the capture can hold any.
+SENSITIVE: http.tsv holds request URIs, hosts and user agents, dns.tsv query and answer names, tls.tsv server names and
+certificate strings, http2.tsv the :authority and :path of requests; all of it can carry credentials, tokens and
+identifiers. The receipt marks each table (secret_bearing). Every file the recipe writes is private (the directory 0700,
+files 0600, and what tshark writes too), but the mark is informational: nothing in the harness reads it, so run the
+recipe's job as a sensitive output when the capture can hold any.
+
+Every field a listing asks for is checked against `tshark -G fields` first: a field the installed build does not list is
+named in the step (fields_missing) and left out of that listing, so one missing field never makes a whole listing fail.
+If the list of fields cannot be read, the fields are asked for unchecked and the step says so.
 """
 import json
 import os
@@ -51,7 +58,12 @@ LISTINGS = [
     ("quic.tsv", "quic", ["frame.number", "frame.time_epoch", "ip.src", "ipv6.src", "udp.srcport", "ip.dst", "ipv6.dst", "udp.dstport", "quic.connection.number", "quic.version", "quic.long.packet_type", "quic.dcid", "quic.scid"],
      ["quic.connection.number", "quic.version", "quic.long.packet_type", "quic.dcid", "quic.scid"]),
 ]
-SECRET_BEARING = {"http.tsv": "request URIs, hosts and user agents can carry credentials, tokens and session identifiers"}
+SECRET_BEARING = {
+    "http.tsv": "request URIs, hosts and user agents can carry credentials, tokens and session identifiers",
+    "dns.tsv": "query and answer names can carry tokens, identifiers and exfiltrated data in a label",
+    "tls.tsv": "server names and certificate strings can carry identifiers and tokens",
+    "http2.tsv": "the :authority and :path of a request can carry credentials, tokens and session identifiers",
+}
 # A conditional listing is made only if at least one of these exists in the installed build.
 NEEDS_ONE_OF = {"http2.tsv": ["http2.streamid", "http2.type"], "quic.tsv": ["quic.version", "quic.long.packet_type", "quic.dcid", "quic.connection.number"]}
 
@@ -77,7 +89,7 @@ def detect(path):
 
 
 # BEGIN SHARED PROCESS
-# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
+# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-withholding.test.ts
 # holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
@@ -105,8 +117,33 @@ def spawn(argv, **kwargs):
     return subprocess.Popen(argv, **kwargs)
 
 
+def _children_libproc(pid):
+    """The direct children of `pid` on macOS and the BSDs, from libproc (a library call: no program is started and
+    nothing can be slow); None when the library is not there."""
+    try:
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+        lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listchildpids.restype = ctypes.c_int
+        size = 256
+        while size <= 1 << 16:
+            buf = (ctypes.c_int * size)()
+            lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+            found = []
+            for value in buf:
+                if value <= 0:
+                    break
+                found.append(int(value))
+            if len(found) < size:
+                return found
+            size *= 4
+        return found
+    except Exception:  # noqa: BLE001 - no library, no symbol: the caller falls back
+        return None
+
+
 def descendants(pid):
-    """Every process below `pid`, from /proc where there is one, else from ps."""
+    """Every process below `pid`: from /proc where there is one, else from libproc, else from ps (given three seconds)."""
     kids = {}
     try:
         if os.path.isdir("/proc/self"):
@@ -118,8 +155,16 @@ def descendants(pid):
                         kids.setdefault(int(fields[1]), []).append(int(entry))
                     except (OSError, IndexError, ValueError):
                         continue
+        elif _children_libproc(pid) is not None:
+            found, stack = [], [pid]
+            while stack and len(found) < 4096:
+                for child in _children_libproc(stack.pop()) or []:
+                    if child not in found and child != pid:
+                        found.append(child)
+                        stack.append(child)
+            return found
         else:
-            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=3).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
@@ -210,14 +255,14 @@ class Receipt:
                                 "(and of HTTP/2 and QUIC packets when the installed tshark lists their fields)",
                      "not_covered": "payload content, encrypted payloads, protocols or fields the installed tshark does not decode, and packets absent from the source; "
                                     "a listing with no rows does not show a protocol is absent",
-                     "errors": [], "files": [], "steps": [], "tools": {}, "deadline_seconds": DEADLINE,
+                     "status_basis": "the recipe has not finished", "errors": [], "files": [], "steps": [], "tools": {}, "deadline_seconds": DEADLINE,
                      "secret_bearing": {}, "limits_on_what_the_listings_show": {}}
 
     def write(self):
         for name, content in (("coverage.json", json.dumps(self.data, indent=2) + "\n"), ("index.tsv", self._index())):
             final = os.path.join(self.out_dir, name)
             tmp = final + ".tmp"
-            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(content)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -274,6 +319,7 @@ def field_names(tshark, wanted, seconds):
     """Which of `wanted` the installed tshark lists as fields (`tshark -G fields`, read as a stream, with select so that
     the deadline needs no second thread); (the names found, why the list could not be read or None)."""
     found = set()
+    lowered = {w.lower(): w for w in wanted if w.startswith("_ws.col.")}
     try:
         proc = spawn([tshark, "-G", "fields"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as exc:
@@ -299,8 +345,13 @@ def field_names(tshark, wanted, seconds):
             *lines, buffer = buffer.split(b"\n")
             for raw in lines:
                 cells = raw.decode("utf-8", "replace").split("\t")
-                if len(cells) > 2 and cells[0] == "F" and cells[2] in wanted:
-                    found.add(cells[2])
+                if len(cells) > 2 and cells[0] == "F":
+                    # column pseudo-fields are listed in lower case (_ws.col.protocol) and accepted in either
+                    name = cells[2]
+                    if name in wanted:
+                        found.add(name)
+                    elif name.startswith("_ws.col.") and name in lowered:
+                        found.add(lowered[name])
     finally:
         try:
             proc.stdout.close()
@@ -333,20 +384,22 @@ def main():
         print(json.dumps({"ok": False, "error": "run needs --out DIR"}))
         return 2
     out_dir = sys.argv[sys.argv.index("--out") + 1]
+    os.umask(0o077)       # the directory 0700, every file 0600, tshark's and capinfos's own output too
     try:
-        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(out_dir, mode=0o700, exist_ok=True)
+        os.chmod(out_dir, 0o700)
     except OSError as exc:
         print(json.dumps({"ok": False, "error": "the output directory could not be created (%s)" % describe(exc), "out": out_dir}))
         return 2
     receipt = Receipt(out_dir, target, path)
     data = receipt.data
     if not applies:
-        data.update(status="unsupported", finished=True, why=why)
+        data.update(status="unsupported", status_basis="the file has no pcap or pcapng signature, so nothing was listed", finished=True, why=why)
         receipt.write()
         return 2
     tshark, capinfos = shutil.which("tshark"), shutil.which("capinfos")
     if not tshark or not capinfos:
-        data.update(status="failed", finished=True,
+        data.update(status="failed", status_basis="a program the recipe needs is not on PATH", finished=True,
                     errors=["missing program(s): " + ", ".join(name for name, value in (("tshark", tshark), ("capinfos", capinfos)) if not value)])
         receipt.write()
         return 2
@@ -365,7 +418,9 @@ def main():
             if step_entry["status"] == "running":
                 step_entry.update(status="interrupted", reason="the recipe was stopped by signal %d while this step ran; its file is partial" % signum)
         data["errors"].append("the recipe was stopped by signal %d before it finished" % signum)
+        data["status_basis"] = "the recipe was stopped by signal %d: the listings written so far are whole files, the one running is partial" % signum
         receipt.write()
+        print(json.dumps({"ok": False, "status": "partial", "status_basis": data["status_basis"], "interrupted_by_signal": signum}), flush=True)
 
     STATE["last_word"] = last_word
     install_signal_handlers()
@@ -408,10 +463,12 @@ def main():
     data["files"].append({"path": "capture.txt", "description": "capinfos capture metadata"})
     receipt.write()
 
-    needed = {f for _, _, _, check in LISTINGS for f in check}
-    available, field_problem = field_names(tshark, needed, min(300.0, max(1.0, deadline - time.monotonic())))
+    needed = {f for _, _, fields, _ in LISTINGS for f in fields}
     entry = step("tshark -G fields")
     entry.pop("reason", None)
+    entry.update(status="running", command=[os.path.basename(tshark), "-G", "fields"])
+    receipt.write()                       # a kill during this step leaves it running, not planned
+    available, field_problem = field_names(tshark, needed, min(300.0, max(1.0, deadline - time.monotonic())))
     entry.update(status="ok" if field_problem is None else "failed", fields_checked=sorted(needed), fields_found=sorted(available))
     if field_problem:
         entry["reason"] = field_problem
@@ -430,8 +487,18 @@ def main():
                              "the installed tshark does not list the fields this needs (%s): no listing was made, which says nothing about whether the capture holds the protocol" % ", ".join(missing))
                 receipt.write()
                 continue
+        if not field_problem:
+            # Every field is checked, not only the conditional listings': a field the build lacks is named and left out, never a failed listing.
+            missing = [f for f in fields if f not in available]
             fields = [f for f in fields if f not in missing]
-            entry["fields_missing"] = missing
+            if missing:
+                entry["fields_missing"] = missing
+                if not fields:
+                    entry.update(status="skipped", reason="the installed tshark lists none of the fields this needs: no listing was made")
+                    receipt.write()
+                    continue
+        elif check:
+            entry["fields_missing"] = []
         argv = list(base)
         if display_filter:
             argv += ["-Y", display_filter]
@@ -462,8 +529,10 @@ def main():
     data["limits_on_what_the_listings_show"]["rows_by_listing"] = rows
     unfinished = [s["step"] for s in data["steps"] if s["status"] in ("not_attempted", "running", "failed", "timed_out")]
     data.update(status="complete" if not data["errors"] and not unfinished else "partial", finished=True, elapsed_seconds=round(time.monotonic() - started, 3))
+    data["status_basis"] = ("every step ran and exited 0 and every listing was written" if data["status"] == "complete" else
+                            "%d error(s) and %d step(s) that did not finish (coverage.json names each)" % (len(data["errors"]), len(unfinished)))
     receipt.write()
-    print(json.dumps({"ok": not data["errors"], "status": data["status"]}))
+    print(json.dumps({"ok": not data["errors"], "status": data["status"], "status_basis": data["status_basis"]}))
     return 0 if not data["errors"] else 2
 
 
