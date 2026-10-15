@@ -180,7 +180,16 @@ test("recovery_key_scan writes values only on request, only in a job, only under
 
     const outDir = join(cwd, "out");
     await mkdir(outDir);
-    const job = { JOB_ID: "j000001", OUT: outDir };
+    // In a job the harness did not run as secret output (no SECRET_OUTPUT=1: a command job started by hand, or a harness that
+    // does not set it): the request is refused as JSON and nothing is created, not even the empty values file.
+    for (const flag of [{}, { SECRET_OUTPUT: "" }, { SECRET_OUTPUT: "0" }, { SECRET_OUTPUT: "true" }] as Array<Record<string, string>>) {
+      const plain = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000001", OUT: outDir, ...flag })) as { error: string; write_values?: string; written?: boolean };
+      assert.match(plain.error, /not run as secret output/);
+      assert.match(plain.error, /SECRET_OUTPUT=1/);
+      assert.deepEqual([plain.write_values, plain.written], ["refused", false]);
+      assert.deepEqual(await readdir(outDir), [], "nothing was created under OUT");
+    }
+    const job = { JOB_ID: "j000001", OUT: outDir, SECRET_OUTPUT: "1" };
     // In a job, without the flag: still no value anywhere.
     const quiet = await tool(SCAN, cwd, { path: "work/ev" }, job);
     assert.deepEqual((await readdir(outDir)).filter((n) => n.includes("password")), []);
@@ -1111,7 +1120,7 @@ test("recovery_key_scan withholds a path component shaped like a recovery passwo
     // The sealed values file, and only it, keeps the real path.
     const outDir = join(cwd, "out");
     await mkdir(outDir);
-    const loud = await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000002", OUT: outDir, PYTHONPATH: join(cwd, "pystub") });
+    const loud = await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000002", OUT: outDir, SECRET_OUTPUT: "1", PYTHONPATH: join(cwd, "pystub") });
     assertNoSecret(await everythingPrinted(cwd, loud.stdout).catch(() => loud.stdout));
     const rows = (await readFile(join(outDir, "recovery-passwords.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { file: string });
     assert.ok(rows.some((r) => r.file.includes(KEY_NAME)), "the real path is in the sealed file");
@@ -1142,7 +1151,7 @@ test("recovery_key_scan opens its values file first: a file or link already ther
     await plant(cwd);
     const outDir = join(cwd, "out");
     await mkdir(outDir);
-    const job = { JOB_ID: "j000003", OUT: outDir };
+    const job = { JOB_ID: "j000003", OUT: outDir, SECRET_OUTPUT: "1" };
     const target = join(outDir, "recovery-passwords.jsonl");
     await writeFile(target, "already here\n");
     const exists = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, job)) as { error: string };
@@ -1157,14 +1166,14 @@ test("recovery_key_scan opens its values file first: a file or link already ther
     const out2 = join(cwd, "out2");
     await mkdir(out2);
     await symlink(outside, join(out2, "recovery-passwords.jsonl"));
-    const linked = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000004", OUT: out2 })) as { error: string };
+    const linked = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000004", OUT: out2, SECRET_OUTPUT: "1" })) as { error: string };
     assert.match(linked.error, /^the values file already exists: /);
     assert.equal(await readFile(outside, "utf8"), "outside\n");
     // So is a dangling link.
     const out3 = join(cwd, "out3");
     await mkdir(out3);
     await symlink(join(cwd, "nowhere.txt"), join(out3, "recovery-passwords.jsonl"));
-    refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000005", OUT: out3 }));
+    refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000005", OUT: out3, SECRET_OUTPUT: "1" }));
     assert.deepEqual(await readdir(cwd).then((n) => n.includes("nowhere.txt")), false);
 
     // Asked for and nothing found: an empty file, mode 0600, named, and written: 0.
@@ -1172,7 +1181,7 @@ test("recovery_key_scan opens its values file first: a file or link already ther
     await writeFile(join(cwd, "work", "clean", "a.txt"), "nothing\n");
     const out4 = join(cwd, "out4");
     await mkdir(out4);
-    const none = body<Scan>(await tool(SCAN, cwd, { path: "work/clean", write_values: true }, { JOB_ID: "j000006", OUT: out4 }));
+    const none = body<Scan>(await tool(SCAN, cwd, { path: "work/clean", write_values: true }, { JOB_ID: "j000006", OUT: out4, SECRET_OUTPUT: "1" }));
     assert.equal(none.secret_values.written, 0);
     assert.equal(none.secret_values.contains_secret_values, false);
     assert.equal(none.secret_values.values_file, "store/jobs/j000006/out/recovery-passwords.jsonl");
