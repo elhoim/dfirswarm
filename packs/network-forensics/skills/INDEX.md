@@ -2,6 +2,8 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `network/router`
+
 - `beacons/periodicity` Testing a series of connections for periodicity: You suspect something calls home on a schedule, or a first pass found nothing.
 - `capture/carve-from-images` Recovering packet records from disk or memory: No capture was supplied, but a memory image or disk image may retain packet buffers.
 - `capture/derivatives` Making a working derivative of a capture: You need to filter, split, merge, deduplicate or build a capture from a hex dump.
@@ -12,5 +14,6 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `logs/web-proxy-firewall` Working web, proxy and firewall logs: The evidence is line-oriented network logs rather than a packet capture.
 - `metadata/dns-tls` DNS and encrypted-transport metadata: Traffic is mostly encrypted and you need to know which names and handshake fields stay observable.
 - `metadata/fingerprints` TLS fingerprints and Suricata output, with limits: A finding rests on a JA3 or JA4 value or a Suricata match.
+- `network/router` Network notes by question: Pick a network note when none is listed, or you cannot choose.
 - `sessions/objects` Exporting protocol objects with their provenance: You export files or other protocol objects from a capture with pcap_extract.
 - `sessions/reconstruct` Reconstructing transactions and objects: You need what was actually sent, not just who spoke to whom.
