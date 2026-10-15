@@ -269,7 +269,10 @@ def paging_left():
     rows were sealed as they were written. The names, as the answer shows them."""
     left = []
     for page in list(PAGING_OPEN):
-        shown = page.abandon()
+        try:
+            shown = page.abandon()
+        except Exception:  # noqa: BLE001 - one file that cannot be closed must not hide the others
+            shown = None
         if shown:
             left.append(shown)
     return left
@@ -290,6 +293,7 @@ def stop_word(signum):
     and any paging file it leaves. If the answer cannot be made (the signal came in the middle of the way out itself), a short
     one that says so."""
     name = {signal.SIGTERM: "SIGTERM", signal.SIGINT: "SIGINT", signal.SIGHUP: "SIGHUP"}.get(signum, "signal %d" % signum)
+    left = []
     try:
         left = paging_left()
         print(answer_text({"tool": TOOL, "parser": PARSER, "status": "partial",
@@ -297,7 +301,7 @@ def stop_word(signum):
                            "stopped_by_signal": name, "paging_files_left": left,
                            "paging_files_note": "the rows written before the stop, sealed as they were written, kept under the name that says so" if left else "no paging file was open"}))
     except BaseException as exc:  # noqa: BLE001 - the last word is best effort, and never silent
-        print(json.dumps({"tool": TOOL, "parser": PARSER, "status": "partial", "stopped_by_signal": name,
+        print(json.dumps({"tool": TOOL, "parser": PARSER, "status": "partial", "stopped_by_signal": name, "paging_files_left": left,
                           "status_basis": "the tool was stopped by %s; the full last word could not be made (%s)" % (name, type(exc).__name__)}))
     sys.stdout.flush()                      # the caller leaves with os._exit, which flushes nothing
 
@@ -458,6 +462,8 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
+            stops = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+            was = signal.pthread_sigmask(signal.SIG_BLOCK, stops)       # a stop must not come between the file and its registration
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
@@ -465,7 +471,9 @@ class LosslessPage:
                 self._out = os.fdopen(fd, "w", encoding="ascii", errors="backslashreplace")
                 PAGING_OPEN.append(self)
             except OSError as exc:
+                signal.pthread_sigmask(signal.SIG_SETMASK, was)
                 fail("the whole result could not be written: the paging file cannot be created (%s)" % describe(exc), paging_file=str(self.path))
+            signal.pthread_sigmask(signal.SIG_SETMASK, was)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -474,13 +482,16 @@ class LosslessPage:
         """A stop with the file open: the rows written so far are kept as `<name>.partial`; the name as the answer shows it."""
         if self._out is None or self._tmp is None:
             return None
+        keep = self.path.with_name(self.path.name + ".partial")
+        try:
+            os.replace(self._tmp, keep)         # the name first: it is atomic and touches no file object
+        except OSError:
+            return None
         try:
             self._out.flush()
             self._out.close()
-            keep = self.path.with_name(self.path.name + ".partial")
-            os.replace(self._tmp, keep)
-        except OSError:
-            return None
+        except (OSError, RuntimeError, ValueError):
+            pass                                # a write was in progress when the signal came in: what the system already holds is kept
         self._out = None
         if self in PAGING_OPEN:
             PAGING_OPEN.remove(self)
