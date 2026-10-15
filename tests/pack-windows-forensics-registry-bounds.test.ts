@@ -133,6 +133,18 @@ test("regkv reads at most the values a hive of that size can hold from a value l
   });
 });
 
+test("regkv reads a value list that names one big record again and again for the data the hive can hold, not once per element", { skip: VARIANTS[1].skip }, async () => {
+  // 3,000 elements naming one 60 KB value read 180 MB from a 70 KB hive (the value cap alone, hive size / 20, allowed all of them).
+  await withCwd(async (cwd) => {
+    const env = await VARIANTS[1].write(cwd, "work/h.dat", { name: "ROOT", children: [{ name: "K", values: [{ name: "big", type: "binary", value: Buffer.alloc(60_000, 7) }], valueListRepeats: 3_000 }] });
+    const hiveBytes = (await stat(join(cwd, "work", "h.dat"))).size;
+    const out = body<Answer>(await tool("regkv", cwd, { hive: "work/h.dat", key: "K" }, env));
+    assert.ok(Object.keys(out.values).length * 60_000 <= 4 * hiveBytes + 60_000, `${Object.keys(out.values).length} values of 60 KB from a ${hiveBytes}-byte hive`);
+    assert.equal(out.status, "partial");
+    assert.ok(out.problems.some((p: Answer) => /hold more data than a \d+-byte hive can/.test(p.error)), JSON.stringify(out.problems).slice(0, 300));
+  });
+});
+
 dual("regkv says a big-endian DWORD is not in the answer, instead of returning an empty value as complete", async (v) => {
   await withCwd(async (cwd) => {
     const env = await v.write(cwd, "work/h.dat", { name: "ROOT", children: [{ name: "K", values: [{ name: "Be", type: 5, value: Buffer.from([0x11, 0x22, 0x33, 0x44]) }] }] });
