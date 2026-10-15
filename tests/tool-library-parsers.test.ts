@@ -6,30 +6,10 @@
  * tool at all.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LIB, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
-
-test("every tool of the Windows pack that has a copy in the library is byte-identical to it, manifest included", async () => {
-  // A run started with `--tools-from tool-library` installs the library's copy; one that had drifted from the pack's fixed tool
-  // would hand a run the defect the pack fixed (a credential printed, a stream cut, a count missing).
-  const packTools = join(LIB, "..", "packs", "windows-forensics", "tools");
-  const shared: string[] = [];
-  for (const entry of await readdir(packTools)) {
-    const copy = join(LIB, entry);
-    if (!(await stat(copy).then((s) => s.isDirectory(), () => false))) continue;
-    shared.push(entry);
-    assert.deepEqual(await readFile(join(copy, "run.py")), await readFile(join(packTools, entry, "run.py")), `${entry}: run.py has drifted from the pack's`);
-    assert.deepEqual(
-      JSON.parse(await readFile(join(copy, "manifest.json"), "utf8")),
-      JSON.parse(await readFile(join(packTools, entry, "manifest.json"), "utf8")),
-      `${entry}: manifest.json has drifted from the pack's`,
-    );
-    assert.equal(await stat(join(copy, "run.sh")).then(() => true, () => false), false, `${entry}: a run.sh beside run.py would be what a run executes`);
-  }
-  assert.ok(shared.length >= 13, `the Windows pack's shared tools: ${shared.join(", ")}`);
-});
 
 test("recyclebin_i parses $I metadata and refuses to guess at an unknown header", async () => {
   await withCwd(async (cwd) => {

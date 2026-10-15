@@ -1,7 +1,7 @@
 ---
 id: filesystem/shadowcopies
-title: Listing volume shadow copies
-when: You need to know which snapshots an image holds before you say something is gone.
+title: Shadow copies
+when: Which snapshots an image holds.
 needs: []
 tools: [vss_stores]
 requires_host: [vshadowinfo, vshadowmount, mmls]

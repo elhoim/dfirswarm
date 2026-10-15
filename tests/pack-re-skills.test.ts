@@ -362,7 +362,7 @@ test("the review's wording fixes are in the leaves and the goal, and the goal's 
   assert.match(text("rules/authoring"), /A hit on the specimen a rule was written from is not corroboration/);
   assert.match(text("rules/authoring"), /file names, header timestamps, absolute addresses, library strings/);
   // The goal: the definition of done asks for inspected evidence, not an address or an import; the question about strings
-  // bounds the negative; the checks are the eight they were, the event minimum included (flagged for the owner, not changed).
+  // bounds the negative; the checks are the seven that remain once the numeric event minimum is gone (the owner removed it: completion is judged by the answer dispositions).
   const goal = await readFile(join(RE, "goals", "sample-triage.md"), "utf8");
   const done = goal.slice(goal.indexOf("## Definition of done"), goal.indexOf("## Checks")).replace(/\s+/g, " ");
   assert.match(done, /Every material capability inference cites inspected code or structured feature evidence with its locator and limitations; an import alone supports only a dependency observation\./);
@@ -370,8 +370,9 @@ test("the review's wording fixes are in the leaves and the goal, and the goal's 
   assert.match(goal.replace(/\s+/g, " "), /which analysis recovered no reference to it \(a bounded negative: function discovery, indirect addressing and decoding limit it\)/);
   assert.doesNotMatch(goal, /a plain statement that nothing references it/);
   const checks = goal.slice(goal.indexOf("## Checks")).split("\n").filter((l) => l.startsWith("- `"));
-  assert.equal(checks.length, 8);
-  assert.ok(checks.some((c) => c.includes('-ge 3')), "the event minimum is still there");
+  assert.equal(checks.length, 7);
+  assert.ok(checks.every((c) => !c.includes('"kind":"event"') && !/-ge \d/.test(c)), "no event-count minimum");
+  assert.ok(checks.some((c) => c.includes("check-answers.ts")), "the answer dispositions are still what judges completion");
   // The counts outside the pack follow the pack.
   for (const file of ["docs/packs.md", "README.md"]) {
     const doc = await readFile(join(RE, "..", "..", file), "utf8");
@@ -447,4 +448,16 @@ test("the document and script leaves keep observation, inference and conclusion 
   assert.match(gorust, /Strings are not NUL-terminated/);
   assert.match(gorust, /A `capa` match or an import is the author's only when the matched code is application code you can cite/);
   assert.match(gorust, /even then it is a capability hypothesis, not intent/);
+});
+
+test("the three leaves that tell a worker when the tools' withholding is enough say that it is by shape and that a secret of another shape is printed", async () => {
+  const skills = await load(SKILLS);
+  const macros = skills.get("documents/macros")!.body;
+  assert.match(macros, /Names are withheld by shape; another shape is printed/);
+  const pdfRtf = skills.get("documents/pdf-rtf")!.body;
+  assert.match(pdfRtf, /targets are withheld by shape; another shape is printed/);
+  assert.doesNotMatch(pdfRtf, /trailing bytes/);
+  const pe = skills.get("pe/signature-and-resources")!.body;
+  assert.match(pe, /by shape only: a plain password or a token family it does not name is printed, and 0\.1-4% of random base64 or AWS-format keys holding a `\/`; run it with `secret_output` when a file's secrets matter/);
+  assert.doesNotMatch(pe, /not needed for a `pe_directories` call/);
 });

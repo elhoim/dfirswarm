@@ -1,7 +1,7 @@
 ---
 id: logs/powershell
-title: PowerShell logs and script blocks
-when: You are about to read PowerShell event-log records or quote a script block.
+title: PowerShell logs
+when: Event records and script blocks.
 needs: []
 tools: [evtx_query, regkv]
 requires_host: []

@@ -345,7 +345,7 @@ def shown_target(text):
     if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text):
         # the URL's own rules (user-info to the last `@`, query values, fragment, host), then the sanitiser over the whole, as for any
         # other string: a base64 key joined by `/` in the path is read across its pieces here too
-        return shown_path(redact_target(text))
+        return shown_path(redact_target(plain_userinfo(text)))
     return cell(shown_path(text))
 
 
@@ -384,26 +384,82 @@ VALUES = [None]    # the values file of this call, once it exists: an answer tha
 # tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
 # long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
 # the tool, never of the file: the count says how many.
-_CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN = set()                      # strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN_CHARS = [0]                  # their total length, bounded
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
-# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@`) is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^?\s<>]*)(?=@)", re.I)
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@` within
+# MAILTO_SPAN characters, no `?`, space, `<` or `>` before it) is withheld here. It is found with one pass over the `mailto:name:`
+# heads and a search for `@` inside a fixed window after each, so that a million `mailto:a:` cost a million small steps and not their
+# square: a password of more than MAILTO_SPAN characters in a mailto: address is not withheld by this rule (the shared rules for a
+# token-shaped run still read it).
+MAILTO_HEAD = re.compile(r"mailto:[^:@?/\s]*:", re.I)
+MAILTO_STOP = re.compile(r"[?\s<>]")
+MAILTO_SPAN = 512
+
+
+def mailto_userinfo(text):
+    out, last = [], 0
+    for m in MAILTO_HEAD.finditer(text):
+        if m.start() < last:
+            continue
+        begin = m.end()
+        window = min(len(text), begin + MAILTO_SPAN + 1)
+        at = text.rfind("@", begin, window)
+        if at >= 0:
+            stop = MAILTO_STOP.search(text, begin, at)
+            if stop:
+                at = text.rfind("@", begin, stop.start())
+        if at < 0:
+            continue
+        out.append(text[last:begin])
+        out.append(_withheld("userinfo", at - begin, "urls"))
+        last = at
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
 # shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A password may hold `@`: the user-info
 # runs to the last `@` before the host, as a URL's does (RFC 3986 3.2.1). A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
-# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
-# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
-# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
-KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
-                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
-                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
-                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
-                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+# A URL's user-info whose password holds `/`, `?` or `#` (files hold them raw, though RFC 3986 3.2.1 asks for percent-encoding): the
+# first `@` of such a string follows a `/`, `?` or `#`, which no authority holds, so the password is read to the last `@` of the same
+# whitespace-delimited token. A port (`host:8080/path@x`) is not one: only digits and then `/`, `?`, `#` or the end after the `:`. The
+# `///` (a file URL: `file:///C:/Dir/icon@2x.png`) is not one. The bare form (`name:pass/word@host`, no `//`) is not read: a path with an `@` in it (`C:/Dir/icon@2x.png`) is not user-info.
+SLASH_USERINFO = re.compile(r"(?:(?<=[^/]//)|(?<=^//))[\w.%+-]{1,64}:(?!\d{1,5}(?:[/?#]|$))(?=[^\s@/?#]{0,256}[/?#][^\s@]{0,256}@)(?:[^\s@]|@(?=[^\s@]*@)){1,512}(?=@)")
+
+
+def slash_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` withheld (shown_path reads it too; a URL's query is split
+    off before the sanitiser sees it, so this is also run first on a target)."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), text)
+
+
+def plain_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` replaced by a plain name of the same length, which
+    redact_url (it splits a URL at the first `?` and `#` and its authority at the first `/`) then withholds as user-info."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: "x" * len(m.group()), text)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`, `"token": "..."`): after `=`, or
+# after `:` for the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so their `:` form counts only
+# when the key itself is quoted, as in JSON), quoted (to its closing quote; an opening quote nothing closes is dropped and the rest is
+# the value) or not (to `;`, a space or the end: a `,` `&` `<` `>` stays in the value, as a password may hold them). The short names
+# (`pw`, `pass`, `auth`) only where no letter or digit precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value
+# made only of `%` conversions is a format. A password that holds `;` or a space, or a quote of the other kind, is withheld up to it.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+                             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:"
+                             r"|[\"'](?:token|secret|credentials?|auth|sig)[\"'][ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
 # prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
 # where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
@@ -540,8 +596,29 @@ def _slash_spans(text):
 # \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
 _HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 _MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
-# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info
-_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)}
+# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info; and the
+# characters that print as nothing without being a format or combining mark: the line and paragraph separators, the braille blank, the
+# Hangul fillers (U+115F, U+1160, U+3164, U+FFA0)
+_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029,
+                               0x202F, 0x205F, 0x2800, 0x3000, 0x115F, 0x1160, 0x3164, 0xFFA0)}
+_NON_ASCII_RUN = re.compile(r"[^\x00-\x7f]+")
+
+
+def _redecoded(text, encoding):
+    """text with each run of non-ASCII characters that is the UTF-8 of something, read by a tool as 8-bit text (Latin-1, CP437) and
+    shown as the three or two characters it came to, put back to what the bytes mean (the three bytes of a zero-width space read as
+    Latin-1 are three visible characters, and a token split by them is split unseen). None when no run is."""
+    changed = [False]
+
+    def back(m):
+        try:
+            fixed = m.group().encode(encoding).decode("utf-8")
+        except UnicodeError:
+            return m.group()
+        changed[0] = True
+        return fixed
+    out = _NON_ASCII_RUN.sub(back, text)
+    return out if changed[0] else None
 
 
 def unhidden(text):
@@ -554,6 +631,19 @@ def unhidden(text):
     return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
 
 
+def hidden_copies(text):
+    """The copies of the text a token may be split in unseen: without the hidden characters, and the same after the UTF-8 that was
+    read as Latin-1 or CP437 is put back."""
+    if not _MAYBE_HIDDEN.search(text):
+        return ()
+    copies = [unhidden(text)]
+    for encoding in ("latin-1", "cp437"):
+        back = _redecoded(text, encoding)
+        if back is not None:
+            copies.append(unhidden(back))
+    return copies
+
+
 def _whole_withheld(m, kind="names"):
     return _withheld("token-shaped text", len(m.group()), kind)
 
@@ -562,12 +652,16 @@ def _shown_pass(out):
     if "-----BEGIN " in out:
         out = PEM_BODY.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if ":" in out:
-        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+        out = mailto_userinfo(out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+        # first: a rule that withheld a piece of a password with a `:` in it would leave the marker, which breaks the token this one reads
+        out = slash_userinfo(out)
     if "=" in out or ":" in out:
+        # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
     # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
@@ -648,16 +742,23 @@ def _shown_one(text):
     return out, passes
 
 
-# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
-# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
-# tested joined by unhidden.
-_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+# The escapes cell() writes (\xNN and \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a word, and the `x06` of
+# its escape is not a part of the word (whose digit would make it read as random). What an escape splits is tested joined by unhidden.
+# A backslash of the file is written doubled and is a character of its piece, not an end of it (a password holding one is read whole);
+# it is found as a pair only so that the `\x06` written for a file's own backslash and `x06` is not taken for an escape.
+_ESCAPE = re.compile(r"\\\\|(\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
 
 
 def _shown(text):
     if "\\" not in text:
         return _shown_one(text)
-    parts, passes = _ESCAPE.split(text), 1
+    parts, passes, start = [], 1, 0
+    for m in _ESCAPE.finditer(text):
+        if m.group(1) is not None:
+            parts.append(text[start:m.start()])
+            parts.append(m.group(1))
+            start = m.end()
+    parts.append(text[start:])
     for k in range(0, len(parts), 2):
         parts[k], n = _shown_one(parts[k])
         passes = max(passes, n)
@@ -673,15 +774,19 @@ def shown_path(text):
         return text
     if text in _CLEAN:
         return text
-    bare = unhidden(text)
-    if bare != text and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
+    for bare in hidden_copies(text):
+        if bare != text and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
     out, passes = _shown(text)
-    bare = unhidden(out)
-    if bare != out and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
-    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+    for bare in hidden_copies(out):
+        if bare != out and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
+    # A result that settled (the last pass changed nothing, and the hidden-character copies above held nothing more) is known to be a
+    # fixed point: the backstop and the next write of the same string do not read it again, so that a file of thousands of hostile names
+    # costs the sanitiser one pass over each and not three. (Four passes may not have settled: that result is read again.)
+    if passes < 4 and len(out) <= 8192 and len(_CLEAN) < 200000 and _CLEAN_CHARS[0] + len(out) <= (1 << 25):
         _CLEAN.add(out)
+        _CLEAN_CHARS[0] += len(out)
     return out
 
 
@@ -932,9 +1037,9 @@ class LosslessPage:
                 for kept in self.page:
                     self._write(kept)
                 return
-            self.not_written = "ninety-nine files of this name already exist in %s" % self.dir
+            self.not_written = "ninety-nine files of this name already exist in %s" % shown_path(str(self.dir))
         except OSError as exc:
-            self.not_written = "the file could not be created in %s (%s)" % (self.dir, describe(exc))
+            self.not_written = "the file could not be created in %s (%s)" % (shown_path(str(self.dir)), describe(exc))
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
@@ -970,7 +1075,7 @@ class LosslessPage:
                 result["all_results"] = self.shown
                 result["all_results_format"] = "JSON Lines, one complete row per line"
         if self.not_written:
-            result["not_written"] = self.not_written
+            result["not_written"] = shown_path(cell(self.not_written))
         return result
 
 
@@ -1015,9 +1120,9 @@ class SecretValues:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
-            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+            raise SecretValuesRefused("the values file already exists: %s" % shown_path(str(self.path)))
         except OSError as exc:
-            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (shown_path(str(self.path)), describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id, locator, value):
@@ -1857,8 +1962,9 @@ class Cfb:
                     for e in same:
                         e.duplicate = True
                     self.warn("directory entries %s share the name %s in one storage ([MS-CFB] 2.6.4: names in a storage are unique, compared in upper "
-                              "case): readers differ on which one they take; each is listed, every copy of a VBA storage's dir and module streams is read, and of any "
-                              "other the first is read"
+                              "case): readers differ on which one they take; each is listed, every copy of a VBA storage's dir and module streams is read, and so is every copy of a root WordDocument, "
+                              "Workbook, Book, PowerPoint Document, Current User, EncryptionInfo or EncryptedPackage stream (the others under other_copies); of any "
+                              "other stream the first is read"
                               % (", ".join(str(e.sid) for e in same), cell(shown_path("/".join(same[0].parts)))))
 
     def find(self, *parts):
@@ -2990,7 +3096,7 @@ def _probe_zip(path, size, ctx, extractor, out):
                     elif local == "Override":
                         kind = attrs.get("ContentType", "")
                         part = attrs.get("PartName", "")
-                        row = {"part": zname(part[1:], False) if part.startswith("/") and part[1:].lower() in withheld_names else shown_path(part),
+                        row = {"part": zname(part[1:], False) if part.startswith("/") and part[1:].lower() in withheld_names else shown_name(part),
                                "content_type": text_of(kind, None, "names")}
                     else:
                         return
@@ -3107,7 +3213,10 @@ def _probe_zip(path, size, ctx, extractor, out):
                 if why == ["cfb_signature"]:
                     try:
                         blob = read_member(archive, info, ctx)
-                    except Unreadable:
+                    except Unreadable as exc:
+                        # a member nothing declares, with the compound file signature, that a bound keeps unread: said, and the answer partial
+                        zip_unreadable(ctx, members, shown, exc)
+                        ctx.problem("%s begins with the compound file signature and was not read, so whether it holds a VBA project is not known" % shown)
                         continue
                     if not cfb_has_vba(blob, ctx):
                         continue
@@ -3120,12 +3229,6 @@ def _probe_zip(path, size, ctx, extractor, out):
                         ctx.problem("%s is declared as the VBA project (%s) and was not read" % (shown, ", ".join(why)))
                         continue
                     members["read"] += 1
-                try:
-                    blob = read_member(archive, info, ctx)
-                except Unreadable as exc:
-                    zip_unreadable(ctx, members, shown, exc)
-                    continue
-                members["read"] += 1
                 try:
                     body, _cfb = probe_ole_blob(blob, ctx, extractor, label=shown, source=info.filename)
                 except CfbError as exc:
@@ -4895,7 +4998,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
             return "?"
         if ciphertext:
             return "ciphertext, %d bytes" % len(key)
-        return cell(shown_path(text_string(key)))
+        return cell(shown_name(text_string(key)))
 
     def embedded_row(row):
         embedded.append(row)
@@ -5082,7 +5185,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                         if ciphertext:
                             emb.update({"name": None, "name_length": len(fs["name"]), "ciphertext": True})
                         else:
-                            emb["name"] = cell(shown_path(text_string(fs["name"])))
+                            emb["name"] = cell(shown_name(text_string(fs["name"])))
                     listed.add(fs["stream_object"])
                     embedded_row(emb)
     except Over as exc:

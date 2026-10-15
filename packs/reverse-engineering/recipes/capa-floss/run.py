@@ -426,26 +426,82 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
 # long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
 # the tool, never of the file: the count says how many.
-_CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN = set()                      # strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN_CHARS = [0]                  # their total length, bounded
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
-# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@`) is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^?\s<>]*)(?=@)", re.I)
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@` within
+# MAILTO_SPAN characters, no `?`, space, `<` or `>` before it) is withheld here. It is found with one pass over the `mailto:name:`
+# heads and a search for `@` inside a fixed window after each, so that a million `mailto:a:` cost a million small steps and not their
+# square: a password of more than MAILTO_SPAN characters in a mailto: address is not withheld by this rule (the shared rules for a
+# token-shaped run still read it).
+MAILTO_HEAD = re.compile(r"mailto:[^:@?/\s]*:", re.I)
+MAILTO_STOP = re.compile(r"[?\s<>]")
+MAILTO_SPAN = 512
+
+
+def mailto_userinfo(text):
+    out, last = [], 0
+    for m in MAILTO_HEAD.finditer(text):
+        if m.start() < last:
+            continue
+        begin = m.end()
+        window = min(len(text), begin + MAILTO_SPAN + 1)
+        at = text.rfind("@", begin, window)
+        if at >= 0:
+            stop = MAILTO_STOP.search(text, begin, at)
+            if stop:
+                at = text.rfind("@", begin, stop.start())
+        if at < 0:
+            continue
+        out.append(text[last:begin])
+        out.append(_withheld("userinfo", at - begin, "urls"))
+        last = at
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
 # shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A password may hold `@`: the user-info
 # runs to the last `@` before the host, as a URL's does (RFC 3986 3.2.1). A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
-# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
-# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
-# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
-KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
-                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
-                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
-                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
-                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+# A URL's user-info whose password holds `/`, `?` or `#` (files hold them raw, though RFC 3986 3.2.1 asks for percent-encoding): the
+# first `@` of such a string follows a `/`, `?` or `#`, which no authority holds, so the password is read to the last `@` of the same
+# whitespace-delimited token. A port (`host:8080/path@x`) is not one: only digits and then `/`, `?`, `#` or the end after the `:`. The
+# `///` (a file URL: `file:///C:/Dir/icon@2x.png`) is not one. The bare form (`name:pass/word@host`, no `//`) is not read: a path with an `@` in it (`C:/Dir/icon@2x.png`) is not user-info.
+SLASH_USERINFO = re.compile(r"(?:(?<=[^/]//)|(?<=^//))[\w.%+-]{1,64}:(?!\d{1,5}(?:[/?#]|$))(?=[^\s@/?#]{0,256}[/?#][^\s@]{0,256}@)(?:[^\s@]|@(?=[^\s@]*@)){1,512}(?=@)")
+
+
+def slash_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` withheld (shown_path reads it too; a URL's query is split
+    off before the sanitiser sees it, so this is also run first on a target)."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), text)
+
+
+def plain_userinfo(text):
+    """text with the user-info of a URL whose password holds `/`, `?` or `#` replaced by a plain name of the same length, which
+    redact_url (it splits a URL at the first `?` and `#` and its authority at the first `/`) then withholds as user-info."""
+    if "//" not in text or "@" not in text:
+        return text
+    return SLASH_USERINFO.sub(lambda m: "x" * len(m.group()), text)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`, `"token": "..."`): after `=`, or
+# after `:` for the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so their `:` form counts only
+# when the key itself is quoted, as in JSON), quoted (to its closing quote; an opening quote nothing closes is dropped and the rest is
+# the value) or not (to `;`, a space or the end: a `,` `&` `<` `>` stays in the value, as a password may hold them). The short names
+# (`pw`, `pass`, `auth`) only where no letter or digit precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value
+# made only of `%` conversions is a format. A password that holds `;` or a space, or a quote of the other kind, is withheld up to it.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+                             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:"
+                             r"|[\"'](?:token|secret|credentials?|auth|sig)[\"'][ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
 # prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
 # where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
@@ -582,8 +638,29 @@ def _slash_spans(text):
 # \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
 _HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 _MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
-# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info
-_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)}
+# every space but U+0020 (no-break, en, ideographic and the like), which NFKD would make plain spaces that end a user-info; and the
+# characters that print as nothing without being a format or combining mark: the line and paragraph separators, the braille blank, the
+# Hangul fillers (U+115F, U+1160, U+3164, U+FFA0)
+_NO_BREAK = {c: None for c in (0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029,
+                               0x202F, 0x205F, 0x2800, 0x3000, 0x115F, 0x1160, 0x3164, 0xFFA0)}
+_NON_ASCII_RUN = re.compile(r"[^\x00-\x7f]+")
+
+
+def _redecoded(text, encoding):
+    """text with each run of non-ASCII characters that is the UTF-8 of something, read by a tool as 8-bit text (Latin-1, CP437) and
+    shown as the three or two characters it came to, put back to what the bytes mean (the three bytes of a zero-width space read as
+    Latin-1 are three visible characters, and a token split by them is split unseen). None when no run is."""
+    changed = [False]
+
+    def back(m):
+        try:
+            fixed = m.group().encode(encoding).decode("utf-8")
+        except UnicodeError:
+            return m.group()
+        changed[0] = True
+        return fixed
+    out = _NON_ASCII_RUN.sub(back, text)
+    return out if changed[0] else None
 
 
 def unhidden(text):
@@ -596,6 +673,19 @@ def unhidden(text):
     return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
 
 
+def hidden_copies(text):
+    """The copies of the text a token may be split in unseen: without the hidden characters, and the same after the UTF-8 that was
+    read as Latin-1 or CP437 is put back."""
+    if not _MAYBE_HIDDEN.search(text):
+        return ()
+    copies = [unhidden(text)]
+    for encoding in ("latin-1", "cp437"):
+        back = _redecoded(text, encoding)
+        if back is not None:
+            copies.append(unhidden(back))
+    return copies
+
+
 def _whole_withheld(m, kind="names"):
     return _withheld("token-shaped text", len(m.group()), kind)
 
@@ -604,12 +694,16 @@ def _shown_pass(out):
     if "-----BEGIN " in out:
         out = PEM_BODY.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if ":" in out:
-        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+        out = mailto_userinfo(out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+        # first: a rule that withheld a piece of a password with a `:` in it would leave the marker, which breaks the token this one reads
+        out = slash_userinfo(out)
     if "=" in out or ":" in out:
+        # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
     # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
@@ -690,16 +784,23 @@ def _shown_one(text):
     return out, passes
 
 
-# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
-# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
-# tested joined by unhidden.
-_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+# The escapes cell() writes (\xNN and \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a word, and the `x06` of
+# its escape is not a part of the word (whose digit would make it read as random). What an escape splits is tested joined by unhidden.
+# A backslash of the file is written doubled and is a character of its piece, not an end of it (a password holding one is read whole);
+# it is found as a pair only so that the `\x06` written for a file's own backslash and `x06` is not taken for an escape.
+_ESCAPE = re.compile(r"\\\\|(\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
 
 
 def _shown(text):
     if "\\" not in text:
         return _shown_one(text)
-    parts, passes = _ESCAPE.split(text), 1
+    parts, passes, start = [], 1, 0
+    for m in _ESCAPE.finditer(text):
+        if m.group(1) is not None:
+            parts.append(text[start:m.start()])
+            parts.append(m.group(1))
+            start = m.end()
+    parts.append(text[start:])
     for k in range(0, len(parts), 2):
         parts[k], n = _shown_one(parts[k])
         passes = max(passes, n)
@@ -715,15 +816,19 @@ def shown_path(text):
         return text
     if text in _CLEAN:
         return text
-    bare = unhidden(text)
-    if bare != text and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
+    for bare in hidden_copies(text):
+        if bare != text and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
     out, passes = _shown(text)
-    bare = unhidden(out)
-    if bare != out and _shown(bare)[0] != bare:
-        return _withheld("token-shaped text", len(text), "names")
-    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+    for bare in hidden_copies(out):
+        if bare != out and _shown(bare)[0] != bare:
+            return _withheld("token-shaped text", len(text), "names")
+    # A result that settled (the last pass changed nothing, and the hidden-character copies above held nothing more) is known to be a
+    # fixed point: the backstop and the next write of the same string do not read it again, so that a file of thousands of hostile names
+    # costs the sanitiser one pass over each and not three. (Four passes may not have settled: that result is read again.)
+    if passes < 4 and len(out) <= 8192 and len(_CLEAN) < 200000 and _CLEAN_CHARS[0] + len(out) <= (1 << 25):
         _CLEAN.add(out)
+        _CLEAN_CHARS[0] += len(out)
     return out
 
 
@@ -774,7 +879,7 @@ def final_check(value, safe=None, key=""):
 BUDGET_SECONDS = 3500                     # recipe.json gives this recipe 3600
 GRACE_SECONDS = 10                        # a program that outlives its own clock by this much is ended
 VERSION_SECONDS = 20
-MAX_JSON = 32 << 20                       # an engine's JSON read here: parsed JSON takes about twelve times its size, so a larger file is kept whole and not read
+MAX_JSON = 32 << 20                       # an engine's JSON read here: parsed JSON takes up to about twenty-five times its size, so a larger file is kept whole and not read
 TSV_ROWS = 1_000_000
 EARLIER = re.compile(r"^(capa|floss|coverage)(-\d+)?\.(json|stderr)$|^(matches|index)(-\d+)?\.tsv$")
 FLOSS_KINDS = ("static_strings", "stack_strings", "tight_strings", "decoded_strings")
@@ -795,8 +900,10 @@ def describe(exc):
 def target_of(arg):
     text = open(arg, encoding="utf-8").read() if os.path.isfile(arg) else arg
     target = json.loads(text)
-    paths = target.get("paths") or []
-    if not paths or not isinstance(paths[0], str):
+    if not isinstance(target, dict):
+        raise ValueError("the target is not a JSON object")
+    paths = target.get("paths")
+    if not isinstance(paths, list) or not paths or not isinstance(paths[0], str):
         raise ValueError("the target names no path")
     return target, paths[0]
 
@@ -826,14 +933,14 @@ def detect(path):
     return None, "no PE or ELF signature (the engines are run on those; Mach-O and raw shellcode are not offered)"
 
 
-def new_name(out_dir, stem, ext):
+def new_name(out_dir, stem, ext, mode=0o644):
     """A name in `out_dir` that nothing has: `stem.ext`, or `stem-2.ext`, ... The file is created at once, exclusively, so that a result an
     earlier run left in this directory is never opened for writing, let alone replaced."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     for n in range(1, 1000):
         name = "%s%s" % (stem if n == 1 else "%s-%d" % (stem, n), ext)
         try:
-            os.close(os.open(os.path.join(out_dir, name), flags, 0o644))
+            os.close(os.open(os.path.join(out_dir, name), flags, mode))
         except FileExistsError:
             continue
         return name
@@ -1076,7 +1183,7 @@ def write_results(state):
 
 
 def run(path, out_dir, fmt, budget):
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
     started = time.monotonic()
     sample = os.path.abspath(path)
     state = {"out_dir": out_dir, "fmt": fmt, "shown": shown_path(path), "errors": [], "engines": {}, "matches": None}
@@ -1091,6 +1198,7 @@ def run(path, out_dir, fmt, budget):
 
     STATE["last_word"] = last_word
     install_signal_handlers()
+    become_subreaper()
     for engine in ENGINES:
         state["engines"][engine["id"]] = {"id": engine["id"], "program": engine["program"], "status": "failed", "reason": "%s has not run" % engine["program"],
                                           "argv": [engine["program"]] + engine["argv"] + ["<sample>"], "seconds": engine["seconds"], "file": None, "stderr_file": None,
@@ -1106,6 +1214,7 @@ def run(path, out_dir, fmt, budget):
         run_engines(state, sample, budget, started, unfinished)
     except Exception as exc:  # noqa: BLE001 - the receipt says what stopped the recipe, never "started and has not finished"
         state["errors"].append("the recipe stopped on an unexpected error (%s): the engines' statuses are as far as it got" % scrub(describe(exc), "text"))
+    sweep_orphans()
     final = write_results(state)
     print(json.dumps({"ok": final == "complete", "status": final, "format": fmt, "coverage": state["coverage_name"], "index": state["index_name"]}))
     return 0 if final in ("complete", "partial") else 2
@@ -1122,6 +1231,7 @@ def run_engines(state, sample, budget, started, unfinished):
             continue
         e["installed"] = True
         rc, out, err, timed = version_of(exe, out_dir, max(1, min(VERSION_SECONDS, int(budget - (time.monotonic() - started)))))
+        sweep_orphans()
         e["version_command"] = {"argv": [engine["program"], "--version"], "exit_code": rc, "first_line": first_line(out) or first_line(err), "timed_out": timed,
                                 "note": "what the program printed, not a statement of what this recipe knows about that release"}
         left = budget - (time.monotonic() - started)
@@ -1130,8 +1240,9 @@ def run_engines(state, sample, budget, started, unfinished):
             e.update({"status": "failed", "reason": "the recipe's time budget was spent before %s could start" % engine["program"], "timed_out": True})
             unfinished()
             continue
-        e["file"] = new_name(out_dir, engine["id"], ".json")
-        e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr")
+        # what an engine wrote is raw (strings out of the sample, as FLOSS recovers them): mode 0600, as the tools' own raw files are
+        e["file"] = new_name(out_dir, engine["id"], ".json", 0o600)
+        e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr", 0o600)
         e["seconds"] = seconds
         try:
             rc, timed_out = run_to_files([exe] + engine["argv"] + [sample], os.path.join(out_dir, e["file"]), os.path.join(out_dir, e["stderr_file"]), seconds)
@@ -1147,8 +1258,13 @@ def run_engines(state, sample, budget, started, unfinished):
             unfinished()
             continue
         e["exit_code"], e["timed_out"] = rc, timed_out
+        orphans = sweep_orphans()
         doc, why = read_json(os.path.join(out_dir, e["file"]))
         status, reason, details = judge(engine, rc, timed_out, doc, why)
+        if orphans:
+            e["orphans_ended"] = orphans
+            if status == "complete":
+                status, reason = "partial", "%s exited 0 and left %d process(es) of its own running, which were ended: what they wrote after it exited is not in its output" % (engine["program"], orphans)
         e.update({"status": status, "reason": reason, "bytes": os.path.getsize(os.path.join(out_dir, e["file"])), **details})
         if engine["id"] == "capa" and status == "complete" and isinstance(doc.get("rules"), dict):
             state["matches"] = new_name(out_dir, "matches", ".tsv")
@@ -1161,6 +1277,43 @@ def run_engines(state, sample, budget, started, unfinished):
         if drop_if_empty(os.path.join(out_dir, e["stderr_file"])):
             e["stderr_file"] = None
         unfinished()
+
+
+SUBREAPER = [False]
+
+
+def become_subreaper():
+    """On Linux, ask the kernel to make this process the parent of any process an engine leaves behind (PR_SET_CHILD_SUBREAPER = 36), so that
+    one that called setsid or double-forked and outlived its parent can still be found and ended. macOS has no such call: there an orphan
+    of an engine that exited by itself is not found (the tree is walked, and killed, only while its parent is alive)."""
+    if sys.platform.startswith("linux") and ctypes is not None:
+        try:
+            SUBREAPER[0] = ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+        except Exception:  # noqa: BLE001
+            SUBREAPER[0] = False
+
+
+def sweep_orphans():
+    """End every process still below this one (an engine has exited, so none should be) and reap what can be reaped; how many were ended."""
+    if not SUBREAPER[0]:
+        return 0
+    ended = 0
+    for _ in range(4):
+        victims = descendants(os.getpid())
+        if not victims:
+            break
+        for pid in victims:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                ended += 1
+            except OSError:
+                pass
+        for pid in victims:
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+    return ended
 
 
 def drop_if_empty(path):
@@ -1183,8 +1336,8 @@ def main(argv):
         return 2
     try:
         _target, path = target_of(args["--target"])
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": scrub(str(exc))}))
+    except (OSError, ValueError, RecursionError) as exc:
+        print(json.dumps({"ok": False, "error": scrub(str(exc) if not isinstance(exc, RecursionError) else "the target is nested too deeply")}))
         return 2
     if not os.path.isfile(path):
         print(json.dumps({"ok": False, "error": "the target is not a readable file"}))
@@ -1197,7 +1350,7 @@ def main(argv):
         print(json.dumps({"ok": False, "error": "run needs --out DIR"}))
         return 2
     if fmt is None:
-        os.makedirs(args["--out"], exist_ok=True)
+        os.makedirs(args["--out"], mode=0o700, exist_ok=True)
         name, index = receipt_names(args["--out"])
         if index != "index.tsv":
             os.unlink(os.path.join(args["--out"], index))

@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { routerChecks } from "./pack-router-checks.ts";
 import { ROOT } from "./tool-library-harness.ts";
 
 const PACK = join(ROOT, "packs", "encrypted-containers");
@@ -55,18 +56,22 @@ const SECOND: Record<string, string> = {
   "keys/other-sources": "keys/where-they-hide",
 };
 
+// The pack's one router: shown alone when a run's index is over budget, and names every other skill once (routerChecks below).
+const ROUTER = "encrypted/router";
+
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., and has a short index entry", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, OLD_IDS.length + Object.keys(SECOND).length);
+  assert.equal(skills.size, OLD_IDS.length + Object.keys(SECOND).length + 1);
   for (const s of skills.values()) {
-    assert.ok(TOKENS(s.text) <= 800, `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
+    assert.ok(TOKENS(s.text) <= (s.id === ROUTER ? 400 : 800), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
     assert.ok(s.text.split("\n").length <= 300, `${s.id} lines`);
     const first = s.body.trim().split("\n")[0];
     assert.match(first, /^Use (when|only if) /, `${s.id} opens with Use when`);
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
-    assert.match(flat(s.body), /Does not show/i, `${s.id} says what it does not show`);
+    // The router reads no artefact: it names notes and holds no rule, so it shows and does not show nothing.
+    if (s.id !== ROUTER) assert.match(flat(s.body), /Does not show/i, `${s.id} says what it does not show`);
   }
   const index = await readFile(join(SKILLS, "INDEX.md"), "utf8");
   for (const id of skills.keys()) assert.ok(index.includes(`\`${id}\``), `${id} is in the index`);
@@ -191,4 +196,16 @@ test("the tool fields a skill names are fields the tools write", async () => {
       assert.ok(written, `${file} writes ${name}, which ${skillId} teaches`);
     }
   }
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+routerChecks({
+  pack: "encrypted-containers",
+  router: ROUTER,
+  before: [
+    "archives/formats", "archives/protected", "identify/by-format", "identify/headers", "keys/other-sources", "keys/recovery-key-scan",
+    "keys/where-they-hide", "volumes/bitlocker", "volumes/bitlocker-opening", "volumes/filevault-apfs", "volumes/luks-filevault",
+  ],
+  profiles: ["disk", "full"],
 });

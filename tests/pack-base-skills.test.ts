@@ -510,17 +510,20 @@ test("the router is the pack's only router, within 400 tokens, and names every o
   assert.match(await readFile(join(SKILLS, "INDEX.md"), "utf8"), /^Router: `base\/router`$/m);
 });
 
-test("the disk profile (base, encrypted-containers, windows) fits the run's 2,500-token index budget only because the base pack has a router", async () => {
-  const dirs = ["computer-forensics-base", "encrypted-containers", "windows-forensics"].map((p) => join(ROOT, "packs", p));
-  const packs = await readPackIndexes(dirs);
+test("a run of the base pack with encrypted-containers, windows and linux fits the run's 2,500-token index budget only because the base pack has a router", async () => {
+  // The disk profile (base, encrypted-containers, windows) used to need the router; windows-forensics' index was then cut to fit its own
+  // budget and the profile fits whole. This set is over the budget whole, and the other packs' routers are left out of the count on purpose:
+  // what this holds is the base pack's router, whatever the other packs have.
+  const dirs = ["computer-forensics-base", "encrypted-containers", "windows-forensics", "linux-forensics"].map((p) => join(ROOT, "packs", p));
+  const packs = (await readPackIndexes(dirs)).map((p) => (p.id === "computer-forensics-base" ? p : { ...p, router: null }));
   const withRouter = renderSkillsSection(packs).report;
   const base = withRouter.packs.find((p) => p.id === "computer-forensics-base")!;
   assert.equal(base.shown, "router", "the base pack is shown by its router when the run is over budget");
-  assert.ok(withRouter.shown_tokens <= SKILL_BUDGET.run, `the disk profile shows ${Math.round(withRouter.shown_tokens)} tokens of entries, over the run's ${SKILL_BUDGET.run}`);
+  assert.ok(withRouter.shown_tokens <= SKILL_BUDGET.run, `the set shows ${Math.round(withRouter.shown_tokens)} tokens of entries, over the run's ${SKILL_BUDGET.run}`);
   assert.ok(withRouter.index_tokens > SKILL_BUDGET.run, "the whole index is over the budget; that is what makes the router the entry shown");
   // The same packs with no router (as the base pack was) cannot be shortened: the section is over budget and the report says which pack could not be.
   const without = renderSkillsSection(packs.map((p) => (p.id === "computer-forensics-base" ? { ...p, router: null } : p))).report;
-  assert.ok(without.shown_tokens > SKILL_BUDGET.run, `without the router the disk profile shows ${Math.round(without.shown_tokens)} tokens`);
+  assert.ok(without.shown_tokens > SKILL_BUDGET.run, `without the router the set shows ${Math.round(without.shown_tokens)} tokens`);
   assert.ok(without.no_router.includes("computer-forensics-base"));
   // The router's own line is what the prompt carries for the pack, and it is within the entry budget.
   const entry = packs[0]!.entries.find((e) => e.id === ROUTER)!;
