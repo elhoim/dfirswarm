@@ -256,6 +256,12 @@ matter, optional and at most one a pack:
 
     router: true
 
+The base pack is not the only one: `encrypted-containers`, `triage-collection`,
+`mobile-forensics`, `network-forensics` and `cloud-forensics` each name one too
+(`encrypted/router`, `triage/router`, `mobile/router`, `network/router` and
+`cloud/router`), and a router names no program, tool or rule, only which note
+answers which question.
+
 `pack.sh seal` refuses a value that is not `true` or `false`, and a second
 router. When there is one, the generated `skills/INDEX.md` carries a line
 ``Router: `<id>` `` above the entries; a pack with no router has no such line and
@@ -263,9 +269,12 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say. `computer-forensics-base` names one, `base/router`: its
-disk profile (base, encrypted-containers, windows) does not fit the run's index
-budget without it.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`, and
+so do `windows-forensics`, `linux-forensics`, `memory-forensics`,
+`macos-forensics` and `ransomware-response` (`<platform>/router`): a run of the
+base pack with windows-forensics and linux-forensics has 2,860 tokens of index
+entries whole, over the run's 2,500; the base router alone brings it to 1,898,
+and with the other two routers as well the prompt carries three router lines.
 
 ### Tool help stays out of the context window
 
@@ -702,13 +711,16 @@ import each other), and holds to this:
   digest.
 - *A value is produced only on an explicit flag, in a job, in a file.* The flag
   is `write_values: true` (default false). The tool honours it only when it
-  runs as a job (`JOB_ID` and `OUT` are set) and writes only under `$OUT`:
+  runs as a job (`JOB_ID` and `OUT` are set) that was run as secret output
+  (`SECRET_OUTPUT=1`, below) and writes only under `$OUT`:
   JSON Lines, mode 0600, each row carrying the answer's `finding_id`, file and
   offset beside the `value`. The file is created exclusively at the start of
   the run, before anything is scanned: a file or link already at that name is
   refused by name, and with nothing found it stays an empty file and the answer
   says `written: 0`. Outside a job the request is refused, with exit 1 and
-  nothing written, because a file in `work/` is not a sealed output.
+  nothing written, because a file in `work/` is not a sealed output; in a job
+  without `SECRET_OUTPUT=1` it is refused the same way, because the file would
+  be sealed as ordinary output.
 - *A name shaped like the secret is withheld.* A path component that matches the
   secret's own pattern (a file named after the key) is replaced in every printed
   path, in the files the answer names and in the digest that names a paging file;
@@ -745,10 +757,43 @@ import each other), and holds to this:
   is a `UnicodeDecodeError`): the answer says the row and what the error's code
   decides (the time budget, the authorizer, a value over the length limit),
   never the message or the class, and no decision reads the message.
-- *The manifest says SENSITIVE* and names the flag. The harness reads no
-  manifest-level flag yet, and a tool cannot see whether its job was run with
-  `secret_output`, so what keeps a value out of an ordinary run is the refusal
-  above and the skill's line; a flag the harness enforces is a follow-up.
+- *The manifest declares it, and the harness enforces it.* The description
+  says SENSITIVE and names the flag, and the manifest carries the key the job
+  service reads, `"secret_output"`: `"required"` (every job of the tool) or
+  `{ "when_args": ["write_values"] }` (a job that sets one of the named
+  parameters, each one of the tool's own `params`, declared `type: "boolean"`
+  with no default other than false: the harness applies no defaults, and anything but
+  an absent, null or false value counts as set). It applies to `kind: tool` jobs
+  only: a recipe (a pack's `recipe.json`, or a forged tool that declares the
+  recipe protocol) that carries the key is refused, not run, and the seal
+  refuses the key in `recipe.json`. A refused recipe is left out of the lists
+  that start recipes by themselves (the kickoff, the derived pass, a detect
+  pass), so it is not offered and not run; the reason is given only when an
+  agent asks for it by name, and the seal is what keeps it out of a pack in the
+  first place (it shows only in an installed pack edited by hand). Where the key applies
+  the job is run as if the agent had said `secret_output: true`, whether it did
+  or not (an agent's `false` does not turn it off): its outputs are sealed
+  sensitive, a job reading them is derived, an entry citing them is recorded
+  sensitive and a redacted package withholds them. The job's spec says so
+  (`secret_output_by: "tool_manifest"`) and so does its answer to the agent
+  (the same field). A key the
+  service cannot read refuses the job, naming the rule (a declaration is never
+  guessed at: ignoring one would drop the protection its author asked for), and
+  `pack.sh seal` checks the same. The service also puts `SECRET_OUTPUT=1` in the
+  environment of the process of a job run as secret output, however it came to
+  be one (the manifest, the agent's flag, a command job given the flag), and
+  unsets it for every other job. The tool honours its values mode only when
+  `SECRET_OUTPUT` is `1`: otherwise it refuses as JSON, before it opens or
+  creates anything, and says that nothing was written. That is what holds when
+  the manifest is not in the way, a command job that runs the tool's script by
+  hand. The variable is a signal to a tool that behaves, not a boundary: a
+  command job is code the harness does not read, and can set `SECRET_OUTPUT=1`
+  for itself.
+  A tool an agent forges (`make_tool`) has no declaration: the agent's flag
+  decides. Today `sqlite_query` and `recovery_key_scan` declare
+  `{ "when_args": ["write_values"] }` and check the variable; a tool that writes
+  values and does not yet is held by the agent's flag and the skill's line,
+  until it adds the same key and the same check.
 - *The tests assert absence:* no group of the value, no run of its digits, no
   64-hex string and no masked shape in the answer or in any file it names, with
   the value planted in every encoding the tool reads.
@@ -841,7 +886,10 @@ header says how it matches a name and where that is wrong.
    and no tool provides is either added as a tool or taken out of the skill.
    What counts as a naming is the skill's text, front matter included, without
    `mentions:`, `id:` and `needs:`: an id is a path (`id: aws/cloudtrail`) and
-   does not name the program `aws`.
+   does not name the program `aws`; nor does a skill of the same pack cited by
+   its id (a router cites every leaf), but only a whole id with a `/` that is
+   set off by white space, quotes, brackets or punctuation: `aws/cloudtrail.py`,
+   `--src=aws/cloudtrail` and another pack's id still name the program.
 4. **A skill names something of its own pack, or says why it does not.** Every
    skill names at least one tool, program or package of the pack that ships it.
    A skill that legitimately names none (a method leaf about citing a claim,

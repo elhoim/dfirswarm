@@ -1,7 +1,7 @@
 ---
 id: browser/downloads
 title: Download provenance
-when: Establish where a downloaded file came from and whether the transfer finished.
+when: Source of a file; did it finish?
 needs: [browser/artefacts]
 tools: [browser_history]
 requires_host: []

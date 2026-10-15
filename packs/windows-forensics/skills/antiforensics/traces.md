@@ -1,7 +1,7 @@
 ---
 id: antiforensics/traces
-title: Absence and inconsistency before intent
-when: Artefacts are missing or inconsistent: separate deliberate action from ordinary causes.
+title: Absence before intent
+when: Missing or inconsistent artefacts.
 needs: []
 tools: [evtx_query, mft_records]
 requires_host: []

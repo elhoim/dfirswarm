@@ -1,7 +1,7 @@
 ---
 id: antiforensics/wiping
-title: Overwriting and wiping leads
-when: Files or records look overwritten, or a wiping utility appears in execution evidence.
+title: Wiping leads
+when: Overwritten files; a wiping tool appears.
 needs: [antiforensics/traces]
 tools: [prefetch_mam, amcache_apps, mft_records, usn_journal]
 requires_host: []

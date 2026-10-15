@@ -1,7 +1,7 @@
 ---
 id: execution/shimcache
-title: ShimCache (AppCompatCache) and regkv
-when: You need the compatibility cache's record of files, and the pack's only reader for it returns bytes.
+title: ShimCache, AppCompatCache
+when: Records of files seen.
 needs: []
 tools: [regkv]
 requires_host: []

@@ -1,7 +1,7 @@
 ---
 id: execution/prefetch
-title: Prefetch files and what prefetch_mam reads
-when: You hold a .pf file, compressed or plain, and need a run count, last runs or referenced files.
+title: Prefetch
+when: A .pf file: run count, last runs.
 needs: []
 tools: [prefetch_mam, mam_scan, icat_extract]
 requires_host: [sccainfo]

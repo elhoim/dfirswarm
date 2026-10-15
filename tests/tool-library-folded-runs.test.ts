@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createCipheriv, createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -37,9 +37,9 @@ async function inTemp(fn: (cwd: string) => Promise<void>): Promise<void> {
   }
 }
 
-function runNode(script: string, cwd: string, stdin: unknown): Promise<Run> {
+function runNode(script: string, cwd: string, stdin: unknown, env: Record<string, string> = {}): Promise<Run> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script], { cwd, env: { ...process.env, JOB_ID: "", OUT: "", AGENT_ID: "t1" } });
+    const child = spawn(process.execPath, [script], { cwd, env: { ...process.env, JOB_ID: "", OUT: "", AGENT_ID: "t1", ...env } });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (c: Buffer) => out.push(c));
@@ -85,7 +85,7 @@ test("the AES fixture is a real AES: node's cipher agrees with its schedule, and
   }
 });
 
-type Hit = { offset: number; key_bits: number; word_order: string; round_order?: string; key_sha256: string; key_file: string };
+type Hit = { offset: number; key_bits: number; word_order: string; round_order?: string; key_file: string };
 type Scan = { ok: boolean; hits: Hit[]; hit_count: number; complete: boolean; next_start?: number; scanned_to: number; result_file: string; window: { start: number; end: number }; prefilter_candidates: number; full_schedule_checks: number; seconds: number };
 
 const SCHEDULE_TOOL = join(LIB, "aes_schedule_scan", "run.mjs");
@@ -119,7 +119,6 @@ test("aes_schedule_scan finds AES-128 and AES-256 schedules at any alignment, in
     );
     const keys = [k128, k256, k128w, k256w];
     for (const [i, h] of res.hits.entries()) {
-      assert.equal(h.key_sha256, sha256(keys[i]));
       const file = join(cwd, "work", "t1", "aes", h.key_file);
       assert.deepEqual(await readFile(file), keys[i], "the key file holds the key");
       assert.equal((await stat(file)).mode & 0o077, 0, "a key file is private to its owner");
@@ -129,7 +128,7 @@ test("aes_schedule_scan finds AES-128 and AES-256 schedules at any alignment, in
     for (const k of keys) {
       assert.ok(!out.includes(k.toString("hex")) && !out.includes(k.toString("base64")), "the result must not carry a key");
     }
-    assert.ok((await readFile(join(cwd, res.result_file), "utf8")).includes(res.hits[0].key_sha256), "the whole result is kept in out_dir and named");
+    assert.ok((await readFile(join(cwd, res.result_file), "utf8")).includes(res.hits[0].key_file), "the whole result is kept in out_dir and named");
     assert.equal(sha256(await readFile(join(cwd, "inputs", "mem.raw"))), before, "the source is read, never changed");
   });
 });
@@ -248,7 +247,6 @@ test("aes_inverse_scan finds decryption schedules in all four layouts, for AES-1
       );
       for (const [i, h] of res.hits.entries()) {
         // The key it names is the encryption key the schedule came from.
-        assert.equal(h.key_sha256, sha256(pieces[i][5]));
         assert.deepEqual(await readFile(join(cwd, "work", "t1", "inv", h.key_file)), pieces[i][5]);
       }
       assert.ok(!JSON.stringify(res).includes(pieces[0][5].toString("hex")));
@@ -308,6 +306,178 @@ test("both AES scanners say what to do about a key file in a handover, and keep 
   });
 });
 
+/** Every regular file under dir, as a path relative to dir, leaving out the subtrees in skip. */
+async function filesUnder(dir: string, skip: string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const rel of await readdir(dir, { recursive: true })) {
+    if (skip.some((s) => rel === s || rel.startsWith(`${s}/`))) continue;
+    if ((await stat(join(dir, rel))).isFile()) found.push(rel);
+  }
+  return found.sort();
+}
+
+test("the AES scanners print and write no digest of a key: no 64-hex string, no key bytes and no digest in a name anywhere but the 0600 key files", async () => {
+  const HIT_FIELDS = ["key_bits", "key_file", "offset", "offset_hex", "round_order", "schedule_bytes", "word_order"];
+  for (const [tool, name] of [[SCHEDULE_TOOL, "aes_schedule_scan"], [INVERSE_TOOL, "aes_inverse_scan"]] as const) {
+    for (const inJob of [false, true]) {
+      await inTemp(async (cwd) => {
+        const keys = [keyFor(16, `nd-${name}-a`), keyFor(32, `nd-${name}-b`), keyFor(16, `nd-${name}-c`), keyFor(32, `nd-${name}-d`)];
+        const pieces: Array<[number, Buffer]> = tool === SCHEDULE_TOOL
+          ? [[1001, expandKey(keys[0])], [5003, expandKey(keys[1])], [9007, reverseWords(expandKey(keys[2]), true)], [13001, reverseWords(expandKey(keys[3]), true)], [17011, expandKey(keys[0])]]
+          : [[1001, inverseSchedule(keys[0], { reverseRounds: true, reverseWords: false })], [5003, inverseSchedule(keys[1], { reverseRounds: false, reverseWords: false })],
+             [9007, inverseSchedule(keys[2], { reverseRounds: true, reverseWords: true })], [13001, inverseSchedule(keys[3], { reverseRounds: false, reverseWords: true })],
+             [17011, inverseSchedule(keys[0], { reverseRounds: true, reverseWords: false })]];
+        await writeFile(join(cwd, "inputs", "mem.raw"), plant(21000, `nd-${name}`, pieces));
+        const env: Record<string, string> = {};
+        if (inJob) {
+          env.JOB_ID = "j1";
+          env.OUT = join(cwd, "store", "jobs", "j1", "out");
+          await mkdir(env.OUT, { recursive: true });
+        }
+        // Twice: a second run in the same directory writes no other file and breaks nothing.
+        const runs = [await runNode(tool, cwd, { path: "inputs/mem.raw" }, env), await runNode(tool, cwd, { path: "inputs/mem.raw" }, env)];
+        for (const r of runs) assert.equal(r.stderr, "", "nothing on stderr");
+        const first = ok<Scan & { out_dir: string; note: string }>(runs[0]);
+        assert.equal(ok<Scan>(runs[1]).hit_count, 5);
+        assert.equal(first.hit_count, 5, "four keys, one of them at two offsets");
+
+        // A hit says where, how big and which file; nothing that is a hash, a digest or a derived quantity of the key.
+        for (const h of first.hits) {
+          for (const field of Object.keys(h)) assert.ok(HIT_FIELDS.includes(field), `${name}: unexpected hit field ${field}`);
+          assert.doesNotMatch(Object.keys(h).join(" "), /sha|digest|hash/i);
+        }
+        assert.match(first.note, /never a digest/);
+        assert.match(first.note, /offset and key_file name/);
+        assert.doesNotMatch(first.note, /sha-?256|ledger:|what to record in the ledger/i);
+
+        // The key files: private, one per distinct key, holding the key and nothing else.
+        const keyFiles = [...new Set(first.hits.map((h) => join(first.out_dir, h.key_file)))].sort();
+        assert.equal(keyFiles.length, 4, "a key found twice has one file");
+        const held: Buffer[] = [];
+        for (const rel of keyFiles) {
+          const mode = (await stat(join(cwd, rel))).mode;
+          assert.equal(mode & 0o077, 0, `${rel} is private to its owner`);
+          held.push(await readFile(join(cwd, rel)));
+        }
+        assert.deepEqual(held.map((b) => b.toString("hex")).sort(), keys.map((k) => k.toString("hex")).sort(), "the key files hold the four keys");
+
+        // Everything else the run left, and what it printed: no key, in any spelling, and no digest, whole or in part.
+        const digests = keys.map((k) => sha256(k));
+        const names = await filesUnder(cwd, ["inputs"]);
+        const others = names.filter((n) => !keyFiles.includes(n));
+        assert.ok(others.some((n) => n.endsWith(".json")), "the whole result is kept beside the keys");
+        const texts: Array<[string, Buffer]> = [["stdout", Buffer.from(runs[0].stdout)], ["stderr", Buffer.from(runs[0].stderr)], ["second stdout", Buffer.from(runs[1].stdout)]];
+        for (const n of others) texts.push([n, await readFile(join(cwd, n))]);
+        for (const [where, data] of texts) {
+          const asText = data.toString("latin1");
+          assert.doesNotMatch(asText, /[0-9a-fA-F]{64}/, `${where}: a 64-hex string`);
+          for (const [i, k] of keys.entries()) {
+            for (const form of [k, Buffer.from(k.toString("hex")), Buffer.from(k.toString("base64")), Buffer.from(k.toString("base64url")), Buffer.from(digests[i]), Buffer.from(digests[i], "hex"), Buffer.from(digests[i].slice(0, 16)), Buffer.from(digests[i].slice(0, 8))]) {
+              assert.equal(data.indexOf(form), -1, `${where}: a key or a digest of one (${form.length} bytes)`);
+            }
+          }
+        }
+        // A path is no place for a digest either (the key file used to be named for the start of one).
+        for (const n of names) {
+          assert.doesNotMatch(n, /[0-9a-fA-F]{16}/, `${n}: a name that carries 16 hex digits`);
+          for (const d of digests) assert.ok(!n.includes(d.slice(0, 8)), `${n}: a name that carries the start of a digest`);
+        }
+      });
+    }
+  }
+});
+
+/** The schedule of a key in the layout the given scanner reads. */
+function aesPiece(tool: string, key: Buffer): Buffer {
+  return tool === SCHEDULE_TOOL ? expandKey(key) : inverseSchedule(key, { reverseRounds: true, reverseWords: false });
+}
+
+test("the AES scanners give a key found in a later call the file an earlier call wrote, at another offset too", async () => {
+  for (const tool of [SCHEDULE_TOOL, INVERSE_TOOL]) {
+    await inTemp(async (cwd) => {
+      const k128 = keyFor(16, "xw-a"), k256 = keyFor(32, "xw-b");
+      // The same two keys at 1000 and 30000 (window 1 holds the first of each, window 2 the second), and a third key only late.
+      const image = plant(60000, "xw", [[1000, aesPiece(tool, k128)], [2001, aesPiece(tool, k256)], [30000, aesPiece(tool, k128)], [31001, aesPiece(tool, k256)]]);
+      await writeFile(join(cwd, "inputs", "mem.raw"), image);
+      const one = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 0, length: 10000 }));
+      const two = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 10000, length: 40000 }));
+      assert.deepEqual(one.hits.map((h) => h.offset), [1000, 2001]);
+      assert.deepEqual(two.hits.map((h) => h.offset), [30000, 31001]);
+      assert.deepEqual(two.hits.map((h) => h.key_file), one.hits.map((h) => h.key_file), "the same key names the same file in the next call");
+      const files = (await readdir(join(cwd, "work", "t1", "aes"))).filter((f) => f.startsWith("key-")).sort();
+      assert.deepEqual(files, ["key-3e8-128.bin", "key-7d1-256.bin"], "two keys, two files, however many calls");
+      // A same-size file of the same pattern that holds another key is passed over, not read as this key's.
+      await writeFile(join(cwd, "work", "t1", "aes", "key-1-128.bin"), keyFor(16, "xw-other"), { mode: 0o600 });
+      const three = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes", start: 29000, length: 3000 }));
+      assert.deepEqual(three.hits.map((h) => h.key_file), ["key-3e8-128.bin", "key-7d1-256.bin"]);
+      assert.deepEqual(await readFile(join(cwd, "work", "t1", "aes", "key-1-128.bin")), keyFor(16, "xw-other"), "a file of another key is left as it was");
+    });
+  }
+});
+
+test("the AES scanners reuse a key file only when it is a plain file holding the key: a directory, a symlink or a wrong file at the name never costs a trace or a follow", async () => {
+  for (const tool of [SCHEDULE_TOOL, INVERSE_TOOL]) {
+    await inTemp(async (cwd) => {
+      const kA = keyFor(16, "sq-a"), kB = keyFor(32, "sq-b"), kC = keyFor(16, "sq-c"), kD = keyFor(16, "sq-d");
+      await writeFile(join(cwd, "inputs", "mem.raw"), plant(30000, "sq", [[1001, aesPiece(tool, kA)], [5003, aesPiece(tool, kB)], [9007, aesPiece(tool, kC)], [13001, aesPiece(tool, kD)]]));
+      const dir = join(cwd, "work", "t1", "aes");
+      await mkdir(dir, { recursive: true });
+      // 0x3e9 = 1001: a directory at the name. 0x138b = 5003: a dangling symlink. 0x232f = 9007: a symlink to a world-readable
+      // file that holds exactly the key. 0x34c9 = 13001: a plain file of the key with a loose mode.
+      await mkdir(join(dir, "key-3e9-128.bin"));
+      await symlink(join(cwd, "missing-target"), join(dir, "key-138b-256.bin"));
+      const decoy = join(cwd, "decoy.bin");
+      await writeFile(decoy, kC);
+      await chmod(decoy, 0o644);
+      await symlink(decoy, join(dir, "key-232f-128.bin"));
+      await writeFile(join(dir, "key-34c9-128.bin"), kD, { mode: 0o644 });
+      await chmod(join(dir, "key-34c9-128.bin"), 0o644);
+
+      const res = await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes" });
+      assert.equal(res.stderr, "", "no stack trace, nothing on stderr");
+      const scan = ok<Scan>(res);
+      assert.deepEqual(scan.hits.map((h) => [h.offset, h.key_file]), [
+        [1001, "key-3e9-128-2.bin"],
+        [5003, "key-138b-256-2.bin"],
+        [9007, "key-232f-128-2.bin"],
+        [13001, "key-34c9-128.bin"],
+      ]);
+      for (const [file, key] of [["key-3e9-128-2.bin", kA], ["key-138b-256-2.bin", kB], ["key-232f-128-2.bin", kC], ["key-34c9-128.bin", kD]] as const) {
+        const st = await lstat(join(dir, file));
+        assert.ok(st.isFile() && !st.isSymbolicLink(), `${file} is a plain file`);
+        assert.deepEqual(await readFile(join(dir, file)), key);
+        assert.equal(st.mode & 0o077, 0, `${file} is private to its owner, also when it was there before`);
+      }
+      assert.ok((await lstat(join(dir, "key-3e9-128.bin"))).isDirectory(), "the directory is left alone");
+      assert.ok((await lstat(join(dir, "key-138b-256.bin"))).isSymbolicLink(), "the dangling symlink is left alone");
+      assert.ok((await lstat(join(dir, "key-232f-128.bin"))).isSymbolicLink(), "the symlink is left alone");
+      assert.equal((await stat(decoy)).mode & 0o777, 0o644, "what a symlink points at is never touched");
+      // A second call changes nothing and finds the same names.
+      const again = ok<Scan>(await runNode(tool, cwd, { path: "inputs/mem.raw", out_dir: "work/t1/aes" }));
+      assert.deepEqual(again.hits.map((h) => h.key_file), scan.hits.map((h) => h.key_file));
+      assert.deepEqual((await readdir(dir)).sort(), ["key-138b-256-2.bin", "key-138b-256.bin", "key-232f-128-2.bin", "key-232f-128.bin", "key-34c9-128.bin", "key-3e9-128-2.bin", "key-3e9-128.bin", `${tool === SCHEDULE_TOOL ? "aes_schedule_scan" : "aes_inverse_scan"}.0.json`].sort());
+    });
+  }
+});
+
+test("the AES scanners' manifests and the library README promise offsets and a key file, not a digest", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const name of ["aes_schedule_scan", "aes_inverse_scan"]) {
+    const manifest = JSON.parse(readFileSync(join(LIB, name, "manifest.json"), "utf8")) as { description: string };
+    assert.doesNotMatch(manifest.description, /sha-?256|hash/i, `${name}: the description`);
+    assert.match(manifest.description, /offset,[^.]*, key file name\./);
+    assert.ok(manifest.description.length <= 400, `${name}: the description fits the harness's 400 characters`);
+    const script = readFileSync(join(LIB, name, "run.mjs"), "utf8");
+    assert.doesNotMatch(script, /key_sha256|createHash|sha-?256/i, `${name}: the script keeps no digest of a key`);
+  }
+  const readme = readFileSync(join(LIB, "README.md"), "utf8");
+  const section = readme.slice(readme.indexOf("- `aes_schedule_scan` and `aes_inverse_scan`"), readme.indexOf("- `encoded_literal_scan`"));
+  assert.ok(section.length > 200, "found the AES entry");
+  assert.doesNotMatch(section, /sha-?256/i);
+  assert.match(section, /offset/);
+  assert.match(section, /never a digest/);
+});
+
 test("aes_inverse_scan finds the schedule of a key built to zero the words its filter once skipped, and crosses zeros and sparse memory fast", async () => {
   await inTemp(async (cwd) => {
     // A key whose expansion has w5 = w8 = w9 = 0 (w1 = g2(w2^w3), w0 = w1 ^ g1(w3)): the three words of the AES-128
@@ -322,7 +492,8 @@ test("aes_inverse_scan finds the schedule of a key built to zero the words its f
     for (const w of [5, 8, 9]) assert.deepEqual([...sched.subarray(4 * w, 4 * w + 4)], [0, 0, 0, 0], `w${w} of the crafted schedule`);
     await writeFile(join(cwd, "inputs", "crafted.raw"), plant(3000, "crafted", [[500, inverseSchedule(crafted, { reverseRounds: true, reverseWords: false })], [1500, inverseSchedule(crafted, { reverseRounds: false, reverseWords: true })]]));
     const r = ok<Scan>(await runNode(INVERSE_TOOL, cwd, { path: "inputs/crafted.raw", out_dir: "work/t1/c" }));
-    assert.deepEqual(r.hits.map((h) => [h.offset, h.key_sha256]), [[500, sha256(crafted)], [1500, sha256(crafted)]]);
+    assert.deepEqual(r.hits.map((h) => h.offset), [500, 1500]);
+    for (const h of r.hits) assert.deepEqual(await readFile(join(cwd, "work", "t1", "c", h.key_file)), crafted, "both hits name a file that holds the crafted key");
     await writeFile(join(cwd, "inputs", "plain.raw"), plant(3000, "craftedp", [[700, sched]]));
     assert.deepEqual(ok<Scan>(await runNode(SCHEDULE_TOOL, cwd, { path: "inputs/plain.raw", out_dir: "work/t1/p" })).hits.map((h) => h.offset), [700]);
 

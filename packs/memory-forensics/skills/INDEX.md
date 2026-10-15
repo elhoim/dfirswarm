@@ -2,10 +2,13 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `memory/router`
+
 - `acquire/avml-and-preserve` AVML, capture order and what to preserve: AVML is proposed, sources are being ordered, or you list what an acquisition keeps.
 - `acquire/images` Memory acquisition methods and their limits: The operator is choosing how to capture memory, or you must judge how a capture was made and trusted.
 - `credentials/key-schedules` AES key schedules in a memory image: Searching an image for AES-128 or AES-256 key schedules with aeskeyfind.
 - `credentials/material` Credential material in memory, and reporting it: Memory may expose credentials, keys or tokens; say whether any were exposed or taken.
+- `memory/router` Memory notes by question: Pick one when none is listed, or you cannot choose.
 - `network/state` Network objects and their owners in memory: You need connections, listeners or an address from memory, or one to tie to a host artefact.
 - `network/timestamps-dns` Timestamps and DNS cache entries from memory: A network object carries a time, or you read a DNS cache entry from an image.
 - `patterns/yara` YARA over an image or a dumped region: You have case rules or a precise byte pattern to test against an image or a dumped process region.
