@@ -22,10 +22,7 @@ Use when you turn a stored value into a time, convert a zone, or order events ac
 
 **Resolution and order.** Seconds (syslog), 2 seconds (DOS), 100 ns (FILETIME), a whole day (a date-only record). Invent no order inside a resolution: sort equal times by a fixed rule and say which.
 
-**Clocks drift and are changed.**
-- A logged clock change is a finding; no record of one does not show a steady clock. Correlate independent clocks and carry the offset or drift as an uncertainty.
-- Monotonic time orders events inside the sequence it is defined for (a boot, a journal instance, a retained USN or `$LogFile` range). Do not merge unrelated sequences, and across boots and hosts anchor on independent sources.
-- NTFS `$STANDARD_INFORMATION` and `$FILE_NAME` times are two sets of observations, each changeable by different means. When they disagree, say so and trust neither as a clock. A creation later than modification is a lead (copying, extraction, restoration and ordinary file system behaviour explain it).
+**Drift and changes.** Only if two sources or hosts disagree on when, a clock may have been set or may drift, or NTFS `$STANDARD_INFORMATION` and `$FILE_NAME` times differ: `timeline/clocks-drift`.
 
 **Record.** The zone and its source, the year basis, why the schema fixes the epoch, the uncertainty, what would disprove the reading.
 
