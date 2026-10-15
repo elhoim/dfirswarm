@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -560,5 +560,4 @@ test("the block is the same text in the three tools, and the shared withholding 
     const first = await cut(CHAIN, name);
     for (const p of [INVENTORY, AUDIT]) assert.equal(await cut(p, name), first, `${name} is one text`);
   }
-  assert.ok(writeFile && mkdir);
 });

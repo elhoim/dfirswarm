@@ -1076,7 +1076,7 @@ def _ident_text_ok(text, limit, path, slash=False):
         if ":" in tail or not _DRIVE.fullmatch(head):
             return False
         probe = head + tail
-    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(text):
+    if not (_PATH_PLAIN if path else _VERSION_PLAIN if slash else _NAME_PLAIN).fullmatch(probe) or _DENY_IN_IDENT.search(_ID_EMBEDDED.sub("x", text)):
         return False
     scan = _ID_EMBEDDED.sub(" ", text) if len(text) >= 20 else text
     for m in _RUN_CAND.finditer(scan):
