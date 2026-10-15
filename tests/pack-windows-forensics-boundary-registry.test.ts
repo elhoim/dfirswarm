@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { runPy, withCwd } from "./tool-library-harness.ts";
 import { WIN, body, everyFileUnder, failed, tool } from "./windows-pack-harness.ts";
 import { VARIANTS, type Node, type Val } from "./windows-stub-regipy.ts";
-import { SHAPES, leaked, plant, type Canary, type Shape } from "./windows-canary.ts";
+import { SHAPES, leaked, plant, prng, type Canary, type Shape } from "./windows-canary.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -156,6 +156,50 @@ test("regkv, shellbags and amcache_apps: write_values is held to a job run as se
     assert.equal(leaked(canaries, [run.stdout, run.stderr, ...(await reachable(cwd, (f) => f === file))]), 0);
     assert.equal(answer.boundary.values.written, canaries.length);
     for (const name of ["shellbags", "amcache_apps"]) assert.match(failed(await tool(name, cwd, { hive: "work/SOFTWARE", write_values: true }, env)).error, /write_values is refused/, name);
+  });
+});
+
+test("regkv: 6,000 value names that all become one placeholder are answered in seconds, in bounded output (the renaming was cubic: 77 s and 108 MB)", async () => {
+  await withCwd(async (cwd) => {
+    const r = prng(77);
+    const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const names = new Set<string>();
+    while (names.size < 6000) names.add(Array.from({ length: 24 }, () => alpha[Math.floor(r() * alpha.length)]).join(""));
+    const values: Val[] = [...names].map((name, i) => ({ name, type: "dword" as const, value: i }));
+    const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Many", values }] });
+    const started = Date.now();
+    const run = await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Many", limit: 5 }, env);
+    const seconds = (Date.now() - started) / 1000;
+    const out = body<Answer>(run);
+    assert.ok(seconds < 20, `${seconds} s`);
+    assert.ok(run.stdout.length < 5_000_000, `${run.stdout.length} bytes of output`);
+    assert.equal(Object.keys(out.values).length, 6000, "every value is listed under a key of its own");
+  });
+});
+
+test("shellbags: contains looks at the path as shown, and entries it did not match that have text withheld are counted and make the run partial", async () => {
+  await withCwd(async (cwd) => {
+    const item = (text: string): Buffer => { const content = Buffer.concat([Buffer.from([0x4e, 0x00]), Buffer.from(text, "latin1"), Buffer.from([0])]); const size = Buffer.alloc(2); size.writeUInt16LE(content.length + 2); return Buffer.concat([size, content]); };
+    const secret = SHAPES.find((s) => s.name === "ghp")!.make(prng(5)).text;
+    const run = async (names: string[], contains: string): Promise<Answer> => {
+      const bag: Node = { name: "BagMRU", values: names.map((n, i) => ({ name: String(i), type: "binary" as const, value: item(n) })), children: names.map((_, i) => ({ name: String(i) })) };
+      const env = await V.write(cwd, "work/UsrClass.dat", { name: "HIVE", children: [{ name: "Local Settings", children: [{ name: "Software", children: [{ name: "Microsoft", children: [{ name: "Windows", children: [{ name: "Shell", children: [bag] }] }] }] }] }] });
+      return body<Answer>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", contains }, env));
+    };
+    const clean = await run(["Reports", "Pictures"], "zzz-not-there");
+    assert.equal(clean.entry_count, 0);
+    assert.equal(clean.contains_blind_entries, 0);
+    assert.equal(clean.status, "complete", "nothing is withheld, so an absence is an absence");
+    const blind = await run(["Reports", secret], "zzz-not-there");
+    assert.equal(blind.entry_count, 0);
+    assert.equal(blind.contains_blind_entries, 1, "one entry was not matched and has text withheld in it");
+    assert.equal(blind.status, "partial");
+    assert.match(blind.status_basis, /contains looks only in the text that is shown/);
+    const other = await run(["Reports", secret], "another-needle-of-other-length");
+    assert.equal(other.contains_blind_entries, 1, "the count says nothing of the needle");
+    const hit = await run(["Reports", secret], "report");
+    assert.equal(hit.entry_count, 1);
+    assert.equal(hit.contains_blind_entries, 1, "an entry that did not match and has text withheld could still hold the needle");
   });
 });
 
