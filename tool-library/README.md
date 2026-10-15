@@ -113,8 +113,8 @@ or `tools/`.
 
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
-| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
-| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
+| `aes_inverse_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
+| `aes_schedule_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |
 | `amcache_apps` | python3 | `maintainer` | 2 | Application and file inventory from Amcache.hve (presence, not execution): path, hash, publisher, version and… |
 | `browser_history` | python3 | `maintainer` | 3 | Query a browser history database from a copy of it and its -wal, -shm and -journal sidecars, made under the j… |
