@@ -9,6 +9,7 @@ import { writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { routerChecks } from "./pack-router-checks.ts";
 import { ROOT } from "./tool-library-harness.ts";
 import { ID, INDEX, KAPE_COPY_HEADER, LIME_MAGIC, TRIAGE, asJob, kapeCopyRow, put, uac3, veloResultRow, veloUploadsRow, withCwd } from "./pack-triage-harness.ts";
 
@@ -50,18 +51,23 @@ const SECOND_LEVEL: Record<string, string> = {
   "plan/sources-windows": "plan/what-to-collect", "plan/sources-linux": "plan/what-to-collect",
 };
 
+// The pack's one router: shown alone when a run's index is over budget, and names every other skill once (routerChecks below).
+const ROUTER = "triage/router";
+
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., has a short index entry and its Shows, Does not show and Record", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, 14);
-  assert.deepEqual([...skills.keys()].sort(), [...DECISION, ...Object.keys(SECOND_LEVEL)].sort());
+  assert.equal(skills.size, 15);
+  assert.deepEqual([...skills.keys()].sort(), [ROUTER, ...DECISION, ...Object.keys(SECOND_LEVEL)].sort());
   for (const s of skills.values()) {
-    assert.ok(TOKENS(s.text) <= 800, `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
+    assert.ok(TOKENS(s.text) <= (s.id === ROUTER ? 400 : 800), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
     assert.ok(s.text.split("\n").length <= 300, `${s.id} lines`);
     const first = s.body.trim().split("\n")[0];
     assert.match(first, /^Use when /, `${s.id} opens with Use when`);
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
+    // The router reads no artefact: it names notes and holds no rule, so it has no Shows, Does not show or Record.
+    if (s.id === ROUTER) continue;
     assert.match(s.body, /Record:/, `${s.id} has Record`);
     if (s.id !== "plan/what-to-collect") for (const part of ["Shows", "Does not show"]) assert.match(s.body, new RegExp(`${part}:`), `${s.id} has ${part}`);
     assert.deepEqual(s.meta.requires_host, [], `${s.id} commands no program: the harness never collects live`);
@@ -258,4 +264,17 @@ test("the goal template asks the new questions, keeps its acceptance checks, and
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+routerChecks({
+  pack: "triage-collection",
+  router: ROUTER,
+  before: [
+    "gaps/coverage-statement", "gaps/what-is-missing", "identify/acquisition-mode", "identify/collector", "identify/collector-clues",
+    "normalise/inventory", "normalise/layout", "normalise/parsers", "plan/sources-linux", "plan/sources-windows", "plan/what-to-collect",
+    "verify/manifests", "verify/target-outcomes", "verify/time-layers",
+  ],
+  profiles: ["full"],
 });
