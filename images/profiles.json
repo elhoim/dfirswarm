@@ -22,6 +22,15 @@
     "mobile": [
       "mobile-forensics"
     ],
+    "macos": [
+      "macos-forensics"
+    ],
+    "cloud": [
+      "cloud-forensics"
+    ],
+    "triage": [
+      "triage-collection"
+    ],
     "full": [
       "cloud-forensics",
       "encrypted-containers",

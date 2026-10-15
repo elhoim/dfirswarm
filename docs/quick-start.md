@@ -52,7 +52,7 @@ docker save dfirswarm-base:dev-arm64 -o /tmp/dfirswarm-base.tar
 ```
 
 The forensic programs are in the job images, one per profile (`disk`,
-`memory`, `mobile`, `network`, `linux`, `re`, `full`), built the same way
+`memory`, `mobile`, `macos`, `cloud`, `triage`, `network`, `linux`, `re`, `full`), built the same way
 ([images/README.md](../images/README.md)). A run with packs runs its tool
 work in the images that hold them, and each image lists its programs in a
 file the agents read (`images/<profile>/tools.md` in the run). When this

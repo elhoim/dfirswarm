@@ -30,8 +30,10 @@ export DFIRSWARM_HOME="$TMP/home"
 [[ "$(python3 "$R" profile-for memory-forensics)" == memory ]] || fail "memory-forensics should be memory"
 got="$(python3 "$R" profile-for ransomware-response)"
 [[ "$got" == re ]] || fail "ransomware-response is held by re, which beats memory, a smaller image that covers it only by chance; got $got"
-[[ "$(python3 "$R" profile-for macos-forensics)" == mobile ]] || fail "macos-forensics is held by mobile, as mobile-forensics' dependency"
-[[ "$(python3 "$R" profile-for triage-collection)" == full ]] || fail "triage-collection is held by full alone and covered by nothing smaller"
+[[ "$(python3 "$R" profile-for macos-forensics)" == macos ]] || fail "macos-forensics has its own profile; mobile holds it only as mobile-forensics' dependency"
+[[ "$(python3 "$R" profile-for mobile-forensics)" == mobile ]] || fail "mobile-forensics should be mobile"
+[[ "$(python3 "$R" profile-for cloud-forensics)" == cloud ]] || fail "cloud-forensics has its own profile"
+[[ "$(python3 "$R" profile-for triage-collection)" == triage ]] || fail "triage-collection has its own profile"
 [[ "$(python3 "$R" profile-for no-such-pack)" == full ]] || fail "an unknown pack cannot be covered by anything smaller than full"
 # A run's job images: each pack in its own profile, and a dependency every
 # profile holds with its dependents, not in the smallest image that holds it.
@@ -41,7 +43,102 @@ jq -e '. == {"computer-forensics-base": "disk", "windows-forensics": "disk", "mo
 jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics encrypted-containers linux-forensics)"
 [[ "$(jq -r '."computer-forensics-base"' <<<"$jp")" == disk ]] || fail "the base pack goes where most of the run's packs are (disk, two), not linux (one): $jp"
 [[ "$(python3 "$R" job-profiles computer-forensics-base memory-forensics | jq -r '."computer-forensics-base"')" == memory ]] || fail "with memory-forensics alone, the base pack runs in memory"
-pass "the smallest profile that holds or covers the packs is chosen, and full only when nothing smaller serves"
+pass "a pack goes to the smallest profile that holds it, a pack no profile lists to the smallest that covers it, and full only when nothing smaller serves"
+
+# The invariants of images/profiles.json. `full` holds every pack under
+# packs/ (images/README.md says so, and a pack added without a line in `full`
+# fails here). Every pack resolves, by profile-for, to a profile that holds it
+# (it and its dependencies are among the profile's packs): never to a profile
+# that merely names the same programs, which is every profile for a pack of
+# stdlib Python. A pack with an image of its own gets it.
+python3 - "$ROOT" <<'PYEOF'
+import json, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "images"))
+import recipe
+
+packs = sorted(p.parent.name for p in (root / "packs").glob("*/pack.json"))
+assert len(packs) >= 12, f"found only {packs}"
+table = recipe.profiles()
+members = {n: set(recipe.resolve(recipe.PACKS, v["packs"])) for n, v in table.items() if not v.get("apt")}
+missing = [p for p in packs if p not in members["full"]]
+assert not missing, f"packs missing from profiles.json's full: {missing}"
+unknown = sorted({m for v in table.values() for m in v["packs"]} - set(packs))
+assert not unknown, f"profiles.json names packs that are not under packs/: {unknown}"
+chosen = {}
+for p in packs:
+    out = subprocess.run([sys.executable, str(root / "images" / "recipe.py"), "profile-for", p],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    chosen[p] = out
+    assert out in members, f"{p}: profile-for gave {out!r}, which is no profile"
+    assert p in members[out], f"{p}: profile-for gave {out}, which does not hold it ({sorted(members[out])})"
+    smaller = [n for n, m in members.items() if n != "full" and p in m and len(m) < len(members[out])]
+    assert not smaller, f"{p}: {out} is not the smallest holder; {smaller} hold it with fewer packs"
+for pack, profile in {"macos-forensics": "macos", "cloud-forensics": "cloud", "triage-collection": "triage",
+                      "mobile-forensics": "mobile", "windows-forensics": "disk", "memory-forensics": "memory",
+                      "reverse-engineering": "re", "ransomware-response": "re", "network-forensics": "network",
+                      "linux-forensics": "linux", "encrypted-containers": "disk"}.items():
+    assert chosen[pack] == profile, f"{pack}: expected {profile}, got {chosen[pack]}"
+# mobile depends on macos-forensics and still resolves to itself; macos is held by both.
+assert "macos-forensics" in members["mobile"] and "macos-forensics" in members["macos"]
+# Each own profile lists its pack alone, so it holds that pack and the base.
+for name, pack in (("macos", "macos-forensics"), ("cloud", "cloud-forensics"), ("triage", "triage-collection")):
+    assert table[name]["packs"] == [pack], f"{name} should list only {pack}: {table[name]}"
+    assert members[name] == {"computer-forensics-base", pack}, members[name]
+
+# The rule itself, on profiles and packs made for it: a pack that names
+# nothing beyond the base's is covered by every profile, and must still go to
+# the profile that holds it (a pack listed in `disk` and in `full` -> disk;
+# one listed in `full` alone -> full), while a pack no profile lists is
+# matched by what it names. Written in a scratch directory; recipe.profiles
+# is pointed at a table made for the test.
+import tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    d = Path(tmp)
+    def pack(name, deps, binaries=()):
+        (d / name / "requires").mkdir(parents=True)
+        (d / name / "pack.json").write_text(json.dumps({"id": name, "depends": deps}))
+        (d / name / "requires" / "host.json").write_text(json.dumps({"binaries": [{"name": b, "optional": True} for b in binaries]}))
+    pack("b", [], ["fls"])
+    pack("mem", ["b"], ["vol"])
+    pack("held-by-disk", ["b"])
+    pack("held-by-full", ["b"])
+    pack("unlisted", ["b"], ["vol"])
+    pack("unlisted-big", ["b"], ["vol", "fls", "other"])
+    recipe.profiles = lambda: {
+        "memory": {"packs": ["mem"]},
+        "disk": {"packs": ["held-by-disk"]},
+        "full": {"packs": ["mem", "held-by-disk", "held-by-full"]},
+    }
+    got = lambda *names: recipe.profile_for(d, list(names), images=d)
+    assert got("held-by-disk") == "disk", got("held-by-disk")
+    assert got("held-by-full") == "full", "a pack only full lists goes to full, not to memory, which covers it by chance: " + got("held-by-full")
+    assert got("mem") == "memory"
+    assert got("held-by-disk", "mem") == "full", got("held-by-disk", "mem")
+    assert got("unlisted") == "memory", "a pack no profile lists is matched by what it names: " + got("unlisted")
+    assert got("unlisted-big") == "full", got("unlisted-big")
+PYEOF
+[[ "$?" == 0 ]] || fail "the profile invariants do not hold (see above)"
+pass "full holds every pack under packs/, every pack resolves to a profile that holds it, and macos, cloud and triage have images of their own"
+# The workflows that build and boot the images list the profiles; a profile
+# added to profiles.json and not there is never built.
+python3 - "$ROOT" <<'PYEOF'
+import re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "images"))
+import recipe
+want = sorted(recipe.profiles())
+for wf in ("images.yml", "image-boot.yml"):
+    text = (root / ".github" / "workflows" / wf).read_text()
+    found = re.findall(r"^\s*profile: \[([^\]]*)\]", text, re.M)
+    assert len(found) == 1, f"{wf}: expected one profile matrix, found {len(found)}"
+    listed = sorted(x.strip() for x in found[0].split(","))
+    assert listed == want, f"{wf} builds {listed}, profiles.json has {want}"
+PYEOF
+[[ "$?" == 0 ]] || fail "the images workflows do not build exactly the profiles in profiles.json"
+pass "the images and image-boot workflows build every profile in profiles.json and no other"
 
 # An installed pack this repository does not carry (a pro or third-party one):
 # found where pack.sh installs it, or at the path given, and matched by what it

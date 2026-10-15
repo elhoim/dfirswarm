@@ -4,7 +4,8 @@
   recipe.py build PROFILE --out DIR [--base IMAGE] [--packs DIR] [--allow-nonredistributable] [--allow-missing-data]
                  [--symbol-set curated,broad|curated|broad|none] [--data-from DIR]... [--symbols-from DIR]...
   recipe.py profile-for [--installed DIR]... [--tools-from DIR]... PACK...
-                                       the smallest profile that serves these packs
+                                       the profile that serves these packs: the smallest one that holds
+                                       them, else the smallest that covers what they name, else full
   recipe.py list                       profiles and the packs each resolves to
   recipe.py check-lock FILE            refuse a lock entry not pinned by digest
 
@@ -469,19 +470,30 @@ def tool_programs(dirs: list) -> set:
 
 
 def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS) -> str:
-    """The smallest profile whose image serves the wanted packs: one that holds
-    them and their dependencies, or one that covers what they use, since a
-    pack's skills and tools come from the pack itself and not from the image.
-    Covering means every program the packs name, required or optional, is one
-    the profile's packs name too, and every Python package their tools import
-    is in the profile. `full` holds every pack, so it is always a candidate and
-    only ever the choice when nothing smaller serves.
+    """The profile whose image serves the wanted packs, in this order:
+
+    1. A profile that HOLDS them: the wanted packs and their dependencies are
+       all among the profile's packs (images/profiles.json, each pack's
+       dependencies added). The smallest holder other than `full` wins; of two
+       of a size, the first in profiles.json. `full` holds every pack, so a
+       pack no smaller profile lists gets `full`, never a profile that merely
+       happens to name the same programs: a pack whose tools use nothing
+       beyond the base's (a pack of stdlib Python) is covered by every
+       profile, and covering picks none of them for a reason.
+    2. Only for a pack no profile holds, `full` included (an installed pro or
+       third-party pack, which images/ does not list): the smallest profile
+       that COVERS what the packs use, since a pack's skills and tools come
+       from the pack itself and not from the image. Covering means every
+       program the packs name, required or optional, is one the profile's
+       packs name too, and every Python package their tools import is in the
+       profile.
+    3. Otherwise `full`.
 
     The wanted packs are read from `search` (where the run's packs are
     installed); a profile's own packs from `images` (what the images are built
     from). `programs` are what the run's library tools call: among the
-    profiles that serve the packs, one smaller than `full` that also names
-    every one of them is preferred."""
+    candidates of the step that decides, one smaller than `full` that also
+    names every one of them is preferred."""
     need = set(resolve(search, wanted))
     if not need and not set(programs) - BASE_PROGRAMS:
         return "base"
@@ -489,28 +501,29 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
     if any(not (pack_dir(search, n) / "pack.json").exists() for n in need):
         return "full"
     _, want_named, want_python = needs_of(search, sorted(need))
-    serving = []
+    holding, covering = [], []
     # A profile with extra packages is chosen by name, never by its packs.
     for name, prof in profiles().items():
         if prof.get("apt"):
             continue
         members = resolve(images, prof["packs"])
         _, named, python = needs_of(images, members)
-        holds = need <= set(members)
-        if not holds and not (want_named <= named and want_python <= python):
+        row = (name, len(members), set(programs) - BASE_PROGRAMS <= named)
+        if need <= set(members):
+            holding.append(row)
+        elif want_named <= named and want_python <= python:
+            covering.append(row)
+    # Membership decides first. A tool's programs move the choice to a bigger
+    # image only when one smaller than full has them all; otherwise the packs
+    # decide, and the probe says which program is missing.
+    for candidates in (holding, covering):
+        if not candidates:
             continue
-        serving.append((name, len(members), 0 if holds else 1, set(programs) - BASE_PROGRAMS <= named))
-    if not serving:
-        return "full"
-    # A tool's programs move the choice to a bigger image only when one
-    # smaller than full has them all; otherwise the packs decide, and the
-    # probe says which program is missing.
-    pool = [s for s in serving if s[3] and s[0] != "full"] or serving
-    # A profile made to hold the packs (other than full) first: a smaller one
-    # that happens to cover them is another pack's image (memory covered the
-    # ransomware pack once it gained yara). Then fewest packs; between two of
-    # a size, the one that holds them.
-    return min(pool, key=lambda s: (0 if s[2] == 0 and s[0] != "full" else 1, s[1], s[2]))[0]
+        pool = [s for s in candidates if s[2] and s[0] != "full"] or candidates
+        # Fewest packs, full last; between two of a size the first listed
+        # (min keeps the first of equals).
+        return min(pool, key=lambda s: (s[0] == "full", s[1]))[0]
+    return "full"
 
 
 def job_profiles(search, wanted: list, images=PACKS) -> dict:
