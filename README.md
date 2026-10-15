@@ -86,16 +86,16 @@ When the evidence cannot answer something a reference service can (a domain's re
 | Pack | Skills | Tools | Goals |
 | --- | --- | --- | --- |
 | `computer-forensics-base` | 11 | 14 | — |
-| `windows-forensics` | 24 | 20 | 3 |
-| `linux-forensics` | 10 | 6 | 2 |
-| `macos-forensics` | 8 | 4 | 1 |
+| `windows-forensics` | 53 | 20 | 3 |
+| `linux-forensics` | 26 | 6 | 2 |
+| `macos-forensics` | 18 | 4 | 1 |
 | `mobile-forensics` | 7 | 3 | 1 |
-| `memory-forensics` | 9 | 3 | 1 |
+| `memory-forensics` | 20 | 3 | 1 |
 | `network-forensics` | 8 | 6 | 1 |
 | `reverse-engineering` | 12 | 4 | 1 |
 | `encrypted-containers` | 5 | 3 | 1 |
 | `cloud-forensics` | 9 | 3 | 1 |
-| `ransomware-response` | 7 | 2 | 1 |
+| `ransomware-response` | 18 | 2 | 1 |
 | `triage-collection` | 14 | 2 | 1 |
 
 A **pack** is a directory an operator installs once and names at kickoff: skills
