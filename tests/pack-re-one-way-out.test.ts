@@ -202,3 +202,13 @@ test("a key out of the file spelled like a marker the tool writes keeps its '<' 
     assert.deepEqual(o.x, [1, 2]);
   }
 });
+
+test("an sk- head of four to eleven characters that ends a name or a path component is withheld (a name cut by its declared length); a hyphenated word is not", () => {
+  const texts = ["sk-LmariHjr", "Macros/sk-N21d6CS69cd", "sk-Ab3d/dir", "desk-top", "risk-assessment-module", "task-list/a", "sk-ab"];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", texts);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), ["<token-shaped text withheld 11 characters>", "Macros/<token-shaped text withheld 14 characters>", "<token-shaped text withheld 7 characters>/dir",
+      "desk-top", "risk-assessment-module", "task-list/a", "sk-ab"], path);
+  }
+});
