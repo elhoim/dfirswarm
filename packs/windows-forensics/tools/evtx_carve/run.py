@@ -1186,7 +1186,7 @@ def data_kind(name):
 
 FIELDS.update({
     "path": "path", "result_file": "path", "result_file_requested": "path", "partial_result_file": "path", "all_results": "path", "all_problems": "path", "all_channels": "path",
-    "channel": "name", "channels": "name", "computer": "host", "provider": "name", "timestamp": "time", "time_created": "time", "record_time_utc": "time", "from": "time", "until_exclusive": "time",
+    "channel": "key", "channels": "key", "computer": "host", "provider": "name", "timestamp": "time", "time_created": "time", "record_time_utc": "time", "from": "time", "until_exclusive": "time",
     "record_filetime": "number", "data": data_kind, "user_data": data_kind,
 })
 

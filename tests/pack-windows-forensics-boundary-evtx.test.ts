@@ -145,10 +145,11 @@ const READABLE = [
 
 test("evtx_query and evtx_carve: event data an examiner must be able to read comes through unchanged", async () => {
   await withCwd(async (cwd) => {
-    const env = await put(cwd, [{ number: 1, xml: eventXml({ eid: 1, rec: 1, time: "2017-04-28 22:08:33.016000", data: READABLE.map(([k, v]) => [k, esc(v)] as [string, string]) }).replace("Microsoft-Windows-Security-Auditing", "Microsoft-Windows-Sysmon") }]);
+    const env = await put(cwd, [{ number: 1, xml: eventXml({ eid: 1, rec: 1, time: "2017-04-28 22:08:33.016000", channel: "Microsoft-Windows-Bits-Client/Operational", data: READABLE.map(([k, v]) => [k, esc(v)] as [string, string]) }).replace("Microsoft-Windows-Security-Auditing", "Microsoft-Windows-Sysmon") }]);
     const q = body<Answer>(await tool("evtx_query", cwd, { path: "work/Security.evtx" }, env));
     assert.deepEqual(q.events[0].data, Object.fromEntries(READABLE));
     assert.equal(q.events[0].provider, "Microsoft-Windows-Sysmon");
+    assert.equal(q.events[0].channel, "Microsoft-Windows-Bits-Client/Operational");
     assert.equal(q.boundary.strings_withheld, 0);
     const c = body<Answer>(await tool("evtx_carve", cwd, { path: "work/blob.bin" }, env));
     assert.deepEqual(c.records[0].data, Object.fromEntries(READABLE));
