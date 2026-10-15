@@ -47,6 +47,7 @@ anything is read.
 # shaped like a credential, the head-of-file classifier for what a delivery may hold besides copied files, and a deadline.
 import atexit
 import errno
+import hashlib
 import json
 import os
 import re
@@ -155,15 +156,6 @@ def want_int(args, key, default, minimum=1, maximum=None):
 
 def start_clock(seconds):
     DEADLINE[0] = time.monotonic() + seconds
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
     SCRUB_DEADLINE[0] = DEADLINE[0] + 10
 
 
@@ -585,12 +577,13 @@ def _user_info_spans(f, budget):
         pos = at + 1
         if at + 1 >= size or f[at + 1] in " \t\r\n@/?#'\"<>":
             continue
-        budget[0] -= 1
-        if budget[0] < 0:
-            spans.append((pos - 1, size, "user-info of a URL"))
-            return spans
         lo = max(0, at - 768)
         start = max(f.rfind(c, lo, at) for c in " \t\r\n'\"<>") + 1
+        budget[0] -= 1
+        if budget[0] < 0:
+            # the secret of user-info stands BEFORE the `@`: past the budget the withheld span starts at the segment, not at the `@`
+            spans.append((start, size, "user-info of a URL"))
+            return spans
         seg = f[start:at]
         slash = seg.rfind("//")
         if slash >= 0:
@@ -859,9 +852,23 @@ def find_spans(text, allow):
 
 def order_key(name):
     """What a name sorts by: the text as it is printed, without a finding id. A withheld name sorts by its marker (kind and length),
-    so the position of a name among its siblings tells nothing about the text that was withheld; ties keep the order the caller
-    adds (the inode, or the order found)."""
+    so the position of a name among its siblings tells nothing about the text that was withheld."""
     return scrub(name, None, True, True)
+
+
+_TIE_SALT = secrets.token_bytes(16)
+
+
+def tie_key(name):
+    """What breaks a tie between names that print the same: a keyed hash of the raw name under a salt drawn at the start of this run.
+    It is not the listing order, the inode or the name's rank (a tree unpacked in name order has its inodes in name order too), and
+    it is not the same in the next run, so no order of the answer, and no finding id handed out in that order, repeats between runs
+    or tells which of two withheld names is the smaller. The cost: names that print alike come in an order drawn afresh each run."""
+    return hashlib.blake2b(name.encode("utf-8", "backslashreplace"), key=_TIE_SALT, digest_size=8).digest()
+
+
+def sort_key(name):
+    return (order_key(name), tie_key(name))
 
 
 def scrub(text, where=None, allow=False, dry=False):
@@ -924,13 +931,6 @@ def shown(path, where=None):
     return scrub(path, where, True)
 
 
-def inode_of(entry):
-    try:
-        return entry.inode()
-    except (OSError, AttributeError):
-        return 0
-
-
 class Listed:
     """One entry of a directory, kept as its name and its directory only (a listing of 200,000 entries is a few tens of MiB)."""
     __slots__ = ("name", "path")
@@ -956,12 +956,12 @@ class SortedListing:
 
 
 def list_sorted(directory):
-    """The entries of a directory in the order of what is printed (order_key) and then of the inode, so the position of an entry
-    tells nothing about a withheld name. Only (key, inode, name) is held per entry."""
+    """The entries of a directory in the order of what is printed (order_key) and then of tie_key, so the position of an entry
+    tells nothing about a withheld name. Only (key, tie, name) is held per entry."""
     keyed = []
     with os.scandir(directory) as it:
         for entry in it:
-            keyed.append((order_key(entry.name), inode_of(entry), entry.name))
+            keyed.append((order_key(entry.name), tie_key(entry.name), entry.name))
     keyed.sort(key=lambda item: (item[0], item[1]))
     return SortedListing(directory, keyed)
 
@@ -1254,15 +1254,6 @@ def release(doc):
     """The final answer: normalised to what JSON carries, the withholding on every key and value, the check, and the account of
     what the check had to replace. A complete answer is partial when it replaced anything."""
     SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
     doc = backstop(scrub_all(json.loads(json.dumps(doc, default=str))), "")
     values = VALUES[0]
     if values is not None:                     # a string first judged here is a finding too: it goes to the values file, then the file is closed
@@ -1459,7 +1450,7 @@ SKIP_TARGET_COLUMNS = ("sourcefile", "source", "filename", "file", "path")
 SKIP_REASON_COLUMNS = ("reason", "message", "error", "status")
 UPLOAD_TARGET_KEYS = ("Path", "StoredName", "vfs_path")
 UPLOAD_MARKERS = ("StoredName", "UploadId", "StoredSize", "Components")
-LOG_LEVEL_WORDS = ("TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL", "CRITICAL")
+LOG_LEVEL_WORDS = ("TRACE", "DEBUG", "DEFAULT", "INFO", "WARN", "WARNING", "ERROR", "FATAL", "CRITICAL")
 
 
 class Survey:
@@ -1852,6 +1843,14 @@ def read_uac_log(survey, rel, failures):
     return record
 
 
+def plain_json(value):
+    """The JSON text of a value with its characters as they are: json.dumps writes a non-ASCII character as \\uXXXX and a NUL or other
+    control character as \\u00XX, and the fold of the withholding reads real characters, so a token split by one of them would be
+    judged as text with a backslash in it. Only the escapes json.dumps itself made are undone (an escaped backslash is kept)."""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    return re.sub(r"\\(?:(\\)|u(00[01][0-9a-f]))", lambda m: m.group() if m.group(1) else chr(int(m.group(2), 16)), text)
+
+
 def jsonl_rows(fh, record, survey, label):
     """(line number, row) for each JSON object of a JSON Lines stream; a line that is not valid JSON, not an object, or too long
     is counted and located and the stream goes on. A JSON array is not JSON Lines: it ends the stream with `unsupported`."""
@@ -1971,7 +1970,7 @@ def read_velociraptor(survey, directory, files, failures):
     results_dir = os.path.join(base, "results")
     names = []
     try:
-        names = sorted((n for n in os.listdir(results_dir) if n.endswith(".json")), key=order_key)
+        names = sorted((n for n in os.listdir(results_dir) if n.endswith(".json")), key=sort_key)
     except OSError:
         pass
     if not names:
@@ -2003,7 +2002,7 @@ def read_velociraptor(survey, directory, files, failures):
                         failures.add({"collector": "Velociraptor", "log": shown(rel, "log path"), "locator": {"line": number},
                                       "outcome": "error", "artefact": artefact,
                                       "target": scrub(target, where) if target else None,
-                                      "reason": scrub(err if isinstance(err, str) else json.dumps(err, default=str), where),
+                                      "reason": scrub(err if isinstance(err, str) else plain_json(err), where),
                                       "row_values": scrub_all(found)})
         record["malformed_rows"] += sub["malformed_rows"]
         record["non_object_rows"] += sub["non_object_rows"]
@@ -2027,7 +2026,7 @@ def read_velociraptor(survey, directory, files, failures):
                     word = level.upper() if level.upper() in LOG_LEVEL_WORDS else "other"       # a level is evidence: only the words of the log's own scale are keys
                     record["log_levels"][word] = record["log_levels"].get(word, 0) + 1
                     message = row.get("message")
-                    text = scrub(message if isinstance(message, str) else json.dumps(message, default=str), "log.json line %d" % number)
+                    text = scrub(message if isinstance(message, str) else plain_json(message), "log.json line %d" % number)
                     if level.upper() == "ERROR":
                         record["error_lines"] += 1
                         failures.add({"collector": "Velociraptor", "log": shown(log_rel, "log path"), "locator": {"line": number},
@@ -2071,7 +2070,7 @@ def main():
     failure_sources = []             # the records the failure count rests on
     candidates = []
     kape_markers = []
-    for (directory, run_id), logs in sorted(survey.kape.items(), key=lambda kv: (order_key(kv[0][0]), order_key(kv[0][1]))):
+    for (directory, run_id), logs in sorted(survey.kape.items(), key=lambda kv: (order_key(kv[0][0]), order_key(kv[0][1]), tie_key(kv[0][0] + "\0" + kv[0][1]))):
         run = {"collector": "KAPE", "run_id": scrub(run_id, "KAPE run id"), "directory": shown(directory or ".", "log path"), "logs": []}
         if "copy" in logs:
             rec = read_csv_log(survey, logs["copy"], "copy_log", failures, unrecognised)
@@ -2095,7 +2094,7 @@ def main():
         uac_markers.append(rec["log"])
         runs.add({"collector": "UAC", "log": rec["log"], "collector_version": "unknown", "record": rec})
     velo_markers = []
-    for directory, files in sorted(survey.velociraptor.items(), key=lambda kv: order_key(kv[0])):
+    for directory, files in sorted(survey.velociraptor.items(), key=lambda kv: sort_key(kv[0])):
         rec = read_velociraptor(survey, directory, files, failures)
         records.append(rec)
         failure_sources.append(rec)

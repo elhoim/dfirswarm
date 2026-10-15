@@ -49,6 +49,7 @@ writes the real strings to `$OUT/collection-index-values.jsonl`, mode 0600, crea
 # shaped like a credential, the head-of-file classifier for what a delivery may hold besides copied files, and a deadline.
 import atexit
 import errno
+import hashlib
 import json
 import os
 import re
@@ -157,15 +158,6 @@ def want_int(args, key, default, minimum=1, maximum=None):
 
 def start_clock(seconds):
     DEADLINE[0] = time.monotonic() + seconds
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
-    SCRUB_DEADLINE[0] = DEADLINE[0] + 10
     SCRUB_DEADLINE[0] = DEADLINE[0] + 10
 
 
@@ -587,12 +579,13 @@ def _user_info_spans(f, budget):
         pos = at + 1
         if at + 1 >= size or f[at + 1] in " \t\r\n@/?#'\"<>":
             continue
-        budget[0] -= 1
-        if budget[0] < 0:
-            spans.append((pos - 1, size, "user-info of a URL"))
-            return spans
         lo = max(0, at - 768)
         start = max(f.rfind(c, lo, at) for c in " \t\r\n'\"<>") + 1
+        budget[0] -= 1
+        if budget[0] < 0:
+            # the secret of user-info stands BEFORE the `@`: past the budget the withheld span starts at the segment, not at the `@`
+            spans.append((start, size, "user-info of a URL"))
+            return spans
         seg = f[start:at]
         slash = seg.rfind("//")
         if slash >= 0:
@@ -861,9 +854,23 @@ def find_spans(text, allow):
 
 def order_key(name):
     """What a name sorts by: the text as it is printed, without a finding id. A withheld name sorts by its marker (kind and length),
-    so the position of a name among its siblings tells nothing about the text that was withheld; ties keep the order the caller
-    adds (the inode, or the order found)."""
+    so the position of a name among its siblings tells nothing about the text that was withheld."""
     return scrub(name, None, True, True)
+
+
+_TIE_SALT = secrets.token_bytes(16)
+
+
+def tie_key(name):
+    """What breaks a tie between names that print the same: a keyed hash of the raw name under a salt drawn at the start of this run.
+    It is not the listing order, the inode or the name's rank (a tree unpacked in name order has its inodes in name order too), and
+    it is not the same in the next run, so no order of the answer, and no finding id handed out in that order, repeats between runs
+    or tells which of two withheld names is the smaller. The cost: names that print alike come in an order drawn afresh each run."""
+    return hashlib.blake2b(name.encode("utf-8", "backslashreplace"), key=_TIE_SALT, digest_size=8).digest()
+
+
+def sort_key(name):
+    return (order_key(name), tie_key(name))
 
 
 def scrub(text, where=None, allow=False, dry=False):
@@ -926,13 +933,6 @@ def shown(path, where=None):
     return scrub(path, where, True)
 
 
-def inode_of(entry):
-    try:
-        return entry.inode()
-    except (OSError, AttributeError):
-        return 0
-
-
 class Listed:
     """One entry of a directory, kept as its name and its directory only (a listing of 200,000 entries is a few tens of MiB)."""
     __slots__ = ("name", "path")
@@ -958,12 +958,12 @@ class SortedListing:
 
 
 def list_sorted(directory):
-    """The entries of a directory in the order of what is printed (order_key) and then of the inode, so the position of an entry
-    tells nothing about a withheld name. Only (key, inode, name) is held per entry."""
+    """The entries of a directory in the order of what is printed (order_key) and then of tie_key, so the position of an entry
+    tells nothing about a withheld name. Only (key, tie, name) is held per entry."""
     keyed = []
     with os.scandir(directory) as it:
         for entry in it:
-            keyed.append((order_key(entry.name), inode_of(entry), entry.name))
+            keyed.append((order_key(entry.name), tie_key(entry.name), entry.name))
     keyed.sort(key=lambda item: (item[0], item[1]))
     return SortedListing(directory, keyed)
 
@@ -1256,15 +1256,6 @@ def release(doc):
     """The final answer: normalised to what JSON carries, the withholding on every key and value, the check, and the account of
     what the check had to replace. A complete answer is partial when it replaced anything."""
     SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
-    SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
     doc = backstop(scrub_all(json.loads(json.dumps(doc, default=str))), "")
     values = VALUES[0]
     if values is not None:                     # a string first judged here is a finding too: it goes to the values file, then the file is closed
@@ -1530,10 +1521,13 @@ def refuse_pattern(pattern):
     """Why a `contains` pattern is outside the language this tool accepts, or None. The pattern is the caller's but the names it is
     run on are the evidence's, so a pattern that can backtrack for ever on a long name must not be run at all: a pattern is accepted
     only if it is made of literals, `.`, character classes, `^` `$`, `|`, escapes and groups that are NOT repeated, with at most one
-    unbounded repetition (`*`, `+`, `{n,}`), two `{n,m}` (a spread of 64 at most), four `?` and no back-reference or lookaround. Every
-    such pattern takes time polynomial in the name, of a degree of two at most."""
+    unbounded repetition (`*`, `+`, `{n,}`), two `{n,m}` (a spread of 64 at most), four `?`, four `|` inside groups (each one can
+    double the paths of a name that fits both sides, `(a|a)(a|a)...`; a `|` outside any group only adds a branch) and no
+    back-reference or lookaround. What this bounds is the number of paths the engine tries for one start in the name: it grows with
+    the length of the name by a small power (the one unbounded repetition) times a constant of the other repetitions and branches,
+    and that constant can be large. It is not a promise of speed, which is why search_bounded runs every search under a clock."""
     i, size, depth = 0, len(pattern), 0
-    unbounded = wide = optional = 0
+    unbounded = wide = optional = inner_pipes = 0
     can_repeat = after_group = False
     while i < size:
         c = pattern[i]
@@ -1605,14 +1599,41 @@ def refuse_pattern(pattern):
                 i += 1                                          # a lazy or possessive suffix
             can_repeat = False
             continue
+        if c == "|" and depth > 0:
+            inner_pipes += 1
         can_repeat = c not in "^$|"
         after_group = False
         i += 1
+    if inner_pipes > 4:
+        return "has more than four | inside groups"
     if unbounded > 1:
         return "has more than one unbounded repetition (* + {n,})"
     if wide > 2 or optional > 4:
         return "has more than two {n,m} or four ?"
     return None
+
+
+MATCH_SECONDS = 2.0                 # one search of one name by the caller's pattern may take this long; past it the run stops with an error
+
+
+class PatternTooSlow(Exception):
+    pass
+
+
+def _match_alarm(signum, frame):
+    raise PatternTooSlow()
+
+
+def search_bounded(rx, text, seconds=None):
+    """rx.search(text) under a wall-clock bound that holds whatever the pattern: the interval timer's signal is delivered inside the
+    regular-expression engine (it looks for signals every few thousand steps), so a search that would take minutes ends with
+    PatternTooSlow after `seconds` (MATCH_SECONDS by default). The names are the evidence's and the pattern the caller's."""
+    signal.signal(signal.SIGALRM, _match_alarm)
+    signal.setitimer(signal.ITIMER_REAL, MATCH_SECONDS if seconds is None else seconds)
+    try:
+        return rx.search(text)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def source_path_hypothesis(rel):
@@ -1926,7 +1947,7 @@ def find_copy_logs(root):
                         continue
         except OSError:
             continue
-    return sorted(found, key=order_key)
+    return sorted(found, key=sort_key)
 
 
 def main():
@@ -1948,8 +1969,10 @@ def main():
         why = refuse_pattern(contains)
         if why:
             fail("contains is outside the pattern language this tool runs on names (%s): a pattern like it can take minutes on one long "
-                 "name and the time limit does not interrupt it. Use literals, ., [classes], ^ $, | and groups that are not repeated, with at "
-                 "most one unbounded repetition (* + {n,}), two {n,m} and four ?; no back-reference or lookaround." % why)
+                 "name. Use literals, ., [classes], ^ $, | and groups that are not repeated, with at most one unbounded repetition "
+                 "(* + {n,}), two {n,m}, four ? and four | inside groups; no back-reference or lookaround." % why)
+        if not hasattr(signal, "setitimer"):
+            fail("contains needs a platform with interval timers, which bound every search of a name; this one has none")
         try:
             pattern = re.compile(contains, re.I)
         except re.error as exc:
@@ -1998,7 +2021,13 @@ def main():
             errors.append({"path": inline_text(shown(rel, "census error")), "what": what, "error": describe(exc)})
 
     def matches(shown_rel, shown_hypothesis=None):
-        return pattern is None or bool(pattern.search(shown_rel) or (shown_hypothesis is not None and pattern.search(shown_hypothesis)))
+        if pattern is None:
+            return True
+        try:
+            return bool(search_bounded(pattern, shown_rel) or (shown_hypothesis is not None and search_bounded(pattern, shown_hypothesis)))
+        except PatternTooSlow:
+            fail("contains took more than %g seconds on one name and the run was stopped: the pattern backtracks too long on the evidence's "
+                 "names. Use a pattern with fewer repetitions and no alternation of overlapping words." % MATCH_SECONDS)
 
     def emit(row, hit):
         nonlocal matching, row_no, matches_bytes
@@ -2092,7 +2121,9 @@ def main():
             base, extension = os.path.splitext(name)
             if base.upper() in RESERVED:
                 notes.append("the base name is a Windows reserved device name; whether a collector renamed it is not established")
-            found = STREAM_HINT.match(name)
+            # the guess is made on the name as it is printed: a token that holds `_` (a JWT, base64url, hf_, sk-proj-) is withheld before
+            # the name is split at its last `_`, never after, so no piece of it is judged alone
+            found = STREAM_HINT.match(shown(name, "stream name")) if "_" in name and "." in name else None
             if found and "." in found.group(1):
                 suffix = found.group(2)
                 if suffix.lower() in KNOWN_STREAMS or (("." in suffix and suffix.rsplit(".", 1)[1].lower() not in PLAIN_SUFFIXES) or suffix.startswith("$")):
