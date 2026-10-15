@@ -557,6 +557,9 @@ def fold_view(text):
     return "".join(out), index
 
 
+_MAC_USER_FOLDER = re.compile(r"(?<=/var/folders/)[a-z0-9_]{2}/[a-z0-9_]{30}(?=/|\Z)")      # the per-user temporary folder of a Mac: a typed id with `_` in it
+
+
 def _blank_known(f):
     """Markers this tool wrote and the names of files it made are not judged again (they are blanked, so every index stays)."""
     if "withheld" in f:
@@ -564,6 +567,8 @@ def _blank_known(f):
     for name in OWN_SHOWN:
         if name in f:
             f = f.replace(name, " " * len(name))
+    if "/folders/" in f:
+        f = _MAC_USER_FOLDER.sub(lambda m: " " * len(m.group()), f)
     return f
 
 

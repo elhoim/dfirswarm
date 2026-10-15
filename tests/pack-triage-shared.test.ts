@@ -98,6 +98,7 @@ const SHAPED: Array<[string, string]> = [
   ["xakia\u0000iosfodnn7examplezz", "iosfodnn7"],                                                         // a NUL inside a key id, in small letters
 ];
 const NOT_SHAPED = [
+  "/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/lib-eval-Ggw6dO/outside/secret.txt",             // the per-user temporary folder of a Mac, with an underscore in its id
   "{3F2504E0-4F89-11D3-9A0C-0305E82C3301}",                                          // a GUID
   "d41d8cd98f00b204e9800998ecf8427e",                                                // an md5
   "CMD.EXE-0BD30981.pf",                                                             // a Prefetch name
