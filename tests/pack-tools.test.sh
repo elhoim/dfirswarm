@@ -182,13 +182,20 @@ declared_bad_params() { # <label> <jq filter on the manifest> <expected message>
 declared_bad_params "an integer parameter" '.params.write_values.type = "integer"' 'which is not declared type "boolean"'
 declared_bad_params "a string parameter" '.params.write_values.type = "string"' 'which is not declared type "boolean"'
 declared_bad_params "an untyped parameter" 'del(.params.write_values.type)' 'which is not declared type "boolean"'
-declared_bad_params "a default that is on" '.params.write_values.default = true' 'whose default is on'
-declared_bad_params "a default that is a truthy string" '.params.write_values.default = "yes"' 'whose default is on'
+declared_bad_params "a default that is on" '.params.write_values.default = true' 'whose default is other than false'
+declared_bad_params "a default that is a truthy string" '.params.write_values.default = "yes"' 'whose default is other than false'
+# Not a truthiness test: JS and Python disagree on [] and {}, so the rule is "absent, null or false" in both.
+declared_bad_params "a default that is an empty list" '.params.write_values.default = []' 'whose default is other than false'
+declared_bad_params "a default that is an empty object" '.params.write_values.default = {}' 'whose default is other than false'
+declared_bad_params "a default that is zero" '.params.write_values.default = 0' 'whose default is other than false'
+declared_bad_params "a default that is an empty string" '.params.write_values.default = ""' 'whose default is other than false'
 declared_bad_params "params as a list" '.params = ["write_values", "length"]' 'needs the tool'"'"'s params to be an object'
 declared_bad_params "a prototype name" '.secret_output = {"when_args": ["__proto__"]}' 'which is not a parameter of the tool'
 rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
 jq '.params.write_values.default = false' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
 bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept a boolean parameter whose default is off"
+jq '.params.write_values.default = null' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
+bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept a boolean parameter whose default is null"
 # A recipe cannot honour the key: the seal refuses it in recipe.json.
 rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
 rec="$(ls "$WORK/decl/recipes" | head -1)"

@@ -73,9 +73,9 @@ export function ownSensitivity(spec: { secret_output?: unknown; secret_output_by
  *                                   such as a flag that writes values to a file)
  *
  * A name in `when_args` is one of the tool's own `params`, declared
- * `type: "boolean"` with no truthy `default` (the harness applies no defaults,
- * so a flag that is on unless the caller says otherwise would never be seen as
- * set; and a boolean is the one type whose "set" nobody can read two ways).
+ * `type: "boolean"` with no `default` other than false (absent, null or false;
+ * the harness applies no defaults, so a flag that is on unless the caller says
+ * otherwise would never be seen as set; and a boolean is the one type whose "set" nobody can read two ways).
  * Left out, the tool declares nothing and the agent's flag decides, as before.
  * A declaration that is not one of these is not guessed at: the job is refused
  * with the reason, because ignoring it would drop the protection the author
@@ -104,7 +104,9 @@ export function parseSecretDeclaration(raw: unknown, params: Record<string, unkn
     if (!Object.hasOwn(params, a)) return bad(`${a} is not a parameter of the tool`);
     const p = (params as Record<string, unknown>)[a];
     if (typeof p !== "object" || p === null || Array.isArray(p) || (p as { type?: unknown }).type !== "boolean") return bad(`${a} is not declared type "boolean"`);
-    if ((p as { default?: unknown }).default) return bad(`${a} has a default that is on, and the harness applies no defaults`);
+    // A default is allowed only when absent, null or false: the one rule scripts/pack.sh applies too, in terms no language reads two ways ([] and {} are truthy in JS, falsy in Python).
+    const dflt = (p as { default?: unknown }).default;
+    if (dflt !== undefined && dflt !== null && dflt !== false) return bad(`${a} has a default other than false, and the harness applies no defaults`);
   }
   return { ok: true, declaration: { mode: "when_args", args: args as string[] } };
 }

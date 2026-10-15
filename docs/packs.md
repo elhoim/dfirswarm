@@ -753,11 +753,15 @@ import each other), and holds to this:
   service reads, `"secret_output"`: `"required"` (every job of the tool) or
   `{ "when_args": ["write_values"] }` (a job that sets one of the named
   parameters, each one of the tool's own `params`, declared `type: "boolean"`
-  with no default that is on: the harness applies no defaults, and anything but
+  with no default other than false: the harness applies no defaults, and anything but
   an absent, null or false value counts as set). It applies to `kind: tool` jobs
   only: a recipe (a pack's `recipe.json`, or a forged tool that declares the
   recipe protocol) that carries the key is refused, not run, and the seal
-  refuses the key in `recipe.json`. Where the key applies
+  refuses the key in `recipe.json`. A refused recipe is left out of the lists
+  that start recipes by themselves (the kickoff, the derived pass, a detect
+  pass), so it is not offered and not run; the reason is given only when an
+  agent asks for it by name, and the seal is what keeps it out of a pack in the
+  first place (it shows only in an installed pack edited by hand). Where the key applies
   the job is run as if the agent had said `secret_output: true`, whether it did
   or not (an agent's `false` does not turn it off): its outputs are sealed
   sensitive, a job reading them is derived, an entry citing them is recorded

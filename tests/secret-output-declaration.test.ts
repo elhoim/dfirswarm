@@ -211,7 +211,7 @@ test("a declaration that is not understood refuses the job, naming the manifest 
     ["b_null", null, /"required"/],
     ["b_string_param", { when_args: ["note"] }, /note.*not declared type "boolean"/],
     ["b_untyped_param", { when_args: ["bare"] }, /bare.*not declared type "boolean"/],
-    ["b_default_on", { when_args: ["on_by_default"] }, /on_by_default.*default that is on/],
+    ["b_default_on", { when_args: ["on_by_default"] }, /on_by_default.*default other than false/],
   ];
   for (const [name, decl] of bad) {
     await addTool(S, name, { secret_output: decl }, { write_values: { type: "boolean" }, note: { type: "string" }, bare: {}, on_by_default: { type: "boolean", default: true } });
@@ -312,6 +312,13 @@ test("what counts as set fails closed: 0, an empty string, [] and {} are set, an
   }
   assert.equal(parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean", default: false } }, true).ok, true, "an off default is fine");
   assert.equal(parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean" } }, true).ok, true);
+  assert.equal(parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean", default: null } }, true).ok, true, "a null default is no default");
+  // a default is allowed only when absent, null or false, whatever the language reads as falsy: [] and {} are truthy in JavaScript and falsy in Python, and scripts/pack.sh applies this same rule (tests/pack-tools.test.sh)
+  for (const d of [[], {}, 0, "", 0.0, "false", "0", true, 1, [0], { a: 1 }, Number.NaN]) {
+    const r = parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean", default: d } }, true);
+    assert.equal(r.ok, false, `default ${JSON.stringify(d)}`);
+    assert.match(r.ok ? "" : r.reason, /opt has a default other than false/, `default ${JSON.stringify(d)}`);
+  }
   // the same through the job service: the integer tool of the reviewer's probe is refused, not run unsealed
   const { S, svc } = await make();
   await addTool(S, "int_dump", { secret_output: { when_args: ["level"] } }, { level: { type: "integer" } });
@@ -325,7 +332,7 @@ test("a params that is not a plain object is refused by the runtime reading as t
     for (const name of ["length", "0"]) assert.equal(parseSecretDeclaration({ when_args: [name] }, params as never, true).ok, false, JSON.stringify(params));
   }
   const { S, svc } = await make();
-  await addTool(S, "arr_params", { secret_output: { when_args: ["length"] } }, ["x"] as never);
+  await addTool(S, "arr_params", { secret_output: { when_args: ["length"] } }, [{ type: "boolean" }] as never);
   const reason = await refused(svc, { tool: "arr_params", args: {} });
   assert.match(reason, /secret_output/);
   await svc.stop("test over");
@@ -404,6 +411,35 @@ test("the answer to the agent names where the declaration came from with the spe
   assert.equal(job.sensitive?.declared, "tool_manifest");
   const flagged = await submitted(svc, "a1", { kind: "command", command: "true", secret_output: true });
   assert.equal((await jobView(S, flagged)).secret_output_by, undefined, "the agent's own flag is not the manifest's");
+  await svc.stop("test over");
+});
+
+test("a recipe accepted without the key is not run once its manifest carries one: the run script re-checks the recipe branch too", async () => {
+  const { S, svc } = await make();
+  const target = join(S, "inputs", "f.bin");
+  await writeFile(target, "x");
+  const rbody = "import sys,os\nopen(os.path.join(sys.argv[sys.argv.index('--out')+1],'v.txt'),'w').write('VAL')\n";
+  await addTool(S, "rec_late", { recipe: true }, {}, rbody);
+  const r = await svc.submit("a1", { kind: "recipe", recipe: "tool:rec_late", target: { paths: [target], name: "f.bin" }, inputs: ["all"], timeout_seconds: 60, network: "off" } as never);
+  assert.ok(r.ok, r.ok ? "" : r.reason);
+  const job = await until(svc, r.job.id);
+  const man = JSON.parse(await readFile(join(S, "tools", "rec_late", "manifest.json"), "utf8"));
+  await writeFile(join(S, "tools", "rec_late", "manifest.json"), JSON.stringify({ ...man, secret_output: "required" }));
+  await assert.rejects(svc.workerSpecFor(job, join(S, "..", "rerun-rec-late")), /secret_output.*tool jobs only/);
+  await svc.stop("test over");
+});
+
+test("a manifest whose params has an entry that is not an object is refused, not a TypeError out of submit", async () => {
+  const { S, svc } = await make();
+  for (const [name, bad] of [["p_null", null], ["p_number", 5], ["p_string", "x"], ["p_list", ["type"]], ["p_true", true]] as const) {
+    await addTool(S, name, {}, { fine: { type: "boolean" }, broken: bad });
+    const reason = await refused(svc, { tool: name, args: {} });
+    assert.match(reason, new RegExp(`tool ${name}: .*parameter broken is not an object`), name);
+    // the same with the argument given, and with a declaration naming the good parameter
+    const withArg = await refused(svc, { tool: name, args: { fine: true, broken: 1 } });
+    assert.match(withArg, /parameter broken is not an object/, name);
+  }
+  assert.equal(svc.jobs.size, 0, "nothing was accepted");
   await svc.stop("test over");
 });
 

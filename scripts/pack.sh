@@ -162,8 +162,9 @@ if os.path.isdir(tdir):
                             errors.append("tools/%s/manifest.json: secret_output.when_args names %s, which is not a parameter of the tool" % (name, n))
                         elif not isinstance(tparams[n], dict) or tparams[n].get("type") != "boolean":
                             errors.append('tools/%s/manifest.json: secret_output.when_args names %s, which is not declared type "boolean"' % (name, n))
-                        elif tparams[n].get("default"):
-                            errors.append("tools/%s/manifest.json: secret_output.when_args names %s, whose default is on (the harness applies no defaults)" % (name, n))
+                        elif tparams[n].get("default") is not None and tparams[n].get("default") is not False:
+                            # Absent, null and false only: the same rule as parseSecretDeclaration (0, "", [] and {} are refused too).
+                            errors.append("tools/%s/manifest.json: secret_output.when_args names %s, whose default is other than false (the harness applies no defaults)" % (name, n))
         tools[name] = tm
 
 # --- recipes ----------------------------------------------------------------

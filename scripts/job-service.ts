@@ -834,6 +834,8 @@ export class JobService {
     }
     if (man.sha256 !== sha) return { ok: false, reason: `tool ${name}'s script does not match its manifest's sha256` };
     for (const [key, p] of Object.entries(man.params ?? {})) {
+      // A parameter that is not an object (null, a number, a list) cannot be read: refused, never a TypeError out of submit.
+      if (!p || typeof p !== "object" || Array.isArray(p)) return { ok: false, reason: `tool ${name}: its manifest's parameter ${key} is not an object` };
       const v = args[key];
       if (v === undefined || v === null) {
         if (p.required) return { ok: false, reason: `tool ${name} needs ${key}` };
@@ -1369,6 +1371,8 @@ export class JobService {
     if (job.spec.kind === "recipe") {
       const r = await this.recipe(job.spec.recipe ?? "");
       if (!r) throw new Error(`recipe ${job.spec.recipe} is no longer what it was when accepted`);
+      // The manifest or recipe.json may carry the key now, though it did not when the job was accepted: not run.
+      if (r.refused) throw new Error(r.refused);
       await writeFile(join(ctl, "target.json"), JSON.stringify(job.spec.target));
       return { lines: [...head, ...run(`${r.runtime} ${q(r.entry)} run --target /job/target.json --out "$OUT"`)], tool_sha256: r.sha256 };
     }
