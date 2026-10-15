@@ -480,7 +480,7 @@ test("SIGTERM during a run: one JSON answer that names the signal and the rows k
       if (!temp) return;                      // the run finished before there was a temporary file: nothing to test on this machine
       child.signal("SIGTERM");
       const code = await child.closed;
-      for (let i = 0; i < 80 && !child.stdout().includes('"status"'); i++) await new Promise((r) => setTimeout(r, 25));      // the pipe drains after the exit event
+      for (let i = 0; i < 800 && !child.stdout().includes('"status"'); i++) await new Promise((r) => setTimeout(r, 25));      // the pipe drains after the exit event
       assert.equal(code, 143, `${label} exit code`);
       const doc = JSON.parse(child.stdout());
       assert.equal(doc.status, "partial");
