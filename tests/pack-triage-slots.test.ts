@@ -209,7 +209,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 for name in ("scrub", "scrub_all", "shown"):
     if hasattr(mod, name):
-        setattr(mod, name, (lambda text, where=None: text) if name != "scrub_all" else (lambda value: value))
+        setattr(mod, name, (lambda text, *rest: text) if name != "scrub_all" else (lambda value: value))
 mod.main()
 `;
 
