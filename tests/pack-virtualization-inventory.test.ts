@@ -380,3 +380,60 @@ test("an inventory of nothing it reads says so: an empty directory fails, a dire
     assert.deepEqual(other.other_files_by_extension, { ".txt": 1 });
   });
 });
+
+// ---- review fixes: each test below fails on the tool as first proposed ---------------------------------------------------
+
+/** Every 12-character piece of a secret (past a fixed prefix), in any case: none may reach what an agent reads. */
+function noPiece(all: string, secret: string, from = 4): void {
+  const low = all.toLowerCase();
+  for (let k = from; k + 12 <= secret.length; k++) assert.equal(low.includes(secret.slice(k, k + 12).toLowerCase()), false, `a piece of ${secret.slice(0, 6)}... was shown`);
+}
+
+test("a value is withheld by shape before it is folded to lower case, a file name never shows through its extension, and Proxmox storage:user:password@host is user-info", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/vm/web.vmx", vmx([["displayName", "web"], ["scsi0:0.fileName", "d.vmdk"], ["scsi0:0.deviceType", CANARY.aws]]));
+    await put(cwd, `inputs/vm/notes.${CANARY.github}`, "x");
+    await put(cwd, "inputs/pve/qemu-server/101.conf", "name: db\ncores: 2\nmemory: 2048\nostype: l26\nscsi0: cephstore:svc:Pa55w0rdQ7fZx9LmK2@mon1.example.test,size=8G\n");
+    const run = await tool(INVENTORY, cwd, { root: "inputs", limit: 1 });
+    const out = body(run);
+    assert.equal(out.other_files_by_extension["(other extensions)"], 1);
+    const all = await everythingBut(cwd, run.stdout + run.stderr, (await filesUnder(join(cwd, "inputs"))).map((f) => `inputs/${f}`));
+    noPiece(all, CANARY.aws);
+    noPiece(all, CANARY.github);
+    noPiece(all, "Pa55w0rdQ7fZx9LmK2", 0);
+    const disk = (await rowsOf(cwd, out, "disks")).find((d) => d.device === "scsi0:0");
+    assert.match(disk.device_type, /withheld/);
+  });
+});
+
+test("credential-like attributes are named up to the cap and counted past it, never an unbounded inline list", async () => {
+  await withCwd(async (cwd) => {
+    const graphics = Array.from({ length: 20_001 }, () => "<graphics type='vnc' passwd='p4ssw0rd'/>").join("");
+    await put(cwd, "inputs/g.xml", `<domain type='kvm'><name>g</name><devices>${graphics}</devices></domain>`);
+    const run = await tool(INVENTORY, cwd, { root: "inputs" });
+    const out = body(run);
+    const vm = out.vms[0];
+    assert.equal(vm.credential_like_attributes.length, 200);
+    assert.equal(vm.credential_like_attributes_total, 20_001);
+    assert.ok(run.stdout.length < 200_000, `the answer stays small: ${run.stdout.length} bytes`);
+    assert.equal(run.stdout.includes("p4ssw0rd"), false);
+  });
+});
+
+test("Proxmox: a [special:cloudinit] section is not a snapshot, and a credential-like key is named in a snapshot or special section too", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/pve/etc/pve/qemu-server/100.conf", [
+      "name: web01", "cores: 2", "memory: 4096", "ostype: l26", "cipassword: $5$current", "parent: s1", "",
+      "[s1]", "cores: 2", "snaptime: 1700000000", "cipassword: $5$insnapshot", "",
+      "[special:cloudinit]", "cipassword: $5$applied", "ipconfig0: ip=dhcp", "",
+    ].join("\n"));
+    const out = body(await tool(INVENTORY, cwd, { root: "inputs/pve" }));
+    const vm = out.vms[0];
+    assert.deepEqual(vm.snapshot_sections, ["s1"]);
+    assert.deepEqual(vm.special_sections, ["special:cloudinit"]);
+    assert.deepEqual(out.snapshots.map((s: Json) => s.name), ["s1"], "the cloud-init section is not listed as a snapshot");
+    const named = vm.keys_that_look_like_credentials.map((k: Json) => [k.name, k.section, k.line]);
+    assert.deepEqual(named, [["cipassword", "current", 5], ["cipassword", "s1", 11], ["cipassword", "special:cloudinit", 14]]);
+    assert.equal(JSON.stringify(out).includes("$5$"), false);
+  });
+});

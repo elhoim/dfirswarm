@@ -290,6 +290,11 @@ function vhdxHeader(o: { seq: bigint; fileGuid: string; dataGuid: string; logGui
 
 export type VhdxOptions = {
   diskId: string;
+  /**
+   * The DataWriteGuid both headers carry (MS-VHDX 2.2.2): what a child's parent_linkage records of its parent. It is
+   * deliberately not the VirtualDiskId by default, so that a reader comparing the linkage with the wrong field fails.
+   */
+  dataWriteGuid?: string;
   parent?: { linkage?: string; linkage2?: string; relative?: string; absolute?: string; volume?: string; locatorType?: string };
   headers?: [Partial<Parameters<typeof vhdxHeader>[0]>, Partial<Parameters<typeof vhdxHeader>[0]>];
   hasParentFlag?: boolean;
@@ -297,7 +302,8 @@ export type VhdxOptions = {
 };
 
 export function vhdx(o: VhdxOptions): Buffer {
-  const base = { fileGuid: "11111111-1111-1111-1111-111111111111", dataGuid: "22222222-2222-2222-2222-222222222222", logGuid: G.zero };
+  const base = { fileGuid: "11111111-1111-1111-1111-111111111111", dataGuid: o.dataWriteGuid ?? "22222222-2222-2222-2222-222222222222", logGuid: G.zero };
+  assert.notEqual(base.dataGuid.toUpperCase(), o.diskId.toUpperCase(), "a VHDX fixture keeps its DataWriteGuid apart from its VirtualDiskId");
   const h1 = vhdxHeader({ seq: 1n, ...base, ...(o.headers?.[0] ?? {}) });
   const h2 = vhdxHeader({ seq: 2n, ...base, ...(o.headers?.[1] ?? {}) });
   const item = (id: string, off: number, len: number): Buffer => Buffer.concat([guidBytes(id), u32(off), u32(len), u32(0), u32(0)]);

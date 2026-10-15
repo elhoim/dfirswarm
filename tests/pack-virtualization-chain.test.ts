@@ -126,7 +126,13 @@ test("two descriptors that name each other as parents are a cycle; the tool ends
     assert.ok((await markerKinds(cwd, out)).includes("chain_cycle"));
     const disks = out.disks.filter((d: Json) => d.chain_state === "cycle");
     assert.ok(disks.length >= 3, "every disk on a cycle says so");
-    assert.equal(out.chain_summary.cycle === undefined, true, "no leaf exists on a cycle, so no chain row claims one");
+    // no leaf exists on a pure cycle (every file on it is named by another), and each cycle still has a chain row
+    assert.equal(out.chain_summary.cycle, 2, "the a/b cycle and the disk that names itself");
+    assert.equal(out.chain_summary.complete, undefined);
+    const rows = out.chains.filter((c: Json) => c.status === "cycle");
+    assert.deepEqual(rows.map((c: Json) => c.leaf_file).sort(), ["a.vmdk", "self.vmdk"]);
+    assert.equal(rows.find((c: Json) => c.leaf_file === "self.vmdk").chain_length, 1);
+    assert.equal(rows.find((c: Json) => c.leaf_file === "a.vmdk").chain_length, 2);
   });
 });
 
@@ -252,29 +258,46 @@ test("VHD markers: a footer whose checksum is wrong is reported as such, a saved
   });
 });
 
-test("VHDX: the current header is the valid one with the higher sequence number, the parent locator is read, and linkage is compared with the parent's disk id", async () => {
+test("VHDX: the current header is the valid one with the higher sequence number, the parent locator is read, and parent_linkage is held against the parent's DataWriteGuid (MS-VHDX), not its VirtualDiskId", async () => {
   await withCwd(async (cwd) => {
-    const PARENT = "AAAAAAAA-0000-4000-8000-000000000001", CHILD = "AAAAAAAA-0000-4000-8000-000000000002";
-    await put(cwd, "inputs/hv/base.vhdx", vhdx({ diskId: PARENT }));
-    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: PARENT, relative: ".\\base.vhdx", absolute: "C:\\VMs\\base.vhdx", volume: "\\\\?\\Volume{abc}\\" } }));
+    // MS-VHDX: a differencing disk's parent_linkage holds the DataWriteGuid of the parent's header. The parent's
+    // VirtualDiskId (its Page 83 data) is a different value and is NOT what a child records.
+    const PARENT_DISK = "AAAAAAAA-0000-4000-8000-000000000001", PARENT_WRITE = "DDDDDDDD-0000-4000-8000-0000000000D1", CHILD = "AAAAAAAA-0000-4000-8000-000000000002";
+    await put(cwd, "inputs/hv/base.vhdx", vhdx({ diskId: PARENT_DISK, dataWriteGuid: PARENT_WRITE }));
+    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: PARENT_WRITE, relative: ".\\base.vhdx", absolute: "C:\\VMs\\base.vhdx", volume: "\\\\?\\Volume{abc}\\" } }));
     let out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
     const child = out.disks.find((d: Json) => d.file === "child.avhdx");
+    const parent = out.disks.find((d: Json) => d.file === "base.vhdx");
     assert.equal(child.detail.virtual_disk_id, CHILD);
+    assert.equal(parent.detail.virtual_disk_id, PARENT_DISK, "the VirtualDiskId is kept as information");
+    assert.equal(parent.own_id, PARENT_WRITE, "the identity a child is held against is the DataWriteGuid");
+    assert.equal(parent.detail.data_write_guid, PARENT_WRITE);
     assert.equal(child.detail.has_parent, true);
-    assert.equal(child.detail.parent_linkage, PARENT);
+    assert.equal(child.detail.parent_linkage, PARENT_WRITE);
     assert.deepEqual(child.detail.sequence_numbers, [1, 2]);
     assert.equal(child.detail.current_header_offset, 131072);
     assert.equal(child.detail.headers_checksum_ok, 2);
     assert.equal(child.detail.region_table_checksum_ok, true);
     assert.equal(out.edges[0].id_check, "match");
+    assert.match(out.edges[0].compared, /DataWriteGuid/);
     assert.equal(chainOf(out, "child.avhdx").status, "complete");
-    // A mismatching linkage
-    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: "BBBBBBBB-0000-4000-8000-000000000001", relative: ".\\base.vhdx" } }));
+    assert.deepEqual(await markerKinds(cwd, out), []);
+    // A child whose linkage names the parent's VirtualDiskId does not link to it: that is the field libvhdi refuses too
+    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: PARENT_DISK, relative: ".\\base.vhdx" } }));
     out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
     assert.equal(out.edges[0].id_check, "mismatch");
+    assert.equal(out.edges[0].recorded_by_child, PARENT_DISK);
+    assert.equal(out.edges[0].carried_by_parent, PARENT_WRITE);
+    assert.equal(chainOf(out, "child.avhdx").status, "identity_mismatch");
     assert.ok((await markerKinds(cwd, out)).includes("parent_linkage_mismatch"));
+    // The DataWriteGuid is the current header's: a parent whose newer header carries another one is a different write
+    await put(cwd, "inputs/hv/base.vhdx", vhdx({ diskId: PARENT_DISK, headers: [{ dataGuid: PARENT_WRITE }, { dataGuid: "EEEEEEEE-0000-4000-8000-0000000000E2" }] }));
+    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: PARENT_WRITE, relative: ".\\base.vhdx" } }));
+    out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
+    assert.equal(out.edges[0].id_check, "mismatch", "the parent was written after the child was made");
     // linkage2 that matches is said as such, not folded into "match"
-    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: "BBBBBBBB-0000-4000-8000-000000000001", linkage2: PARENT, relative: ".\\base.vhdx" } }));
+    await put(cwd, "inputs/hv/base.vhdx", vhdx({ diskId: PARENT_DISK, dataWriteGuid: PARENT_WRITE }));
+    await put(cwd, "inputs/hv/child.avhdx", vhdx({ diskId: CHILD, parent: { linkage: "BBBBBBBB-0000-4000-8000-000000000001", linkage2: PARENT_WRITE, relative: ".\\base.vhdx" } }));
     out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
     assert.equal(out.edges[0].id_check, "match_via_parent_linkage2");
   });
@@ -692,6 +715,9 @@ test("files made by a real qemu-img are read as qemu-img reads them: sizes, back
     assert.equal((await rowsOf(cwd, out, "internal_snapshots"))[0].name, "before patch");
     assert.equal(disk("mono.vmdk").detail.capacity_sectors_by_extents * 512, info("mono.vmdk")["virtual-size"]);
     assert.equal(disk("child.vmdk").detail.parent_cid, disk("mono.vmdk").own_id, "a child records its parent's CID");
+    assert.ok(disk("mono.vmdk").own_id, "the CID was read (qemu-img writes it without leading zeros)");
+    const vmdkEdge = out.edges.find((e: Json) => e.child === disk("child.vmdk").source_id);
+    assert.equal(vmdkEdge.id_check, "match", "the child's parentCID was compared with the parent's CID, and they agree");
     assert.equal(chainOf(out, "child.vmdk").status, "complete");
     assert.equal(disk("two.vmdk").detail.create_type, "twoGbMaxExtentSparse", "a closed-vocabulary name is not mistaken for a token");
     assert.equal(disk("dyn.vhd").detail.current_size, info("dyn.vhd")["virtual-size"]);
@@ -702,7 +728,271 @@ test("files made by a real qemu-img are read as qemu-img reads them: sizes, back
     // and the optional second reading agrees with the first, through the real program
     const second = body(await tool(CHAIN, cwd, { root: "inputs/real", qemu_img: "require" }));
     assert.equal(second.qemu_img.available, true);
-    assert.ok(second.qemu_img.checked >= 8);
+    assert.equal(second.status, "complete", second.status_basis);
+    assert.ok(second.qemu_img.checked >= 7);
+    assert.equal(second.qemu_img.failed, 0);
+    assert.equal(second.qemu_img.skipped.text_descriptor, 1, "two.vmdk is a text descriptor");
     assert.deepEqual((await rowsOf(cwd, second, "markers")).filter((m) => m.kind === "qemu_img_disagrees"), []);
+  });
+});
+
+// ---- review fixes: each test below fails on the tool as first proposed ---------------------------------------------------
+
+test("a VMDK CID of fewer than eight hexadecimal digits (qemu-img writes it with %x) is read and compared as a number, not refused", async () => {
+  await withCwd(async (cwd) => {
+    // VMware's descriptor format: CID is a 32-bit value in hexadecimal; qemu-img prints it without leading zeros
+    await put(cwd, "inputs/vm/base.vmdk", vmdkDescriptor({ cid: "363f60d", extents: [{ sectors: 8, type: "FLAT", name: "base-flat.vmdk" }] }));
+    await put(cwd, "inputs/vm/base-flat.vmdk", Buffer.alloc(8 * 512));
+    await put(cwd, "inputs/vm/child.vmdk", vmdkDescriptor({ cid: "1a2b", parentCid: "0363f60d", parentHint: "base.vmdk", extents: [{ sectors: 8, type: "FLAT", name: "child-flat.vmdk" }] }));
+    await put(cwd, "inputs/vm/child-flat.vmdk", Buffer.alloc(8 * 512));
+    await put(cwd, "inputs/vm/odd.vmdk", vmdkDescriptor({ cid: "123456789", extents: [{ sectors: 8, type: "FLAT", name: "base-flat.vmdk" }] }));
+    const out = body(await tool(CHAIN, cwd, { root: "inputs/vm" }));
+    const base = out.disks.find((d: Json) => d.file === "base.vmdk");
+    assert.equal(base.own_id, "0363f60d");
+    assert.equal(base.detail.cid_raw, "363f60d");
+    const edge = out.edges.find((e: Json) => e.parent_name === "base.vmdk");
+    assert.equal(edge.id_check, "match", "0363f60d and 363f60d are one number");
+    assert.equal(chainOf(out, "child.vmdk").status, "complete");
+    const markers = await rowsOf(cwd, out, "markers");
+    assert.deepEqual(markers.filter((m) => m.kind === "descriptor_problem").map((m) => m.observation), ["CID is not 1 to 8 hexadecimal digits"], "only the nine-digit CID is a problem");
+  });
+});
+
+test("a QCOW2 image on a raw backing file (the usual Proxmox and libvirt layout) is not a broken chain: the raw base is present and not read, and the answer says so", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/q/base.raw", Buffer.alloc(65536));
+    await put(cwd, "inputs/q/top.qcow2", qcow2({ backing: "base.raw", backingFormat: "raw" }));
+    await put(cwd, "inputs/q/probe.qcow2", qcow2({ backing: "base.raw" }));
+    await put(cwd, "inputs/q/liar.qcow2", qcow2({ backing: "base.raw", backingFormat: "qcow2" }));
+    const out = body(await tool(CHAIN, cwd, { root: "inputs/q" }));
+    for (const leaf of ["top.qcow2", "probe.qcow2"]) {
+      const c = chainOf(out, leaf);
+      assert.equal(c.status, "complete", `${leaf}: ${c.detail}`);
+      assert.equal(c.chain_length, 2);
+      assert.match(c.base_note, /not a disk this tool reads/);
+    }
+    const edge = out.edges.find((e: Json) => e.child === out.disks.find((d: Json) => d.file === "top.qcow2").source_id);
+    assert.equal(edge.parent_state, "raw or unread");
+    assert.equal(edge.resolution, "relative_exact");
+    assert.equal(chainOf(out, "liar.qcow2").status, "parent_unreadable", "the child says qcow2 and the file is not one");
+    assert.equal((await markerKinds(cwd, out)).includes("parent_missing"), false, "the base is in the set");
+  });
+});
+
+test("a chain is not complete over a parent that could not be read, an extent that is missing or short, or a QCOW2 external data file that is absent: its status names the first problem", async () => {
+  await withCwd(async (cwd) => {
+    const BASE_ID = "11111111-aaaa-bbbb-cccc-000000000001";
+    // a VHD parent whose dynamic header is cut: the footer is there, the header it points at is not
+    const cut = vhdDynamic({ uid: BASE_ID });
+    await put(cwd, "inputs/a/base.vhd", Buffer.concat([cut.subarray(0, 512), Buffer.alloc(100), cut.subarray(cut.length - 512)]));
+    await put(cwd, "inputs/a/child.vhd", vhdDifferencing({ uid: "11111111-aaaa-bbbb-cccc-000000000002", parentUid: BASE_ID, parentName: "base.vhd" }));
+    // an unsupported parent: VHD file format version 2
+    const v2 = vhdDynamic({ uid: BASE_ID }); v2.writeUInt32BE(0x00020000, 12); v2.writeUInt32BE(0x00020000, v2.length - 512 + 12);
+    await put(cwd, "inputs/b/base.vhd", v2);
+    await put(cwd, "inputs/b/child.vhd", vhdDifferencing({ uid: "11111111-aaaa-bbbb-cccc-000000000002", parentUid: BASE_ID, parentName: "base.vhd" }));
+    // VMDK extents: one missing, one short
+    await put(cwd, "inputs/c/gone.vmdk", vmdkDescriptor({ cid: "aabbccdd", extents: [{ sectors: 8, type: "FLAT", name: "gone-flat.vmdk" }] }));
+    await put(cwd, "inputs/c/short.vmdk", vmdkDescriptor({ cid: "aabbccde", extents: [{ sectors: 8, type: "FLAT", name: "short-flat.vmdk" }] }));
+    await put(cwd, "inputs/c/short-flat.vmdk", Buffer.alloc(100));
+    await put(cwd, "inputs/c/child.vmdk", vmdkDescriptor({ cid: "11223344", parentCid: "aabbccdd", parentHint: "gone.vmdk", extents: [{ sectors: 8, type: "FLAT", name: "child-flat.vmdk" }] }));
+    await put(cwd, "inputs/c/child-flat.vmdk", Buffer.alloc(8 * 512));
+    // QCOW2 with an external data file (header extension 0x44415441, incompatible bit 2) that is not in the set
+    const ext = qcow2({ incompat: 4n });
+    const name = Buffer.from("data.raw");
+    Buffer.concat([Buffer.from([0x44, 0x41, 0x54, 0x41]), Buffer.from([0, 0, 0, name.length]), name, Buffer.alloc((-name.length) & 7), Buffer.alloc(8)]).copy(ext, 104);
+    await put(cwd, "inputs/d/img.qcow2", ext);
+    await put(cwd, "inputs/d/top.qcow2", qcow2({ backing: "img.qcow2", backingFormat: "qcow2" }));
+    for (const [dir, leaf, status] of [["a", "child.vhd", "parent_unreadable"], ["b", "child.vhd", "parent_unreadable"], ["c", "child.vmdk", "extent_missing"], ["c", "short.vmdk", "extent_missing"], ["d", "top.qcow2", "data_file_missing"]]) {
+      const out = json(await tool(CHAIN, cwd, { root: `inputs/${dir}` }));
+      const c = chainOf(out, leaf);
+      assert.equal(c.status, status, `${dir}/${leaf}: ${JSON.stringify(c)}`);
+      assert.ok(c.detail, "the status says which disk");
+      assert.equal(out.chain_summary.complete, undefined, `${dir}: no chain is complete`);
+    }
+    const d = json(await tool(CHAIN, cwd, { root: "inputs/d" }));
+    assert.ok((await markerKinds(cwd, d)).includes("external_data_file_missing"));
+  });
+});
+
+test("qemu_img never opens a name a file holds: a VMDK text descriptor and a QCOW2 image with an external data file are not given to it, and a qemu-img that fails or times out makes the answer partial", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/q/desc.vmdk", vmdkDescriptor({ cid: "aabbccdd", extents: [{ sectors: 8, type: "FLAT", name: "/outside/flat.img" }] }));
+    const ext = qcow2({ incompat: 4n });
+    const name = Buffer.from("/outside/data.raw");
+    Buffer.concat([Buffer.from([0x44, 0x41, 0x54, 0x41]), Buffer.from([0, 0, 0, name.length]), name, Buffer.alloc((-name.length) & 7), Buffer.alloc(8)]).copy(ext, 104);
+    await put(cwd, "inputs/q/ext.qcow2", ext);
+    await put(cwd, "inputs/q/plain.qcow2", qcow2({}));
+    const bin = await stubQemu(cwd);
+    const log = join(cwd, "q.log");
+    let out = json(await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto" }, { QEMU_STUB_LOG: log }, bin));
+    const calls = (await readFile(log, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(calls.map((c) => c[c.length - 1].split("/").pop()), ["plain.qcow2"], "only the image that names no other file was given to qemu-img");
+    assert.deepEqual(out.qemu_img.skipped, { text_descriptor: 1, external_data_file: 1 });
+    assert.equal(out.qemu_img.checked, 1);
+    // a split disk: its text descriptor names extents that are sparse files with a descriptor of their own (as qemu-img's
+    // twoGbMaxExtentSparse writes them); the disk is the descriptor, so its extents are not given to qemu-img either
+    await put(cwd, "inputs/s/two.vmdk", vmdkDescriptor({ cid: "aabbccd1", createType: "twoGbMaxExtentSparse", extents: [{ sectors: 2048, type: "SPARSE", name: "two-s001.vmdk" }] }));
+    await put(cwd, "inputs/s/two-s001.vmdk", vmdkSparse({ descriptor: vmdkDescriptor({ cid: "aabbccd1", createType: "twoGbMaxExtentSparse", extents: [{ sectors: 2048, type: "SPARSE", name: "two-s001.vmdk" }] }) }));
+    await writeFile(log, "");
+    out = json(await tool(CHAIN, cwd, { root: "inputs/s", qemu_img: "auto" }, { QEMU_STUB_LOG: log }, bin));
+    assert.equal((await readFile(log, "utf8")).trim(), "", "neither the descriptor nor its extent was given to qemu-img");
+    assert.deepEqual(out.qemu_img.skipped, { text_descriptor: 1, extent_of_another_descriptor: 1 });
+    assert.equal(out.status, "complete");
+    // a failing qemu-img: the second reading is missing, and the answer says so
+    out = json(await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto" }, { QEMU_STUB_MODE: "fail" }, bin));
+    assert.equal(out.status, "partial");
+    assert.match(out.status_basis, /qemu-img failed, timed out or printed no JSON on 1 image/);
+    assert.equal(out.qemu_img.failed, 1);
+    out = json(await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto" }, { QEMU_STUB_MODE: "notjson" }, bin));
+    assert.equal(out.status, "partial");
+    // a qemu-img that hangs is killed at the deadline and the answer is partial, not complete
+    const pid = join(cwd, "qemu.pid");
+    out = json(await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto", max_seconds: 3 }, { QEMU_STUB_MODE: "hang", QEMU_STUB_PID: pid }, bin));
+    assert.equal(out.status, "partial");
+    assert.equal(out.disks.find((d: Json) => d.file === "plain.qcow2").qemu_img.timed_out, true);
+  });
+});
+
+test("the chain phase is bounded by the clock: fifteen thousand trunk disks and fifteen thousand leaves at the largest settings end inside max_seconds with an answer", async () => {
+  await withCwd(async (cwd) => {
+    const n = 15_000;
+    const dir = join(cwd, "inputs", "vm");
+    await mkdir(dir, { recursive: true });
+    const name = (k: string, i: number): string => `${k}${String(i).padStart(5, "0")}.vmdk`;
+    const writes: Promise<void>[] = [];
+    for (let i = 0; i < n; i++) {
+      const cid = (0x10000000 + i).toString(16), leaf = (0x40000000 + i).toString(16);
+      writes.push(writeFile(join(dir, name("t", i)), i === 0 ? vmdkDescriptor({ cid, extents: [{ sectors: 8, type: "ZERO" }] })
+        : vmdkDescriptor({ cid, parentCid: (0x10000000 + i - 1).toString(16), parentHint: name("t", i - 1), extents: [{ sectors: 8, type: "ZERO" }] })));
+      writes.push(writeFile(join(dir, name("l", i)), vmdkDescriptor({ cid: leaf, parentCid: cid, parentHint: name("t", i), extents: [{ sectors: 8, type: "ZERO" }] })));
+      if (writes.length > 2000) await Promise.all(writes.splice(0));
+    }
+    await Promise.all(writes);
+    const started = Date.now();
+    const out = json(await tool(CHAIN, cwd, { root: "inputs/vm", max_files: 200000, max_chain_depth: 1000000, max_seconds: 10, limit: 5 }));
+    const took = (Date.now() - started) / 1000;
+    assert.ok(took < 10 + 6, `the call ended in ${took} s; max_seconds was 10`);
+    assert.ok(out.status === "complete" || out.status === "partial", out.status_basis);
+    if (out.status === "partial") assert.match(out.status_basis, /max_seconds/, "a stop at the clock is named");
+    else assert.equal(out.chain_summary.complete, n, "every leaf has a whole chain");
+  });
+});
+
+test("a .vmx or .vmsd over 16 MiB is named and not read, and the rest of the answer is still made", async () => {
+  await withCwd(async (cwd) => {
+    await vmwareChain(cwd);
+    const pad = "# padding line ".padEnd(1023, "x") + "\n";
+    await put(cwd, "inputs/vm/big.vmsd", 'snapshot.numSnapshots = "0"\n' + pad.repeat(17 * 1024));
+    await put(cwd, "inputs/vm/big.vmx", 'scsi0:0.fileName = "base-000002.vmdk"\n' + pad.repeat(17 * 1024));
+    const out = body(await tool(CHAIN, cwd, { root: "inputs/vm" }));
+    assert.equal(out.status, "partial");
+    for (const f of ["big.vmsd", "big.vmx"]) {
+      const s = out.sources.find((x: Json) => x.file === f);
+      assert.equal(s.state, "failed");
+      assert.match(s.reason, /over 16777216 bytes is named and not read/);
+    }
+    assert.equal(chainOf(out, "base-000002.vmdk").status, "complete", "the disks are still judged");
+    assert.equal((await markerKinds(cwd, out)).includes("running_disk_is_a_delta_without_snapshots"), false, "a database that was not read says nothing about its snapshots");
+  });
+});
+
+test("a QCOW2 snapshot table read short of what the header declares is partial: a max_snapshots cap, and a count of 0xFFFFFFFF over ten real entries", async () => {
+  await withCwd(async (cwd) => {
+    const snaps = Array.from({ length: 100 }, (_, i) => ({ id: String(i + 1), name: `s${i}`, date: 1_700_000_000 + i }));
+    await put(cwd, "inputs/q/a.qcow2", qcow2({ snapshots: snaps }));
+    let out = body(await tool(CHAIN, cwd, { root: "inputs/q", max_snapshots: 5 }));
+    assert.equal(out.status, "partial");
+    const a = out.sources.find((s: Json) => s.file === "a.qcow2");
+    assert.equal(a.state, "partial");
+    assert.match(a.reason, /declares 100 internal snapshot\(s\) and 5 were read: max_snapshots \(5\) was reached/);
+    await put(cwd, "inputs/q/a.qcow2", qcow2({ snapshots: snaps.slice(0, 10), declared: 0xffffffff }));
+    out = body(await tool(CHAIN, cwd, { root: "inputs/q" }));
+    assert.equal(out.status, "partial");
+    assert.match(out.sources.find((s: Json) => s.file === "a.qcow2").reason, /declares 4294967295 internal snapshot\(s\) and 10 were read/);
+    await put(cwd, "inputs/q/a.qcow2", qcow2({ snapshots: snaps.slice(0, 10) }));
+    assert.equal(body(await tool(CHAIN, cwd, { root: "inputs/q" })).status, "complete", "a table read whole is complete");
+  });
+});
+
+test("a file name never reaches the answer through its extension, and a .vmsd value never reaches a marker unchecked", async () => {
+  await withCwd(async (cwd) => {
+    const lower = "ghp_" + "unluvodlhcgedwaxdaodgeikuszucgqhdvzx";
+    await put(cwd, `inputs/vm/notes.${CANARY.github}`, "x");
+    await put(cwd, `inputs/vm/x.${CANARY.aws}`, "x");
+    await put(cwd, "inputs/vm/report.TXT", "x");
+    await vmwareChain(cwd);
+    await put(cwd, "inputs/vm/vm.vmx", vmx([["scsi0:0.fileName", "base-000002.vmdk"]]));
+    await put(cwd, "inputs/vm/vm.vmsd", `.encoding = "UTF-8"\nsnapshot.numSnapshots = "${lower}"\n`);
+    // an extent type is compared in upper case and shown as written: a lower-case token is still withheld
+    await put(cwd, "inputs/vm/ext.vmdk", vmdkDescriptor({ cid: "01020304", extents: [{ sectors: 8, type: lower, name: "e" }] }));
+    const run = await tool(CHAIN, cwd, { root: "inputs/vm", limit: 1 });
+    const out = body(run);
+    assert.equal(out.other_files_by_extension["(other extensions)"], 2);
+    assert.equal(out.other_files_by_extension[".txt"], 1);
+    const all = await everythingBut(cwd, run.stdout + run.stderr, (await filesUnder(join(cwd, "inputs"))).map((f) => `inputs/${f}`));
+    for (const secret of [CANARY.github, CANARY.aws, lower]) {
+      for (let k = 4; k + 12 <= secret.length; k++) assert.equal(all.toLowerCase().includes(secret.slice(k, k + 12).toLowerCase()), false, `a piece of ${secret.slice(0, 6)}... reached an answer`);
+    }
+    // the marker that quotes the database's count still fires, with the count withheld
+    const m = (await rowsOf(cwd, out, "markers")).find((r) => r.kind === "running_disk_is_a_delta_without_snapshots");
+    assert.match(m.observation, /<token-shaped text withheld \d+ characters> snapshot\(s\)/);
+  });
+});
+
+test("a base disk whose parentCID says none is not a child of the name its stray hint gives; duplicate CIDs and parent names that disagree are candidates; a backing format named as qemu names it is not a disagreement", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/vm/base.vmdk", vmdkDescriptor({ cid: "aabbccdd", parentHint: "old-base.vmdk", extents: [{ sectors: 8, type: "ZERO" }] }));
+    await put(cwd, "inputs/vm/copy.vmdk", vmdkDescriptor({ cid: "aabbccdd", extents: [{ sectors: 8, type: "ZERO" }] }));
+    let out = body(await tool(CHAIN, cwd, { root: "inputs/vm" }));
+    assert.equal(out.edges.length, 0, "no parent is recorded, so no edge is made");
+    let kinds = await markerKinds(cwd, out);
+    assert.equal(kinds.includes("parent_missing"), false);
+    assert.match(out.disks.find((d: Json) => d.file === "base.vmdk").detail.parent_hint_not_followed, /not followed/);
+    assert.ok(kinds.includes("duplicate_cid"));
+    // VHD: the header's parent name and a W2ru locator that name different files
+    const BASE_ID = "11111111-aaaa-bbbb-cccc-000000000001";
+    await put(cwd, "inputs/hv/base.vhd", vhdDynamic({ uid: BASE_ID }));
+    await put(cwd, "inputs/hv/other.vhd", vhdDynamic({ uid: "11111111-aaaa-bbbb-cccc-000000000009" }));
+    await put(cwd, "inputs/hv/child.vhd", vhdDifferencing({ uid: "11111111-aaaa-bbbb-cccc-000000000002", parentUid: BASE_ID, parentName: "base.vhd", locators: [{ code: "W2ru", text: ".\\other.vhd" }, { code: "W2ku", text: "C:\\VMs\\base.vhd" }] }));
+    out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
+    kinds = await markerKinds(cwd, out);
+    assert.ok(kinds.includes("parent_names_disagree"));
+    assert.equal(out.edges[0].parent_names_disagree, true);
+    assert.equal(out.edges[0].resolved_to, out.disks.find((d: Json) => d.file === "base.vhd").source_id, "the first name that resolves is used, and said");
+    // QCOW2 on a VHD parent, named as qemu names the format (vpc)
+    await put(cwd, "inputs/hv/top.qcow2", qcow2({ backing: "base.vhd", backingFormat: "vpc" }));
+    out = body(await tool(CHAIN, cwd, { root: "inputs/hv" }));
+    const edge = out.edges.find((e: Json) => e.child === out.disks.find((d: Json) => d.file === "top.qcow2").source_id);
+    assert.equal(edge.format_note, undefined, "vpc is qemu's name for VHD");
+  });
+});
+
+test("qemu-img's error text is withheld by shape before it is cut: no piece of a token in a long path reaches the answer", async () => {
+  await withCwd(async (cwd) => {
+    // qemu-img's message quotes the path: "qemu-img: Could not open '<path>': ..."; the token starts 16 characters before
+    // the 400th character of it, where a cut made before the shape check would end
+    const deep = `inputs/q/${"x".repeat(247)}/${"y".repeat(100)}`;
+    await put(cwd, `${deep}/${CANARY.github}.qcow2`, qcow2({}));
+    const bin = await stubQemu(cwd);
+    const run = await tool(CHAIN, cwd, { root: "inputs/q", qemu_img: "auto" }, { QEMU_STUB_MODE: "fail" }, bin);
+    const out = json(run);
+    const err = out.disks[0].qemu_img.error as string;
+    assert.ok(err.length > 0);
+    for (let k = 4; k + 12 <= CANARY.github.length; k++) assert.equal((run.stdout + run.stderr).includes(CANARY.github.slice(k, k + 12)), false, "a piece of the token was shown");
+  });
+});
+
+test("a long name is withheld by shape before the examined window is cut: a token the 4096-character cut splits is not shown in part", async () => {
+  await withCwd(async (cwd) => {
+    // a long random run first (withheld as one, so that what follows moves forward into the page), then a token that
+    // starts 36 characters before the 4096th character, where the examined window ends (the old window kept 16 of them)
+    const head = "aB3dE5fG7h".repeat(400);
+    const hint = `${head} ${"x".repeat(58)} ${CANARY.github}.vmdk`;
+    assert.equal(hint.indexOf(CANARY.github), 4060);
+    await put(cwd, "inputs/vm/a.vmdk", vmdkDescriptor({ cid: "aabbccdd", parentCid: "11223344", parentHint: hint, extents: [{ sectors: 8, type: "ZERO" }] }));
+    const run = await tool(CHAIN, cwd, { root: "inputs/vm" });
+    const out = body(run);
+    assert.match(out.edges[0].parent_name, /whole text: 4105 characters/);
+    for (let k = 4; k + 12 <= CANARY.github.length; k++) assert.equal(run.stdout.includes(CANARY.github.slice(k, k + 12)), false, "a piece of the token at the cut was shown");
   });
 });

@@ -14,26 +14,31 @@ guessed at):
     VHD           the footer (conectix), the dynamic-disk header (cxsparse) of a dynamic or differencing disk, the
                   parent's unique id, name and locators
     VHDX          the file identifier, the two headers (CRC-32C, sequence number, GUIDs, log GUID), the region table, the
-                  metadata table, the file parameters, the virtual disk id and the parent locator
+                  metadata table, the file parameters, the virtual disk id and the parent locator. A child's parent_linkage
+                  is held against the parent's DataWriteGuid (of its current header), which is what MS-VHDX says it
+                  records; the VirtualDiskId is shown as information
     QCOW2         versions 2 and 3: the header, the backing file name, the header extensions, the feature bits, and the
                   internal snapshot table
 
 What it is and is not. It is a reading of headers and descriptors, not of disk content: no sector of a disk is
 interpreted, no extent is opened but to measure it, and nothing is mounted, converted, repaired or merged. A chain it
-calls complete is a chain whose named parents are present in the set and whose recorded identities agree; it is not a
+calls complete is a chain whose named parents are present in the set and read, whose recorded identities agree, and
+whose extents and data files are in the set; any other chain says which of those failed first. It is not a
 disk that boots, and it says nothing about what the parent held when the child was made (QCOW2 records no identity of its
 backing file at all). A marker is a candidate with the observation beside it; it is not a verdict. The layouts are
 implemented from the format descriptions; they have not been checked against files made by every product or version, and
 a version this tool does not know is reported and not read.
 
-qemu-img is run only when asked (qemu_img: auto or require), once per image with the format fixed and never with
---backing-chain, and its answer is kept beside the native reading and never replaces it. Nothing in the set is
-executed, and a name inside a file is looked up among the files given, never opened: a parent named outside the set is
-reported as missing.
+qemu-img is run only when asked (qemu_img: auto or require), once per image of the set with the format fixed and never
+with --backing-chain, and its answer is kept beside the native reading and never replaces it; a run that fails or times
+out makes the answer partial. A VMDK text descriptor and a QCOW2 image with an external data file are not given to it,
+because qemu-img opens the files those name, nor is an extent another descriptor names. Nothing in the set is executed, and a name inside a file is looked up among
+the files given, never opened by this tool: a parent named outside the set is reported as missing.
 
 SENSITIVE OUTPUT. Names, hints, snapshot names and descriptions are shown after the shape check of the shared block:
 a token-shaped run or user-info is withheld, a long text is shown cut with its whole length, and the original goes to
-one private file only when write_text is asked for, in a job. A VM configuration can hold a password or a token under a
+one private file only when write_text is asked for, in a job. Every key and value of the answer and of its paging files
+passes the one way out (SHARED BOUNDARY), which withholds by shape again and checks what it wrote. A VM configuration can hold a password or a token under a
 key this tool does not read: only the names of the disk files and the snapshot database's names are taken from it.
 """
 import collections
@@ -74,6 +79,7 @@ MAX_CONFIG_ENTRIES_TOTAL = 100000  # snapshot entries (and disk entries) kept ac
 CREATE_TYPES = {"monolithicSparse", "monolithicFlat", "twoGbMaxExtentSparse", "twoGbMaxExtentFlat", "fullDevice", "partitionedDevice", "vmfs", "vmfsSparse",
                 "vmfsEagerZeroedThick", "vmfsThin", "vmfsRaw", "vmfsRawDeviceMap", "vmfsPassthroughRawDeviceMap", "streamOptimized", "seSparse", "custom"}
 KNOWN_DDB = ("ddb.adapterType", "ddb.virtualHWVersion", "ddb.toolsVersion", "ddb.thinProvisioned", "ddb.longContentID", "ddb.uuid")
+VOCABULARY = CREATE_TYPES   # words the way out shows as they are (see SHARED BOUNDARY)
 WITHHELD_CONFIG_NOTE = "other keys of a .vmx are not read: they can hold a password or a token"
 
 # BEGIN SHARED WITHHOLDING
@@ -245,15 +251,14 @@ def in_job():
 
 
 def describe(exc):
+    """An exception as text for an answer: its type and errno name, and its message withheld by shape, never cut."""
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def fail(message, **extra):
-    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, nothing identifier-shaped."""
-    safe = {k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}
-    print(json.dumps({"error": scrub(message), "tool": TOOL, "status": "failed",
-                      "status_basis": "the tool stopped with an error (see error)", **safe}))
+    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, through the one way out."""
+    print(answer_text({"error": message, "tool": TOOL, "status": "failed", "status_basis": "the tool stopped with an error (see error)", **extra}))
     raise SystemExit(1)
 
 
@@ -264,7 +269,7 @@ def read_args():
             fail("arguments are larger than 8 MiB: pass a list of files, not their contents")
         args = json.loads(raw.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError) as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
+        fail("arguments are not valid JSON", reason=describe(exc))
     if not isinstance(args, dict):
         fail("arguments must be a JSON object")
     return args
@@ -361,7 +366,9 @@ def decode(data):
 
 # Lossless paging: the page an agent reads stays small, and when there are more rows the whole result is written as JSON
 # Lines under work/<agent>/tool-output (in a job, $OUT/tool-output) and named. The file name is random: it is never a
-# digest of anything asked for. A write that fails is an error answer naming the file, never a loss that goes unsaid.
+# digest of anything asked for (sixteen decimal digits, a shape the withholding rules leave alone). Every row is sealed
+# (the one way out, below) as it is written. A write that fails is an error answer naming the file, never a loss that
+# goes unsaid.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -373,7 +380,7 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        name = "%s-%s-%s.jsonl" % (self.tool, self.key, secrets.token_hex(8))
+        name = "%s-%s-%016d.jsonl" % (self.tool, self.key, secrets.randbelow(10 ** 16))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             self.path = Path(out) / "tool-output" / name
@@ -384,8 +391,9 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
+        line = row_text(row, "pages/%s/all_results" % self.key)
         try:
-            self._out.write(json.dumps(row, default=str))
+            self._out.write(line)
             self._out.write("\n")
         except OSError as exc:
             fail("the whole result could not be written: %s" % describe(exc), paging_file=str(self.path))
@@ -494,18 +502,37 @@ class Shown(str):
 
 
 # An open-ended authority or name:secret run at the point where a long text was cut might have its user-info separator beyond
-# the cut: it is withheld whole.
+# the cut, and a run of name characters the cut ends might be the head of a token: each is withheld whole.
 _OPEN_AUTHORITY = re.compile(r"(?<=//)[^/?#\s]*$")
-_OPEN_BARE = re.compile(r"(?<![\w.%+:/-])[\w.%+-]{1,64}:[^\s/@:]*$")
+_OPEN_BARE = re.compile(r"[^\s/@:<>]{1,64}:[^\s/@<>]*$")
+_OPEN_RUN = re.compile(r"[A-Za-z0-9_+%/=.:@-]+$")
+
+
+def cut_safely(text, limit):
+    """`text` cut to at most `limit` characters (plus a marker), never leaving the head of a run the cut split: a text
+    is withheld by shape BEFORE it is cut, and what the cut leaves open is withheld whole, not shown in part."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if _OPEN_RUN.match(text, limit):          # the cut fell inside a run
+        head = _OPEN_RUN.sub(lambda m: _withheld("open run at a cut", len(m.group()), "cut"), head)
+    head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+    return _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+
+
+def brief(text, limit=300):
+    """A message from a library or a program, withheld by shape whole and then cut safely: never cut first."""
+    return cut_safely(scrub(text if isinstance(text, str) else str(text)), limit)
 
 
 class Shower:
     """Every string the answer shows a name, a path or a value of passes through here: token-shaped runs and user-info are
     withheld, a text over `limit` characters is shown cut with its whole length, and the original of what was changed goes
     to the values file when one was asked for (never anywhere else). Only the first EXAMINED characters of a long text are
-    checked (the check is not linear in the length of an adversary's text); the last 20 of them are dropped so that no
-    fragment of a token the cut split can be shown, and a run that is still open at the cut and might be user-info is
-    withheld whole."""
+    checked (the check is not linear in the length of an adversary's text): a run of name characters, an authority or a
+    name:secret run that the EXAMINED cut leaves open is withheld whole before the shape check, so that no fragment of a
+    token the cut split can be shown; the check runs on the whole examined text, and the shorter cut to `limit` comes
+    after it and leaves no run open either."""
 
     EXAMINED = 4096
 
@@ -523,13 +550,11 @@ class Shower:
         total = len(text)
         head = text
         if total > self.EXAMINED:
-            head = text[:self.EXAMINED - 20]
-            head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-            head = _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-        shown = scrub(head)
+            head = cut_safely(text, self.EXAMINED)
+        shown = seal_text(head, "text")
         was_cut = total > self.EXAMINED
         if len(shown) > self.limit:
-            shown = shown[:self.limit]
+            shown = cut_safely(shown, self.limit)
             was_cut = True
         if was_cut:
             shown += "...(whole text: %d characters)" % total
@@ -547,6 +572,179 @@ def withheld_summary(shower):
                      "are withheld, and a string over %d characters is shown cut with its whole length. A secret that does not look "
                      "like a token (a short password in a name) is not recognised, so run the tool as a job with secret_output: true.") % shower.limit}
 # END SHARED COMMON
+# BEGIN SHARED BOUNDARY
+# The same text is in virtualization_inventory, snapshot_chain_check and backup_audit_normalise; tests/pack-virtualization-
+# shared.test.ts holds the copies equal. The one way out. Every key and every value of an answer, of an error answer and of
+# every row a paging file holds is sealed when it is serialised, whatever code made it: the whole string is withheld by
+# shape (the rules of the shared withholding block, plus the shapes below that block does not catch) before anything cuts
+# or folds it, and the rules are applied until they change nothing more. A GUID that stands alone is shown as it is: it
+# is an identifier the formats carry, and the shape check would take it for a token. Then the serialised text is read back
+# and checked with the same rules: a string they would still change is replaced by <withheld: N bytes> and the answer is
+# partial and says how many. That check is a backstop: it fires only when a string bypassed the seal.
+#
+# The shapes added here: user-info after `:` or `/` (a Proxmox storage:user:password@host, a path with user:password@host
+# in it), which the shared block's lookbehind leaves alone; a base64 key with its padding that holds `/` or `+` (a 16-byte
+# key is 24 characters, under the shared block's 30-character slashed rule); and the head of a prefixed token (AKIA..., ghp_...,
+# github_pat_..., xoxb-..., eyJ...) too short for the shared rule, as a cut or a damaged file can leave it; and a base64 run
+# with a `/` in it whose letters change case as random text does (an AWS-style secret key with one `/`, which the shared
+# block's three-piece rule misses). A word of the tool's own closed vocabulary (VOCABULARY, set by each tool: VMDK create
+# types) is shown as it is, as a GUID is.
+BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
+_GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@)")
+_SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
+_BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
+_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")
+# A string none of whose rules can match is passed without the slow path: every rule needs one of these.
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s")
+# The tool's own file names, made from the job's or agent's id and random digits: shown as they are.
+_OWN_PATH = re.compile(r"(?:work/[A-Za-z0-9_.-]{1,64}|store/jobs/[A-Za-z0-9_.-]{1,64}/out)/(?:tool-output/[a-z_]{1,40}-[a-z_]{1,40}-[0-9]{16}\.jsonl|[a-z]{1,20}-values\.jsonl)")
+_SEALED = {}
+
+
+def _random_slashed(run):
+    """A base64 run holding `/`: random when its letters change case as random text does, or digits sit among them."""
+    if "/" not in run:
+        return False
+    flat = run.replace("/", "").rstrip("=")
+    letters = [c for c in flat if c.isalpha()]
+    if not (any(c.isdigit() for c in flat) and any(c.islower() for c in letters) and any(c.isupper() for c in letters)):
+        return False
+    flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
+    packed = len(re.findall(r"(?<=[A-Za-z])[0-9]{1,3}(?=[A-Za-z])", flat))
+    return len(letters) >= 16 and (flips >= 0.33 * len(letters) or (packed and flips >= 0.25 * len(letters))) or _token_run(flat)
+
+
+def _rules_once(text, kind="boundary"):
+    """One application of every withholding rule to a whole string; a GUID standing alone and a word of VOCABULARY are kept."""
+    if not _QUICK.search(text) or _OWN_PATH.fullmatch(text) or text in VOCABULARY:
+        return text
+    out, last = [], 0
+    for m in _GUID_ALONE.finditer(text):
+        out.append(_rules_piece(text[last:m.start()], kind))
+        out.append(m.group())
+        last = m.end()
+    out.append(_rules_piece(text[last:], kind))
+    if kind == "boundary":
+        COUNTS.pop("boundary", None)
+    return "".join(out)
+
+
+def _rules_piece(piece, kind):
+    if not piece or not _QUICK.search(piece):
+        return piece
+    if not piece.startswith("UPID:"):          # a Proxmox task id is fields joined by `:` ending in user@realm, not user-info
+        piece = _ANY_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), piece)
+    piece = _SLASHED_RANDOM.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if _random_slashed(m.group()) else m.group(), piece)
+    piece = _BASE64_KEY.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if re.search(r"[/+]", m.group()) else m.group(), piece)
+    piece = scrub(piece, kind)
+    return _TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind), piece)
+
+
+def seal_text(text, kind="boundary"):
+    """The rules applied to a whole string until they change nothing (a string that keeps changing is withheld whole), so
+    that the backstop's one application finds nothing to change. The Shower uses this too, so that what it shows and what
+    the way out lets through are judged by the same rules."""
+    if not isinstance(text, str):
+        text = str(text)
+    hit = _SEALED.get(text)
+    if hit is None:
+        hit = text
+        for _ in range(6):
+            before, hit = hit, _rules_once(hit, kind)
+            if hit == before:
+                break
+        else:
+            hit = "<withheld: %d bytes>" % blen(text)
+        if len(text) <= 2048:
+            if len(_SEALED) >= 50000:
+                _SEALED.clear()
+            _SEALED[text] = hit
+    return hit
+
+
+def boundary_text(text):
+    """The seal of one string at the way out, counted when it changed something."""
+    hit = seal_text(text)
+    if hit != text:
+        BOUNDARY["withheld"] += 1
+    return hit
+
+
+def seal(value, depth=0):
+    """Every key and every value of a structure, as JSON will write it, through boundary_text; a key two keys seal to is
+    numbered (`<key> #2`), never merged."""
+    if isinstance(value, str):
+        return boundary_text(value)
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else boundary_text(repr(value))
+    if depth > 64:
+        return boundary_text(json.dumps(value, default=str))
+    if isinstance(value, dict):
+        out, taken = {}, {}
+        for k, v in value.items():
+            key = boundary_text(k if isinstance(k, str) else json.dumps(k) if isinstance(k, (bool, type(None))) else str(k))
+            if key in out:
+                n = taken.get(key, 1) + 1
+                while "%s #%d" % (key, n) in out:
+                    n += 1
+                taken[key] = n
+                key = "%s #%d" % (key, n)
+            out[key] = seal(v, depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [seal(v, depth + 1) for v in value]
+    return boundary_text(str(value))
+
+
+def backstop(value, where=""):
+    """The serialised answer read back and checked with the same rules: a string they would still change (a key or a
+    value) is replaced by <withheld: N bytes>, counted, and its place named."""
+    if isinstance(value, str):
+        if _rules_once(value) == value:
+            return value
+        BOUNDARY["replaced"] += 1
+        if len(BOUNDARY["where"]) < 20:
+            BOUNDARY["where"].append(where or "/")
+        return "<withheld: %d bytes>" % blen(value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = backstop(k, where + "/(key)")
+            while key in out:
+                key += " #"
+            out[key] = backstop(v, where + "/" + key)
+        return out
+    if isinstance(value, list):
+        return [backstop(v, "%s/%d" % (where, i)) for i, v in enumerate(value)]
+    return value
+
+
+def row_text(row, where):
+    """One row of a paging file: sealed, serialised, read back and checked."""
+    text = json.dumps(seal(row))
+    before = BOUNDARY["replaced"]
+    checked = backstop(json.loads(text), where)
+    return text if BOUNDARY["replaced"] == before else json.dumps(checked)
+
+
+def answer_text(doc):
+    """The answer (or an error answer): sealed, serialised, read back and checked; a string the check had to replace,
+    here or in a paging file, makes a complete answer partial, and the answer says so."""
+    text = json.dumps(seal(doc), indent=2)
+    checked = backstop(json.loads(text), "")
+    checked["boundary"] = {"strings_withheld_at_the_way_out": BOUNDARY["withheld"], "strings_replaced_by_the_check": BOUNDARY["replaced"],
+                           "replaced_at": list(BOUNDARY["where"]),
+                           "note": "every key and value of this answer and of its paging files was withheld by shape as it was written, then read back "
+                                   "and checked with the same rules; a string the check replaced is <withheld: N bytes>"}
+    if BOUNDARY["replaced"] and checked.get("status") == "complete":
+        checked["status"] = "partial"
+        checked["status_basis"] = "%s; %d string(s) still held a token-shaped text when the answer was checked on its way out and were replaced by <withheld: N bytes> (see boundary)" % (
+            checked.get("status_basis") or "", BOUNDARY["replaced"])
+    return json.dumps(checked, indent=2)
+# END SHARED BOUNDARY
 # BEGIN SHARED FILES
 # The same text is in virtualization_inventory and snapshot_chain_check; tests/pack-virtualization-shared.test.ts holds the
 # copies equal. The evidence is a set of files: a directory walked without following a link, and/or files named one by one.
@@ -705,6 +903,18 @@ class Index:
         if len(hits) > 1:
             return None, "ambiguous_basename"
         return None, "not_in_set"
+
+
+EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}")
+
+
+def ext_of(rel):
+    """The extension a file is counted under: a short one of letters and digits as it is (lower case), none as (none),
+    and any other under one bucket that shows nothing of it (a file name can carry a token after its last dot)."""
+    ext = posixpath.splitext(posixpath.basename(rel))[1]
+    if not ext:
+        return "(none)"
+    return ext.lower() if EXTENSION.fullmatch(ext) else "(other extensions)"
 # END SHARED FILES
 # BEGIN SHARED PROCESS
 # The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
@@ -891,7 +1101,14 @@ def crc32c(data):
 
 EXTENT = re.compile(r'^(RW|RDONLY|NOACCESS)\s+(\d+)\s+([A-Za-z0-9_]+)(?:\s+"((?:[^"\\]|\\.)*)")?(?:\s+(\d+))?\s*(?:#.*)?$')
 DESC_KV = re.compile(r'^([A-Za-z][A-Za-z0-9_.]*)\s*=\s*(.*)$')
-HEX8 = re.compile(r"^[0-9a-fA-F]{8}$")
+CID_HEX = re.compile(r"^[0-9a-fA-F]{1,8}$")      # a 32-bit value in hexadecimal; qemu-img writes it without leading zeros
+KNOWN_EXTENT_TYPES = {"FLAT", "SPARSE", "ZERO", "VMFS", "VMFSSPARSE", "VMFSRDM", "VMFSRAW", "VMFSPASSTHRU", "SESPARSE"}
+NOT_A_FILE_EXTENT = ("ZERO", "VMFSRDM", "VMFSRAW", "VMFSPASSTHRU")
+
+
+def cid_value(text):
+    """A CID as eight lowercase hexadecimal digits, compared as the number it is; None when it is not one."""
+    return "%08x" % int(text, 16) if text and CID_HEX.match(text) else None
 
 
 def unquote(value):
@@ -915,7 +1132,8 @@ def parse_descriptor(text):
         if m:
             d["extents_total"] += 1
             if len(d["extents"]) < MAX_EXTENTS:
-                d["extents"].append({"access": m.group(1), "sectors": int(m.group(2)), "type": m.group(3).upper(),
+                # the type is compared in upper case and shown as written: folding it first would hide a token's shape
+                d["extents"].append({"access": m.group(1), "sectors": int(m.group(2)), "type": m.group(3).upper(), "type_raw": m.group(3),
                                      "name": m.group(4), "offset": int(m.group(5)) if m.group(5) else None, "line": number})
             continue
         m = DESC_KV.match(line)
@@ -939,17 +1157,20 @@ def descriptor_node(d, source, shown, fid):
     f = d["fields"]
     cid, pcid = f.get("cid"), f.get("parentcid")
     node = {"format": "vmdk", "version": shown(f.get("version"), fid, "version"), "create_type": f.get("createtype") if f.get("createtype") in CREATE_TYPES else shown(f.get("createtype"), fid, "createType"), "encoding": shown(f.get("encoding"), fid, "encoding"),
-            "cid": cid.lower() if cid and HEX8.match(cid) else None, "cid_raw": shown(cid, fid, "CID"),
-            "parent_cid": pcid.lower() if pcid and HEX8.match(pcid) else None, "parent_cid_raw": shown(pcid, fid, "parentCID"),
-            "has_parent": bool(pcid and HEX8.match(pcid) and pcid.lower() != "ffffffff"),
+            "cid": cid_value(cid), "cid_raw": shown(cid, fid, "CID"),
+            "parent_cid": cid_value(pcid), "parent_cid_raw": shown(pcid, fid, "parentCID"),
+            "cid_note": "a CID is a 32-bit number written in hexadecimal (qemu-img writes it without leading zeros); it is shown as eight digits and compared as a number",
+            "has_parent": cid_value(pcid) not in (None, "ffffffff"),
             "parent_hint": shown(f.get("parentfilenamehint"), fid, "parentFileNameHint"), "native_snapshot": shown(f.get("isnativesnapshot"), fid, "isNativeSnapshot"),
             "extents_total": d["extents_total"], "capacity_sectors_by_extents": sum(e["sectors"] for e in d["extents"]) if d["extents_total"] == len(d["extents"]) else None, "ddb": {k: shown(v, fid, k) for k, v in d["ddb"].items()}, "ddb_other_keys": d["ddb_other"], "descriptor_source": source}
-    if cid and not HEX8.match(cid):
-        node["problem"] = "CID is not 8 hexadecimal digits"
-    if pcid and not HEX8.match(pcid):
-        node["problem"] = "parentCID is not 8 hexadecimal digits"
+    if cid and not CID_HEX.match(cid):
+        node["problem"] = "CID is not 1 to 8 hexadecimal digits"
+    if pcid and not CID_HEX.match(pcid):
+        node["problem"] = "parentCID is not 1 to 8 hexadecimal digits"
     if node["has_parent"] and not node["parent_hint"]:
         node["problem"] = "a parentCID is recorded and no parentFileNameHint names the parent"
+    if not node["has_parent"] and f.get("parentfilenamehint"):
+        node["parent_hint_not_followed"] = "a parentFileNameHint is written and parentCID records no parent (ffffffff or none): the hint is not followed and no parent is looked for"
     return node
 
 
@@ -1133,7 +1354,14 @@ def parse_vhdx(fh, size, head):
         if len(e) < 32:
             break
         items[guid_text(e[:16])] = struct.unpack("<II", e[16:24])
-    vx = {"identity": None, "hints": [], "parent_identity": None, "parent_identity_2": None}
+    # MS-VHDX: a child's parent_linkage (and parent_linkage2) holds the DataWriteGuid of the parent's header, which the
+    # parent changes the first time it is written after it was opened; the VirtualDiskId stays the same through every
+    # write and is kept here as information only. So the identity a child is held against is the DataWriteGuid of the
+    # parent's current header (the valid one with the higher sequence number).
+    vx = {"identity": current["data_write_guid"], "identity_field": "DataWriteGuid of the current header", "hints": [], "parent_identity": None, "parent_identity_2": None}
+    info["linkage_identity"] = current["data_write_guid"]
+    info["linkage_identity_note"] = ("a child's parent_linkage is compared with this disk's DataWriteGuid (MS-VHDX); the VirtualDiskId is information "
+                                     "and is not what a child records")
     if G_FILE_PARAMS in items:
         off, length = items[G_FILE_PARAMS]
         raw = read_at(fh, meta_off + off, 8) if length >= 8 else b""
@@ -1151,7 +1379,7 @@ def parse_vhdx(fh, size, head):
         off, length = items[G_DISK_ID]
         raw = read_at(fh, meta_off + off, 16) if length >= 16 else b""
         if len(raw) == 16:
-            vx["identity"] = info["virtual_disk_id"] = guid_text(raw)
+            info["virtual_disk_id"] = guid_text(raw)
     if G_PARENT_LOCATOR in items:
         off, length = items[G_PARENT_LOCATOR]
         raw = read_at(fh, meta_off + off, min(length, 1 << 20))
@@ -1290,7 +1518,13 @@ def parse_qcow2(fh, size, head, snapshot_sink, max_snapshots, clock):
             if snaps["read"] < nsnap and not snaps["stopped"]:
                 snaps["stopped"] = "max_snapshots (%d) was reached" % max_snapshots
     info["internal_snapshots"] = snaps
-    return {"state": "parsed", "info": info, "markers": markers, "qcow2": {"hints": hints, "backing_format": backing_format}}
+    data_file = {"named": ext_data, "feature_bit": bool(version == 3 and "external_data_file" in info.get("incompatible_feature_names", []))}
+    out = {"state": "parsed", "info": info, "markers": markers, "qcow2": {"hints": hints, "backing_format": backing_format, "data_file": data_file}}
+    if snaps["read"] < nsnap:
+        # the table declares more snapshots than were read: the image is not read whole, whatever stopped the read
+        out["state"] = "partial"
+        out["reason"] = "the header declares %d internal snapshot(s) and %d were read: %s" % (nsnap, snaps["read"], snaps["stopped"])
+    return out
 
 
 # ---- VMX and VMSD ----------------------------------------------------------------------------------------------------
@@ -1398,15 +1632,14 @@ def classify(rec, fh, size):
     return "other", head
 
 
-def ext_of(rel):
-    base = posixpath.basename(rel)
-    return posixpath.splitext(base)[1].lower() or "(none)"
-
-
 # ---- the run ---------------------------------------------------------------------------------------------------------
 
 def qemu_format(kind):
     return {"vmdk": "vmdk", "vhd": "vpc", "vhdx": "vhdx", "qcow2": "qcow2"}.get(kind)
+
+
+# qemu's names for formats, as a QCOW2 backing-format extension writes them, against this tool's
+QEMU_FORMAT_NAMES = {"vpc": "vhd", "vmdk": "vmdk", "vhdx": "vhdx", "qcow2": "qcow2", "raw": "raw", "file": "raw", "host_device": "raw"}
 
 
 def run_qemu(path, kind, seconds):
@@ -1416,11 +1649,11 @@ def run_qemu(path, kind, seconds):
     result = {"command_format": fmt, "exit_code": code, "timed_out": timed_out}
     if code is None and not timed_out:
         result["available"] = False
-        result["error"] = scrub(err.decode("utf-8", "replace")[:300])
+        result["error"] = brief(err.decode("utf-8", "replace"), 300)
         return result
     result["available"] = True
     if timed_out or code != 0:
-        result["error"] = scrub(err.decode("utf-8", "replace")[:400])
+        result["error"] = brief(err.decode("utf-8", "replace"), 400) or ("timed out" if timed_out else "exit code %s, nothing on stderr" % code)
         return result
     try:
         data = json.loads(out[:1 << 20].decode("utf-8", "replace"))
@@ -1430,6 +1663,17 @@ def run_qemu(path, kind, seconds):
     except (ValueError, AttributeError):
         result["error"] = "qemu-img printed output that is not JSON"
     return result
+
+
+CHAIN_ORDER = ("cycle", "too_deep", "broken", "parent_unreadable", "identity_not_compared", "identity_mismatch", "extent_missing", "data_file_missing")
+CHAIN_DETAIL = {
+    "broken": "the parent %s names is not in the set",
+    "parent_unreadable": "the parent of %s is in the set and could not be read as a disk (failed, unsupported, a bare extent or another kind of file): its identity was not compared",
+    "identity_not_compared": "the identity of %s's parent could not be compared: one side records none, a value that is not one, or the parent is a disk of another format",
+    "identity_mismatch": "the identity %s records for its parent is not the identity the parent file carries",
+    "extent_missing": "an extent %s's descriptor needs is missing from the set or shorter than the descriptor says",
+    "data_file_missing": "the external data file %s's header names is not in the set",
+}
 
 
 def main():
@@ -1471,14 +1715,19 @@ def main():
     pages = {k: LosslessPage(TOOL, k, limit) for k in ("sources", "disks", "edges", "chains", "extents", "snapshot_database", "internal_snapshots", "markers")}
     nodes, vmx_list, vmsd_list = {}, [], []
     kinds = collections.Counter()
+    kind_of = {}
     other_ext = collections.Counter()
     state_counts = collections.Counter()
     problems = []                      # files recognised and not read
     config_total = {"disks": 0, "snapshots": 0, "dropped": 0}
 
     def marker(kind, ids, observation, reading, corroborate=None, **extra):
-        pages["markers"].add({"kind": kind, "source_ids": ids, "observation": observation, "reading": reading,
-                              "corroborate": corroborate or "the VM's own records of the operation (task or event log), the file times and a second copy", **extra})
+        """A marker row: every text in it is shown through the shape check, whatever was put into it."""
+        row = {"kind": kind, "source_ids": ids, "observation": shown(observation, "marker", kind), "reading": shown(reading, "marker", kind),
+               "corroborate": shown(corroborate or "the VM's own records of the operation (task or event log), the file times and a second copy", "marker", kind)}
+        for key, value in extra.items():
+            row[key] = shown(value, "marker", key) if isinstance(value, str) else value
+        pages["markers"].add(row)
 
     def snapshot_sink_for(fid):
         def sink(row):
@@ -1489,7 +1738,8 @@ def main():
             pages["internal_snapshots"].add(row)
         return sink
 
-    disks, extent_targets = {}, {}
+    disks, extent_targets, extents_over = {}, {}, []
+    node_issue = collections.defaultdict(dict)     # disk id -> {issue kind: the disk it is about}
 
     def build_disk(fid, res):
         rec = res["rec"]
@@ -1516,16 +1766,19 @@ def main():
             if node.get("problem"):
                 marker("descriptor_problem", [fid], node["problem"], "the descriptor is inconsistent as written; the chain through it is not read further than it says")
             for i, ext in enumerate(desc["extents"]):
+                clock.check(256)
                 target, how = (None, "no_name")
-                if ext["name"] is not None and ext["type"] not in ("ZERO", "VMFSRDM", "VMFSRAW", "VMFSPASSTHRU"):
+                if ext["name"] is not None and ext["type"] not in NOT_A_FILE_EXTENT:
                     target, how = index.resolve(rec["rel"], ext["name"].replace('\\"', '"'))
-                erow = {"descriptor_id": fid, "index": i, "line": ext["line"], "access": ext["access"], "sectors": ext["sectors"], "type": shown(ext["type"], fid, "extent type"),
+                erow = {"descriptor_id": fid, "index": i, "line": ext["line"], "access": ext["access"], "sectors": ext["sectors"],
+                        "type": ext["type"] if ext["type"] in KNOWN_EXTENT_TYPES else shown(ext["type_raw"], fid, "extent type"),
                         "file": shown(ext["name"], fid, "extent file name") if ext["name"] is not None else None, "offset_sectors": ext["offset"],
                         "found": target["id"] if target else None, "resolution": how}
-                if ext["name"] is None or ext["type"] in ("ZERO", "VMFSRDM", "VMFSRAW", "VMFSPASSTHRU"):
+                if ext["name"] is None or ext["type"] in NOT_A_FILE_EXTENT:
                     erow["state"] = "not_a_file_extent"
                 elif target is None:
                     erow["state"] = "missing"
+                    node_issue[fid].setdefault("extent_missing", fid)
                     marker("extent_missing", [fid], "extent %d of the descriptor names a file that is not in the set (%s)" % (i, how),
                            "the disk cannot be read whole from this set; whether the file existed is not shown", line=ext["line"])
                 else:
@@ -1537,12 +1790,16 @@ def main():
                         erow["actual_size"] = target["size"]
                         erow["state"] = "short" if target["size"] < expected else "present"
                         if erow["state"] == "short":
+                            node_issue[fid].setdefault("extent_missing", fid)
                             marker("extent_short", [fid, target["id"]], "extent %d is %d bytes and the descriptor needs at least %d" % (i, target["size"], expected),
                                    "the extent file is smaller than the descriptor says: truncated, partly copied or rewritten", line=ext["line"])
                     else:
                         erow["state"] = "present"
                         erow["size_check"] = "not made: a sparse extent has no size to compare"
                 pages["extents"].add(erow)
+            if desc["extents_total"] > len(desc["extents"]):
+                node_issue[fid].setdefault("extent_missing", fid)
+                extents_over.append(fid)
         elif kind == "vhd":
             v = res.get("vhd")
             if v:
@@ -1556,6 +1813,16 @@ def main():
             v = res.get("qcow2")
             if v:
                 d.update(format="qcow2", has_identity=False, hints=v["hints"], has_parent=bool(v["hints"]), detail=res["row"]["info"], backing_format=v.get("backing_format"))
+                data_file = v.get("data_file") or {}
+                d["external_data_file"] = bool(data_file.get("named") or data_file.get("feature_bit"))
+                if data_file.get("named"):
+                    target, how = index.resolve(rec["rel"], data_file["named"])
+                    d["detail"]["external_data_file_found"] = target["id"] if target else None
+                    d["detail"]["external_data_file_resolution"] = how
+                    if target is None:
+                        node_issue[fid].setdefault("data_file_missing", fid)
+                        marker("external_data_file_missing", [fid], "the header names an external data file that is not in the set (%s)" % how,
+                               "the guest data of this image lives in that file; without it the image cannot be read whole from this set")
         disks[fid] = d
 
     examined = 0
@@ -1565,12 +1832,14 @@ def main():
             fh, why = open_regular(rec["path"])
             if fh is None:
                 files.note("unreadable", rec["rel"] + ": " + (why or ""))
+                kind_of[rec["id"]] = "unreadable"
                 continue
             with fh:
                 kind, head = classify(rec, fh, rec["size"])
                 kinds[kind] += 1
+                kind_of[rec["id"]] = kind
                 if kind == "other":
-                    ext = ext_of(rec["rel"])[:32]
+                    ext = ext_of(rec["rel"])
                     other_ext[ext if (ext in other_ext or len(other_ext) < 2000) else "(other extensions)"] += 1
                     continue
                 examined += 1
@@ -1595,7 +1864,8 @@ def main():
                         res = parse_qcow2(fh, rec["size"], head, snapshot_sink_for(rec["id"]), max_snapshots, clock)
                     elif kind in ("vmx", "vmsd"):
                         if rec["size"] > MAX_CONFIG_BYTES:
-                            res = {"state": "failed", "reason": "a configuration file over %d bytes is named and not read" % MAX_CONFIG_BYTES, "info": {"format": kind}}
+                            res = {"state": "failed", "reason": "a configuration file over %d bytes is named and not read" % MAX_CONFIG_BYTES, "info": {"format": kind},
+                                   "vmx": {"disks": [], "problems": []}, "vmsd": {"entries": [], "over": 0, "top": {}, "problems": []}}
                         else:
                             fh.seek(0)
                             res = parse_vmx(fh, rec["size"]) if kind == "vmx" else parse_vmsd(fh, rec["size"])
@@ -1623,13 +1893,15 @@ def main():
             res["rec"] = rec
             pages["sources"].add(row)
             if kind == "vmx":
-                config_total["disks"] += len(res.get("vmx", {}).get("disks", ()))
+                res.setdefault("vmx", {"disks": [], "problems": []})
+                config_total["disks"] += len(res["vmx"]["disks"])
                 if config_total["disks"] > MAX_CONFIG_ENTRIES_TOTAL:
                     res["vmx"]["disks"] = []
                     config_total["dropped"] += 1
                 vmx_list.append(res)
             elif kind == "vmsd":
-                config_total["snapshots"] += len(res.get("vmsd", {}).get("entries", ()))
+                res.setdefault("vmsd", {"entries": [], "over": 0, "top": {}, "problems": []})
+                config_total["snapshots"] += len(res["vmsd"]["entries"])
                 if config_total["snapshots"] > MAX_CONFIG_ENTRIES_TOTAL:
                     res["vmsd"]["entries"] = []
                     config_total["dropped"] += 1
@@ -1641,223 +1913,319 @@ def main():
     except Overtime:
         partial.append("the examination stopped at max_seconds (%s): the files after %s were not read" % (seconds, "the last one listed in sources"))
 
-    # ---- edges ---------------------------------------------------------------------------------------------------
     parent_of, edge_of = {}, {}
-    for fid, d in disks.items():
-        if d.get("role") == "extent_only" or not d.get("format"):
-            continue
-        if not d.get("has_parent") and not d["hints"]:
-            continue
-        target, how = None, "no_name"
-        for h in d["hints"]:
-            target, how = index.resolve(d["rel"], h)
-            if target:
-                break
-        edge = {"child": fid, "parent_name": shown(d["hints"][0], fid, "parent name") if d["hints"] else None, "names_tried": len(d["hints"]),
-                "resolved_to": target["id"] if target else None, "resolution": how, "id_check": "not_available", "format": d["format"]}
-        pdisk = disks.get(target["id"]) if target else None
-        if target and pdisk is None:
-            edge["parent_state"] = "the file is in the set and is not a disk this tool reads"
-            edge["id_check"] = "not_available"
-        elif pdisk:
-            edge["parent_state"] = pdisk["state"]
-            if d["format"] in ("vmdk", "vhd", "vhdx"):
-                want, have = d.get("parent_id"), pdisk.get("own_id")
-                if pdisk.get("format") and pdisk["format"] != d["format"]:
-                    edge["id_check"] = "not_available"
-                    edge["format_note"] = "the parent is a %s file and the child a %s file" % (pdisk["format"], d["format"])
-                elif want and have:
-                    if want.upper() == have.upper():
-                        edge["id_check"] = "match"
-                    elif d["format"] == "vhdx" and d.get("parent_id_2") and d["parent_id_2"].upper() == have.upper():
-                        edge["id_check"] = "match_via_parent_linkage2"
+    depth, base, state_of, first_issue, cycle_of = {}, {}, {}, {}, {}
+    chain_summary = collections.Counter()
+    phase = "the parent edges"
+    try:
+        # ---- edges: one per disk that records a parent ----------------------------------------------------------------
+        for fid, d in disks.items():
+            clock.check(256)
+            if d.get("role") == "extent_only" or not d.get("format") or not d.get("has_parent"):
+                continue
+            target, how, resolved = None, "no_name", []
+            for h in d["hints"]:
+                t, w = index.resolve(d["rel"], h)
+                resolved.append((t, w))
+                if target is None and t:
+                    target, how = t, w
+            if target is None and resolved:
+                how = resolved[0][1]
+            edge = {"child": fid, "parent_name": shown(d["hints"][0], fid, "parent name") if d["hints"] else None, "names_tried": len(d["hints"]),
+                    "resolved_to": target["id"] if target else None, "resolution": how, "id_check": "not_available", "format": d["format"]}
+            if d["format"] in ("vhd", "vhdx") and len(d["hints"]) > 1:
+                found = sorted({t["id"] for t, _w in resolved if t})
+                names = {posixpath.basename(h.replace("\\", "/")).casefold() for h in d["hints"]}
+                if len(found) > 1 or len(names) > 1:
+                    edge["parent_names_disagree"] = True
+                    marker("parent_names_disagree", [fid] + found, "the %d parent names the child records (the header's name and its locators) do not name one file: %d different file name(s), %d file(s) of the set" % (len(d["hints"]), len(names), len(found)),
+                           "the locators were written at different times or edited; which of them the hypervisor would follow is not decided here (the first name that resolves is used)")
+            pkind = kind_of.get(target["id"]) if target else None
+            pdisk = disks.get(target["id"]) if target else None
+            if target is None:
+                edge["parent_state"] = "not in the set"
+                node_issue[fid].setdefault("broken", fid)
+            elif pdisk is None or pdisk.get("role") == "extent_only" or not pdisk.get("format") or pdisk["state"] in ("failed", "unsupported"):
+                bf = QEMU_FORMAT_NAMES.get((d.get("backing_format") or "").lower(), None) if d.get("backing_format") else None
+                raw_base = d["format"] == "qcow2" and pkind == "other" and (d.get("backing_format") is None or bf == "raw")
+                if raw_base:
+                    edge["parent_state"] = "raw or unread"
+                    edge["parent_note"] = "the backing file is in the set and is raw or of a kind this tool does not read: present, not examined (a raw base records no identity, and QCOW2 records none of its backing file)"
+                else:
+                    edge["parent_state"] = ("a sparse extent without a descriptor of its own" if pdisk is not None and pdisk.get("role") == "extent_only" else
+                                            "the file is in the set and is not a disk this tool reads" if pdisk is None and pkind in ("other", "vmx", "vmsd", "lock_file") else
+                                            "the file is in the set and could not be opened" if pdisk is None and pkind == "unreadable" else
+                                            "the file is in the set and was not read (the examination stopped before it)" if pdisk is None else pdisk["state"])
+                    if d.get("backing_format") and pkind == "other":
+                        edge["format_note"] = "the child says the backing file is %s and the file found is not one this tool reads" % shown(d["backing_format"], fid, "backing format")
+                    node_issue[fid].setdefault("parent_unreadable", fid)
+            else:
+                edge["parent_state"] = pdisk["state"]
+                if d["format"] in ("vmdk", "vhd", "vhdx"):
+                    want, have = d.get("parent_id"), pdisk.get("own_id")
+                    if pdisk["format"] != d["format"]:
+                        edge["id_check"] = "not_available"
+                        edge["format_note"] = "the parent is a %s file and the child a %s file" % (pdisk["format"], d["format"])
+                        node_issue[fid].setdefault("identity_not_compared", fid)
+                    elif want and have:
+                        if d["format"] == "vhdx":
+                            edge["compared"] = "the child's parent_linkage with the parent's DataWriteGuid (MS-VHDX)"
+                        if want.upper() == have.upper():
+                            edge["id_check"] = "match"
+                        elif d["format"] == "vhdx" and d.get("parent_id_2") and d["parent_id_2"].upper() == have.upper():
+                            edge["id_check"] = "match_via_parent_linkage2"
+                        else:
+                            edge["id_check"] = "mismatch"
+                            edge["recorded_by_child"] = want
+                            edge["carried_by_parent"] = have
+                            node_issue[fid].setdefault("identity_mismatch", fid)
+                            marker({"vmdk": "parent_cid_mismatch", "vhd": "parent_unique_id_mismatch", "vhdx": "parent_linkage_mismatch"}[d["format"]], [fid, target["id"]],
+                                   "the child records parent identity %s and the parent file carries %s" % (want, have),
+                                   "the named parent is not the file the child was made against, or the parent was written after the child was made; the "
+                                   "chain through this edge cannot be trusted as one history")
                     else:
-                        edge["id_check"] = "mismatch"
-                        edge["recorded_by_child"] = want
-                        edge["carried_by_parent"] = have
-                        marker({"vmdk": "parent_cid_mismatch", "vhd": "parent_unique_id_mismatch", "vhdx": "parent_linkage_mismatch"}[d["format"]], [fid, target["id"]],
-                               "the child records parent identity %s and the parent file carries %s" % (want, have),
-                               "the named parent is not the file the child was made against, or the parent was written after the child was made; the "
-                               "chain through this edge cannot be trusted as one history")
-            elif d["format"] == "qcow2":
-                edge["id_check"] = "not_available"
-                edge["id_note"] = "QCOW2 records no identity of its backing file: the name is all the link there is"
-                bf = d.get("backing_format")
-                if bf and pdisk.get("format") and bf.lower() != pdisk["format"].lower():
-                    edge["format_note"] = "the child says the backing file is %s and the file found is %s" % (shown(bf, fid, "backing format"), pdisk["format"])
-            if pdisk.get("role") == "extent_only":
-                edge["parent_state"] = "a sparse extent without a descriptor of its own"
-            parent_of[fid] = target["id"]
-        if not target and how == "ambiguous_basename":
-            marker("parent_ambiguous", [fid], "the parent's name matches more than one file in the set by file name alone", "which file is the parent is not decided by the set")
-        elif not target:
-            marker("parent_missing", [fid], "the parent named by the child (%s) is not in the set" % how, "the chain is broken in this set: whether the parent existed, was deleted, "
-                                                                                                    "or was not collected is not shown")
-        edge_of[fid] = edge
-        pages["edges"].add(edge)
+                        edge["id_note"] = "an identity is missing on one side (the child's record or the parent's own): not compared"
+                        node_issue[fid].setdefault("identity_not_compared", fid)
+                elif d["format"] == "qcow2":
+                    edge["id_check"] = "not_available"
+                    edge["id_note"] = "QCOW2 records no identity of its backing file: the name is all the link there is"
+                    bf = d.get("backing_format")
+                    if bf:
+                        theirs = QEMU_FORMAT_NAMES.get(bf.lower())
+                        if theirs != pdisk["format"]:
+                            edge["format_note"] = "the child says the backing file is %s and the file found is %s" % (shown(bf, fid, "backing format"), pdisk["format"])
+            if target is not None:
+                parent_of[fid] = target["id"]
+            if not target and how == "ambiguous_basename":
+                marker("parent_ambiguous", [fid], "the parent's name matches more than one file in the set by file name alone", "which file is the parent is not decided by the set")
+            elif not target:
+                marker("parent_missing", [fid], "the parent named by the child (%s) is not in the set" % how, "the chain is broken in this set: whether the parent existed, was deleted, "
+                                                                                                        "or was not collected is not shown")
+            edge_of[fid] = edge
+            pages["edges"].add(edge)
 
-    for fid, d in disks.items():
-        if d.get("role") == "extent_only" and fid not in extent_targets:
-            marker("extent_without_descriptor", [fid], "a sparse extent file is present and no descriptor in the set names it as an extent",
-                   "its descriptor was not collected, was removed, or the extent belongs to a disk outside this set: a candidate; the descriptor, if found, holds the chain")
+        phase = "the extent and CID checks"
+        for fid, d in disks.items():
+            clock.check(256)
+            if d.get("role") == "extent_only" and fid not in extent_targets:
+                marker("extent_without_descriptor", [fid], "a sparse extent file is present and no descriptor in the set names it as an extent",
+                       "its descriptor was not collected, was removed, or the extent belongs to a disk outside this set: a candidate; the descriptor, if found, holds the chain")
+        by_cid = collections.defaultdict(list)
+        for fid, d in disks.items():
+            if d.get("format") == "vmdk" and d.get("own_id") and d["own_id"] != "ffffffff" and fid not in extent_targets:
+                by_cid[d["own_id"]].append(fid)
+        for cid, ids in by_cid.items():
+            clock.check(256)
+            if len(ids) > 1:
+                marker("duplicate_cid", ids[:20], "%d descriptors carry the same CID %s" % (len(ids), cid),
+                       "a copy of one descriptor, or a clone made without a new CID: a child's parentCID cannot tell these files apart, so an identity match "
+                       "through any of them proves less", files_with_this_cid=len(ids))
 
-    # ---- chains: each disk's depth and base, found without recursion ----------------------------------------------
-    depth, base, state_of = {}, {}, {}
-    for start in disks:
-        if start in depth:
-            continue
-        path_nodes, seen_here, cur = [], set(), start
-        outcome = None
-        while True:
-            if cur in depth:
-                outcome = ("known", cur)
-                break
-            if cur in seen_here:
-                outcome = ("cycle", cur)
-                break
-            if len(path_nodes) >= max_chain:
-                outcome = ("too_deep", cur)
-                break
-            seen_here.add(cur)
-            path_nodes.append(cur)
-            nxt = parent_of.get(cur)
-            if nxt is None:
-                outcome = ("end", cur)
-                break
-            cur = nxt
-        kind_, at = outcome
-        if kind_ == "known":
-            b, dp, st = base[at], depth[at], state_of[at]
+        # ---- chains: each node's depth, base and first problem toward the base, found once (no recursion) -----------
+        phase = "the chain walk"
+        for start in disks:
+            if start in depth:
+                continue
+            path_nodes, seen_here, cur = [], set(), start
+            while True:
+                clock.check(4096)
+                if cur in depth:
+                    outcome = ("known", cur)
+                    break
+                if cur in seen_here:
+                    outcome = ("cycle", cur)
+                    break
+                if len(path_nodes) >= max_chain:
+                    outcome = ("too_deep", cur)
+                    break
+                seen_here.add(cur)
+                path_nodes.append(cur)
+                nxt = parent_of.get(cur)
+                if nxt is None:
+                    outcome = ("end", cur)
+                    break
+                cur = nxt
+            kind_, at = outcome
+            if kind_ == "known":
+                b, dp, st, fi, cy = base[at], depth[at], state_of[at], first_issue[at], cycle_of.get(at)
+            elif kind_ == "end":
+                b, dp, st, fi, cy = path_nodes[-1], 0, None, {}, None
+            elif kind_ == "cycle":
+                members = path_nodes[path_nodes.index(at):]
+                cy = min(members)
+                marker("chain_cycle", members[:20], "following parent names from %s returns to %s (%d file(s) on the cycle)" % (at, at, len(members)),
+                       "the set contains files that name each other (or themselves) as parents; no history has a cycle, so at least one name or file is wrong",
+                       files_on_cycle=len(members))
+                for n in members:
+                    depth[n], base[n], state_of[n], first_issue[n], cycle_of[n] = len(members), cy, "cycle", node_issue.get(n, {}), cy
+                path_nodes = path_nodes[:path_nodes.index(at)]
+                b, dp, st, fi = cy, len(members), "cycle", {}
+            else:
+                b, dp, st, fi, cy = at, 0, "too_deep", {}, None
             for n in reversed(path_nodes):
                 dp += 1
-                depth[n], base[n] = dp, b
-                state_of[n] = st or ("chain deeper than max_chain_depth" if dp > max_chain else None)
-        else:
-            st = {"end": None, "cycle": "cycle", "too_deep": "chain deeper than max_chain_depth"}[kind_]
-            for k, n in enumerate(reversed(path_nodes)):
-                depth[n] = k + 1
-                base[n] = path_nodes[-1] if kind_ == "end" else at
-                state_of[n] = st
-            if kind_ == "cycle":
-                marker("chain_cycle", [at], "following parent names from %s returns to %s" % (at, at), "the set contains files that name each other as parents; no history has a cycle, so at least one name or file is wrong")
-    named_as_parent = set(parent_of.values())
-    leaves = [f for f in disks if f not in named_as_parent and disks[f].get("role") != "extent_only" and disks[f].get("format") and f not in extent_targets]
-    chain_summary = collections.Counter()
-    for leaf in leaves:
-        ids, cur, seen = [], leaf, set()
-        while cur and cur not in seen and len(ids) < MAX_CHAIN_SHOWN:
-            ids.append(cur)
-            seen.add(cur)
-            cur = parent_of.get(cur)
-        # one pass along the whole chain (iterative, bounded): a parent that is not in the set, an identity that does not match
-        detail, walk, steps, mismatch = None, leaf, 0, None
-        while walk is not None and steps < max_chain:
-            steps += 1
-            dd = disks[walk]
-            if (dd.get("has_parent") or dd["hints"]) and walk not in parent_of:
-                detail = "the parent of %s is not in the set (%s)" % (walk, edge_of[walk]["resolution"] if walk in edge_of else "no_name")
-                break
-            if walk in edge_of and edge_of[walk]["id_check"] == "mismatch" and mismatch is None:
-                mismatch = walk
-            walk = parent_of.get(walk)
-        status = "complete"
-        if state_of.get(leaf) == "cycle":
-            status = "cycle"
-        elif state_of.get(leaf):
-            status = "too_deep"
-        elif detail:
-            status = "broken"
-        elif mismatch:
-            status, detail = "identity_mismatch", "the identity %s records for its parent is not the identity the parent file carries" % mismatch
-        chain_summary[status] += 1
-        pages["chains"].add({"leaf": leaf, "leaf_file": disks[leaf]["file"], "format": disks[leaf].get("format"), "chain_length": depth.get(leaf, 1),
-                             "base": base.get(leaf, leaf), "chain_shown": ids, "chain_shown_cut": depth.get(leaf, 1) > len(ids), "status": status, "detail": detail})
+                own = node_issue.get(n)
+                fi = dict(fi, **own) if own else fi       # the issue nearest the leaf wins; a node with none shares its parent's
+                depth[n], base[n], state_of[n], first_issue[n] = dp, b, st or ("too_deep" if dp > max_chain else None), fi
+                if cy is not None:
+                    cycle_of[n] = cy
 
-    # ---- the configuration files held against the descriptors ---------------------------------------------------------
-    descriptor_files = {fid for fid, d in disks.items() if d.get("format") == "vmdk"}
-    snap_disk_names = {}
-    for res in vmsd_list:
-        rec = res["rec"]
-        data = res["vmsd"]
-        for e in data["entries"]:
-            names = [shown(n, rec["id"], "snapshot disk file") for n in e["disks"].values()]
-            pages["snapshot_database"].add({"source_id": rec["id"], "index": e["index"], "line": e["line"], "uid": shown(e.get("uid"), rec["id"], "snapshot uid"), "parent": shown(e.get("parent"), rec["id"], "snapshot parent"),
-                                            "display_name": shown(e.get("displayname"), rec["id"], "snapshot name") if e.get("displayname") is not None else None,
-                                            "description_present": "description" in e, "state_file": shown(e.get("filename"), rec["id"], "snapshot state file") if e.get("filename") is not None else None,
-                                            "disk_files": names, "create_time_high_raw": shown(e.get("createtimehigh"), rec["id"], "createTimeHigh"), "create_time_low_raw": shown(e.get("createtimelow"), rec["id"], "createTimeLow"),
-                                            "create_time_note": "raw values as written; how the two fields encode a time is not decoded here"})
-            for n in e["disks"].values():
-                target, how = index.resolve(rec["rel"], n)
-                snap_disk_names.setdefault(rec["id"], set()).add(target["id"] if target else None)
-                if target is None:
-                    marker("snapshot_disk_missing", [rec["id"]], "snapshot %s of the database names a disk file that is not in the set (%s)" % (e["index"], how),
-                           "the snapshot's disk is missing from this set: removed, never collected or renamed; the database entry alone does not say which", line=e["line"])
-        if data["over"]:
-            partial.append("a snapshot database lists more than %d snapshot indexes: the first %d are listed, %d more entries were counted and not listed" % (MAX_SNAPSHOT_ENTRIES, MAX_SNAPSHOT_ENTRIES, data["over"]))
-    for res in vmx_list:
-        rec = res["rec"]
-        for dk in res["vmx"]["disks"]:
-            target, how = index.resolve(rec["rel"], dk["file"])
-            d = disks.get(target["id"]) if target else None
-            if d and d.get("has_parent"):
-                same_dir_vmsd = [v for v in vmsd_list if posixpath.dirname(v["rec"]["rel"]) == posixpath.dirname(rec["rel"])]
-                for v in same_dir_vmsd:
-                    n = len(v["vmsd"]["entries"])
-                    declared = v["vmsd"]["top"].get("numsnapshots")
-                    if n == 0 or declared in ("0", 0):
-                        marker("running_disk_is_a_delta_without_snapshots", [rec["id"], target["id"], v["rec"]["id"]],
-                               "the configuration's disk %s is a delta (it records a parent) and the snapshot database lists %s snapshot(s)" % (dk["key"], declared if declared is not None else n),
-                               "a consolidation that did not finish, a snapshot removed without its delta merged, or a database that was not collected with the disk: a "
-                               "candidate; the VM's task log decides it", line=dk["line"])
-    if vmsd_list:
-        referenced = set()
-        for ids in snap_disk_names.values():
-            referenced.update(i for i in ids if i)
+        phase = "the chain rows"
+        named_as_parent = set(parent_of.values())
+        leaves = [f for f in disks if f not in named_as_parent and disks[f].get("role") != "extent_only" and disks[f].get("format") and f not in extent_targets]
+        cycles_reached = set()
+
+        def chain_row(leaf, status_override=None):
+            ids, cur, seen = [], leaf, set()
+            while cur and cur not in seen and len(ids) < MAX_CHAIN_SHOWN:
+                ids.append(cur)
+                seen.add(cur)
+                cur = parent_of.get(cur)
+            issues = first_issue.get(leaf, {})
+            st = status_override or state_of.get(leaf)
+            status, detail = "complete", None
+            if st in ("cycle", "too_deep"):
+                status = st
+                detail = ("the chain from %s runs into a cycle" % leaf) if st == "cycle" else "the chain is deeper than max_chain_depth (%d)" % max_chain
+            else:
+                for k in CHAIN_ORDER[2:]:
+                    if k in issues:
+                        status, detail = k, CHAIN_DETAIL[k] % issues[k]
+                        break
+            row = {"leaf": leaf, "leaf_file": disks[leaf]["file"] if leaf in disks else None, "format": disks.get(leaf, {}).get("format"), "chain_length": depth.get(leaf, 1),
+                   "base": base.get(leaf, leaf), "chain_shown": ids, "chain_shown_cut": depth.get(leaf, 1) > len(ids), "status": status, "detail": detail,
+                   "issues": {k: issues[k] for k in CHAIN_ORDER if k in issues}}
+            b = base.get(leaf, leaf)
+            if b not in disks and st not in ("cycle", "too_deep"):
+                row["base_note"] = "the base %s is in the set and is not a disk this tool reads (raw, another kind of file, or not opened): present, not examined" % b
+            chain_summary[status] += 1
+            pages["chains"].add(row)
+
+        for leaf in leaves:
+            clock.check(256)
+            if cycle_of.get(leaf) is not None:
+                cycles_reached.add(cycle_of[leaf])
+            chain_row(leaf)
+        for cy in sorted({c for c in cycle_of.values()} - cycles_reached):
+            clock.check(256)
+            chain_row(cy, "cycle")       # a cycle no leaf reaches (every file on it is named by another) has a row of its own
+
+        # ---- the configuration files held against the descriptors -----------------------------------------------------
+        phase = "the configuration files"
+        snap_disk_names = {}
+        for res in vmsd_list:
+            rec = res["rec"]
+            data = res["vmsd"]
+            for e in data["entries"]:
+                clock.check(256)
+                names = [shown(n, rec["id"], "snapshot disk file") for n in e["disks"].values()]
+                pages["snapshot_database"].add({"source_id": rec["id"], "index": e["index"], "line": e["line"], "uid": shown(e.get("uid"), rec["id"], "snapshot uid"), "parent": shown(e.get("parent"), rec["id"], "snapshot parent"),
+                                                "display_name": shown(e.get("displayname"), rec["id"], "snapshot name") if e.get("displayname") is not None else None,
+                                                "description_present": "description" in e, "state_file": shown(e.get("filename"), rec["id"], "snapshot state file") if e.get("filename") is not None else None,
+                                                "disk_files": names, "create_time_high_raw": shown(e.get("createtimehigh"), rec["id"], "createTimeHigh"), "create_time_low_raw": shown(e.get("createtimelow"), rec["id"], "createTimeLow"),
+                                                "create_time_note": "raw values as written; how the two fields encode a time is not decoded here"})
+                for n in e["disks"].values():
+                    target, how = index.resolve(rec["rel"], n)
+                    snap_disk_names.setdefault(rec["id"], set()).add(target["id"] if target else None)
+                    if target is None:
+                        marker("snapshot_disk_missing", [rec["id"]], "snapshot %s of the database names a disk file that is not in the set (%s)" % (e["index"], how),
+                               "the snapshot's disk is missing from this set: removed, never collected or renamed; the database entry alone does not say which", line=e["line"])
+            if data["over"]:
+                partial.append("a snapshot database lists more than %d snapshot indexes: the first %d are listed, %d more entries were counted and not listed" % (MAX_SNAPSHOT_ENTRIES, MAX_SNAPSHOT_ENTRIES, data["over"]))
+        vmsd_by_dir = collections.defaultdict(list)
+        for v in vmsd_list:
+            if v["state"] == "parsed":               # a database that was not read says nothing about how many snapshots it lists
+                vmsd_by_dir[posixpath.dirname(v["rec"]["rel"])].append(v)
         for res in vmx_list:
+            rec = res["rec"]
             for dk in res["vmx"]["disks"]:
-                target, _how = index.resolve(res["rec"]["rel"], dk["file"])
-                if target:
-                    referenced.add(target["id"])
-        reachable, stack = set(), list(referenced)
-        while stack and len(reachable) < len(disks) + 1:          # the ancestors of every disk the configuration names are in use
-            cur = stack.pop()
-            if cur in reachable:
-                continue
-            reachable.add(cur)
-            if cur in parent_of:
-                stack.append(parent_of[cur])
-        listing = [v["rec"]["id"] for v in vmsd_list]
-        for fid, d in disks.items():
-            if d.get("format") == "vmdk" and d.get("has_parent") and fid not in reachable and fid not in extent_targets:
-                marker("delta_not_in_snapshot_database", [fid] + listing,
-                       "this descriptor records a parent, and it is neither named by the snapshot database or the configuration nor a parent of a disk they name",
-                       "a delta left behind by a removed snapshot or a consolidation, or a file of another VM in the set: a candidate; the task log decides it")
-    for rel in files.lock_dirs:
-        marker("lock_artefact", [], "an entry named %s is present" % shown(rel, "walk", "lock directory"),
-               "a lock directory or file is made while a program holds the disk or the VM; it can be a copy of a live VM's directory or a left-over after a crash: a candidate")
+                clock.check(256)
+                target, how = index.resolve(rec["rel"], dk["file"])
+                d = disks.get(target["id"]) if target else None
+                if d and d.get("has_parent"):
+                    for v in vmsd_by_dir.get(posixpath.dirname(rec["rel"]), ()):
+                        clock.check(256)
+                        n = len(v["vmsd"]["entries"])
+                        declared = v["vmsd"]["top"].get("numsnapshots")
+                        if n == 0 or declared in ("0", 0):
+                            marker("running_disk_is_a_delta_without_snapshots", [rec["id"], target["id"], v["rec"]["id"]],
+                                   "the configuration's disk %s is a delta (it records a parent) and the snapshot database lists %s snapshot(s)" % (
+                                       shown(dk["key"], rec["id"], "disk key"), shown(declared, v["rec"]["id"], "numSnapshots") if declared is not None else n),
+                                   "a consolidation that did not finish, a snapshot removed without its delta merged, or a database that was not collected with the disk: a "
+                                   "candidate; the VM's task log decides it", line=dk["line"])
+        if vmsd_list:
+            referenced = set()
+            for ids in snap_disk_names.values():
+                referenced.update(i for i in ids if i)
+            for res in vmx_list:
+                for dk in res["vmx"]["disks"]:
+                    clock.check(256)
+                    target, _how = index.resolve(res["rec"]["rel"], dk["file"])
+                    if target:
+                        referenced.add(target["id"])
+            reachable, stack = set(), list(referenced)
+            while stack:                          # the ancestors of every disk the configuration names are in use
+                clock.check(4096)
+                cur = stack.pop()
+                if cur in reachable:
+                    continue
+                reachable.add(cur)
+                if cur in parent_of:
+                    stack.append(parent_of[cur])
+            listing = [v["rec"]["id"] for v in vmsd_list][:20]
+            for fid, d in disks.items():
+                clock.check(256)
+                if d.get("format") == "vmdk" and d.get("has_parent") and fid not in reachable and fid not in extent_targets:
+                    marker("delta_not_in_snapshot_database", [fid] + listing,
+                           "this descriptor records a parent, and it is neither named by the snapshot database or the configuration nor a parent of a disk they name",
+                           "a delta left behind by a removed snapshot or a consolidation, or a file of another VM in the set: a candidate; the task log decides it")
+        for rel in files.lock_dirs:
+            marker("lock_artefact", [], "an entry named %s is present" % shown(rel, "walk", "lock directory"),
+                   "a lock directory or file is made while a program holds the disk or the VM; it can be a copy of a live VM's directory or a left-over after a crash: a candidate")
+    except Overtime:
+        partial.append("max_seconds (%s) was reached during %s: the rows after the last one listed were not made, and the chain rows, edges and markers "
+                       "listed are the ones made before it" % (seconds, phase))
+
     # ---- qemu-img, when asked ------------------------------------------------------------------------------------------
     qemu_report = {"mode": qemu_mode, "checked": 0, "available": None, "note": "qemu-img was not run (qemu_img: off); the reading above is the tool's own"}
     if qemu_mode != "off":
-        qemu_report["note"] = ("qemu-img info was run once per image with the format fixed and without --backing-chain; its answer sits beside the "
-                               "native reading in `qemu_img` of the disk row and replaces nothing")
-        cross = []
+        qemu_report["note"] = ("qemu-img info was run once per image of the set with the format fixed and without --backing-chain; its answer sits beside the "
+                               "native reading in `qemu_img` of the disk row and replaces nothing. A VMDK text descriptor and a QCOW2 image with an external "
+                               "data file are not given to it (qemu-img would open the files they name, which can lie outside the set), nor an extent "
+                               "another descriptor names (the disk is that descriptor)")
+        cross, failed_runs = [], []
+        skipped = collections.Counter()
+        skipped_first = {}
         count = 0
         for fid, d in disks.items():
-            if count >= qemu_max or clock.left() < 2:
-                break
             fmt_kind = {"vmdk": "vmdk", "vhd": "vhd", "vhdx": "vhdx", "qcow2": "qcow2"}.get(d.get("format"))
             if not fmt_kind or d.get("role") == "extent_only" or d["state"] != "parsed":
                 continue
-            rec = nodes[fid]["rec"]
+            why = None
             if d["format"] == "vmdk" and nodes[fid]["row"]["kind"] != "vmdk_sparse":
-                # a text descriptor is a VMware descriptor: qemu-img reads it with its extents, which are opened by name; leave it to a copy made for that
-                pass
+                why = "text_descriptor"           # qemu-img would open its extents by the names it holds
+            elif fid in extent_targets:
+                why = "extent_of_another_descriptor"   # a split disk's extent: the disk is its descriptor, which qemu-img is not given
+            elif d.get("external_data_file"):
+                why = "external_data_file"        # qemu-img would open the data file by the name the header holds
+            elif count >= qemu_max:
+                why = "over_qemu_img_max_images"
+            elif clock.left() < 2:
+                why = "max_seconds"
+            if why:
+                skipped[why] += 1
+                skipped_first.setdefault(why, fid)
+                continue
+            rec = nodes[fid]["rec"]
             result = run_qemu(rec["path"], fmt_kind, min(30.0, max(1.0, clock.left() - 1)))
             count += 1
             qemu_report["available"] = result.get("available")
             if result.get("available") is False:
                 break
             d["qemu_img"] = result
+            if result.get("timed_out") or result.get("exit_code") != 0 or result.get("error"):
+                failed_runs.append(fid)
+                continue
             native = d.get("detail") or {}
             if d["format"] == "vmdk":
                 cap = (native.get("sparse_header") or {}).get("capacity_sectors")
@@ -1870,22 +2238,36 @@ def main():
                        "one of the two readings is wrong or the file is damaged; neither is preferred")
             cross.append(fid)
         qemu_report["checked"] = len(cross)
+        qemu_report["failed"] = len(failed_runs)
+        qemu_report["failed_first"] = failed_runs[:20]
+        qemu_report["skipped"] = dict(skipped)
+        qemu_report["skipped_first"] = skipped_first
         if qemu_mode == "require" and qemu_report["available"] is False:
             fail("qemu_img: require was asked for and qemu-img is not on PATH (the base pack lists it as optional: check the image the job runs in)")
         if qemu_report["available"] is False:
             qemu_report["note"] = "qemu-img is not on PATH here (the base pack lists it as optional): the native reading above is all there is"
-        elif qemu_report["checked"] == 0:
-            qemu_report["note"] += "; no parsed image was eligible"
+        else:
+            if failed_runs:
+                partial.append("qemu-img failed, timed out or printed no JSON on %d image(s) (first %s): the second reading of those is missing" % (len(failed_runs), failed_runs[0]))
+            for why in ("over_qemu_img_max_images", "max_seconds"):
+                if skipped.get(why):
+                    partial.append("qemu-img was not run on %d eligible image(s) (%s; first %s)" % (skipped[why], "qemu_img_max_images (%d) was reached" % qemu_max if why != "max_seconds" else "max_seconds was near", skipped_first[why]))
+            if qemu_report["checked"] == 0 and not failed_runs:
+                qemu_report["note"] += "; no parsed image was eligible"
 
     # ---- disks page ------------------------------------------------------------------------------------------------
     for fid, d in disks.items():
         row = {"source_id": fid, "file": d["file"], "format": d.get("format"), "state": d["state"], "role": d.get("role", "disk"),
                "own_id": d.get("own_id"), "records_a_parent": bool(d.get("has_parent")), "is_extent_of": extent_targets.get(fid),
                "depth": depth.get(fid), "base": base.get(fid), "chain_state": state_of.get(fid), "detail": make_net(shown, fid)(d.get("detail"))}
+        if d.get("format") == "vhdx":
+            row["own_id_field"] = "DataWriteGuid of the current header (what a child's parent_linkage records)"
         if d.get("qemu_img"):
             row["qemu_img"] = d["qemu_img"]
         pages["disks"].add(row)
 
+    if extents_over:
+        partial.append("%d descriptor(s) list more than %d extents (first %s): the first %d of each were checked and the rest are counted in extents_total" % (len(extents_over), MAX_EXTENTS, extents_over[0], MAX_EXTENTS))
     if config_total["dropped"]:
         partial.append("the .vmx and .vmsd files hold more than %d entries between them: %d file(s) were counted and their entries were not held against the descriptors" % (MAX_CONFIG_ENTRIES_TOTAL, config_total["dropped"]))
     values.close()
@@ -1904,16 +2286,19 @@ def main():
         skipped = sum(files.skipped_counts.values())
         outcome = ({"status": "partial", "status_basis": "the set holds no file that could be read; %d entr(ies) were skipped (links, special files, directories too deep, unreadable)%s: the answer names them" % (skipped, ("; " + "; ".join(partial)) if partial else "")}
                    if skipped or partial else {"status": "failed", "status_basis": "the set holds no file"})
-    print(json.dumps({
+    print(answer_text({
         "parser": PARSER, **outcome,
         "root": files.root_shown, "files_in_set": len(files.files), "kinds": dict(kinds), "other_files_by_extension": dict(other_ext.most_common(20)),
-        "other_files_note": "files of no kind this tool reads are counted by extension and not examined; absence of a disk here is not absence of a disk",
+        "other_files_note": "files of no kind this tool reads are counted by extension and not examined (an extension that is not 1 to 10 letters or digits is counted under (other extensions) and not shown); absence of a disk here is not absence of a disk",
         "states": dict(state_counts), "recognised_not_read_whole": problems[:200],
         "sources": pages["sources"].page, "disks": pages["disks"].page, "edges": pages["edges"].page, "chains": pages["chains"].page,
         "extents": pages["extents"].page, "snapshot_database": pages["snapshot_database"].page, "internal_snapshots": pages["internal_snapshots"].page,
         "markers": pages["markers"].page, "pages": result_pages,
         "chain_summary": dict(chain_summary),
-        "chain_note": "A chain is complete when every parent a disk names is in the set and the identities agree where the format records one. It is not a disk that boots, and it says nothing about the parent's content when the child was made.",
+        "chain_note": ("A chain is complete when every parent a disk names is in the set, can be read, and carries the identity the child recorded where the format "
+                       "records one, and every extent and data file its disks name is in the set. Otherwise its status names the first problem from the leaf "
+                       "(cycle, too_deep, broken, parent_unreadable, identity_mismatch, extent_missing, data_file_missing) and `issues` lists each kind found. "
+                       "It is not a disk that boots, and it says nothing about the parent's content when the child was made."),
         "walk": files.skipped_summary(), "walk_truncated": files.truncated, "partial_reasons": partial, "lock_directories_total": files.lock_dirs_total,
         "qemu_img": qemu_report,
         "text": values.summary(), "withheld": withheld_summary(shown),
@@ -1921,7 +2306,7 @@ def main():
         "limits": {"max_files": max_files, "max_entries": max_entries, "max_depth": max_depth, "max_snapshots": max_snapshots, "max_chain_depth": max_chain, "descriptor_read_cap": MAX_DESCRIPTOR},
         "note": "Markers are candidates with the observation beside them. A header or a descriptor says what its writer recorded; it does not say who or what wrote it, when, or why. "
                 "Corroborate with the hypervisor's own task and event records before calling a snapshot deleted, a consolidation failed or a disk tampered with.",
-    }, indent=2))
+    }))
     return 0 if outcome["status"] != "failed" else 1
 
 

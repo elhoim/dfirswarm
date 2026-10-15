@@ -33,8 +33,8 @@ not read:
   extent and chain with its identity check, plus markers (an unclean close, a
   leftover delta, a lock artefact) as candidates. `qemu-img` runs only when asked.
 - `backup_audit_normalise` turns the Proxmox VE and Proxmox Backup Server task
-  index and task logs, or an export of any product read through a mapping the
-  caller declares, into canonical events. Any other product is `unsupported`
+  index (both UPID layouts) and Proxmox VE task logs, or an export of any product
+  read through a mapping the caller declares, into canonical events. Any other product is `unsupported`
   until fixtures for it exist.
 
 **One goal template**: `what-recovery-survives.md`.

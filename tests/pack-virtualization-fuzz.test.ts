@@ -43,7 +43,7 @@ function chainSeeds(): Seed[] {
     { rel: "diff.vhd", data: vhdDifferencing({ uid: UID(2), parentUid: UID(1), parentName: "C:\\VMs\\dyn.vhd", locators: [{ code: "W2ru", text: ".\\dyn.vhd" }, { code: "MacX", text: "file:///x/dyn.vhd", encoding: "utf8" }] }) },
     { rel: "fixed.vhd", data: vhdFixed(UID(3)) },
     { rel: "base.vhdx", data: vhdx({ diskId: "AAAAAAAA-0000-4000-8000-000000000001" }) },
-    { rel: "child.avhdx", data: vhdx({ diskId: "AAAAAAAA-0000-4000-8000-000000000002", parent: { linkage: "AAAAAAAA-0000-4000-8000-000000000001", relative: ".\\base.vhdx", absolute: "C:\\VMs\\base.vhdx" }, headers: [{ logGuid: "CCCCCCCC-0000-4000-8000-000000000001", logLength: 4096 }, {}] }) },
+    { rel: "child.avhdx", data: vhdx({ diskId: "AAAAAAAA-0000-4000-8000-000000000002", parent: { linkage: "22222222-2222-2222-2222-222222222222", relative: ".\\base.vhdx", absolute: "C:\\VMs\\base.vhdx" }, headers: [{ logGuid: "CCCCCCCC-0000-4000-8000-000000000001", logLength: 4096 }, {}] }) },
     { rel: "q-base.qcow2", data: qcow2({ snapshots: [{ id: "1", name: "one", date: 1_700_000_000, extra: Buffer.alloc(16) }, { id: "2", name: "two", date: 1_700_000_100 }], incompat: 1n }) },
     { rel: "q-top.qcow2", data: qcow2({ backing: `q-base.qcow2`, backingFormat: "qcow2" }) },
     { rel: "q3.qcow2", data: qcow2({ backing: `/srv/${CANARY.github}/q-base.qcow2`, snapshots: [{ id: CANARY.hex, name: `snap-${CANARY.aws}`, date: 5 }] }) },

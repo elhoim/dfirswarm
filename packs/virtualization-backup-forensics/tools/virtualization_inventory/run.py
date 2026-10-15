@@ -9,7 +9,8 @@ file this tool recognises and does not read is listed as unsupported, never gues
     libvirt   a domain XML (<domain>: devices, disks with their backing stores), a domain snapshot XML (<domainsnapshot>)
               and a storage pool XML (<pool>)
     Proxmox   a VM or container configuration (/etc/pve/qemu-server/<id>.conf, /etc/pve/lxc/<id>.conf, with its snapshot
-              sections) and storage.cfg
+              sections; a [special:...] section such as the cloud-init settings is listed as special, not as a snapshot)
+              and storage.cfg
 
 What it is and is not. It lists what the files say exist, with the file and the line or element each statement came from.
 A configuration that names a VM does not show the VM ran, exists on a host now, or was not deleted; a disk it names is
@@ -22,7 +23,10 @@ SENSITIVE OUTPUT. A configuration can hold a console password, a cloud-init pass
 under a key this tool does not show. Names, paths and values it does show pass the shape check of the shared block
 (a token-shaped run or user-info is withheld; a long text is shown cut with its whole length); the original goes to one
 private file only when write_text is asked for, in a job. XML files are read with entity declarations refused and the
-element count and depth bounded.
+element count and depth bounded. A credential-like key is named in every section it sits in (a snapshot keeps its own
+copy of the settings), and credential-like attributes are named to a cap and counted past it. Every key and value of the
+answer and of its paging files passes the one way out (SHARED BOUNDARY), which withholds by shape again and checks what it
+wrote; a piece of a path (a datastore, a node, a storage name) is taken from the path after the whole was withheld.
 """
 import collections
 import datetime
@@ -70,6 +74,8 @@ SAFE_VALUE = re.compile(r"[0-9]{1,12}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A
 TOOL_BUILT = {"id", "source_id", "vm", "found", "how", "in_set", "in_set_note", "role", "format", "locator", "note", "credential_note", "time_utc", "time_basis", "node_basis",
               "kind", "layer", "keys_not_shown", "credential_like_keys_total", "description_present", "pending_section_present",
               "comment_lines_not_shown", "configuration_in_set", "index", "line", "element", "first_line", "value_chars"}
+
+VOCABULARY = frozenset()     # words the way out shows as they are (see SHARED BOUNDARY): none here
 
 # BEGIN SHARED WITHHOLDING
 # The same text is in pcap_extract, zeek_run, suricata_run and network_log_summary, so that the four tools withhold
@@ -240,15 +246,14 @@ def in_job():
 
 
 def describe(exc):
+    """An exception as text for an answer: its type and errno name, and its message withheld by shape, never cut."""
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def fail(message, **extra):
-    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, nothing identifier-shaped."""
-    safe = {k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}
-    print(json.dumps({"error": scrub(message), "tool": TOOL, "status": "failed",
-                      "status_basis": "the tool stopped with an error (see error)", **safe}))
+    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, through the one way out."""
+    print(answer_text({"error": message, "tool": TOOL, "status": "failed", "status_basis": "the tool stopped with an error (see error)", **extra}))
     raise SystemExit(1)
 
 
@@ -259,7 +264,7 @@ def read_args():
             fail("arguments are larger than 8 MiB: pass a list of files, not their contents")
         args = json.loads(raw.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError) as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
+        fail("arguments are not valid JSON", reason=describe(exc))
     if not isinstance(args, dict):
         fail("arguments must be a JSON object")
     return args
@@ -356,7 +361,9 @@ def decode(data):
 
 # Lossless paging: the page an agent reads stays small, and when there are more rows the whole result is written as JSON
 # Lines under work/<agent>/tool-output (in a job, $OUT/tool-output) and named. The file name is random: it is never a
-# digest of anything asked for. A write that fails is an error answer naming the file, never a loss that goes unsaid.
+# digest of anything asked for (sixteen decimal digits, a shape the withholding rules leave alone). Every row is sealed
+# (the one way out, below) as it is written. A write that fails is an error answer naming the file, never a loss that
+# goes unsaid.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -368,7 +375,7 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        name = "%s-%s-%s.jsonl" % (self.tool, self.key, secrets.token_hex(8))
+        name = "%s-%s-%016d.jsonl" % (self.tool, self.key, secrets.randbelow(10 ** 16))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             self.path = Path(out) / "tool-output" / name
@@ -379,8 +386,9 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
+        line = row_text(row, "pages/%s/all_results" % self.key)
         try:
-            self._out.write(json.dumps(row, default=str))
+            self._out.write(line)
             self._out.write("\n")
         except OSError as exc:
             fail("the whole result could not be written: %s" % describe(exc), paging_file=str(self.path))
@@ -489,18 +497,37 @@ class Shown(str):
 
 
 # An open-ended authority or name:secret run at the point where a long text was cut might have its user-info separator beyond
-# the cut: it is withheld whole.
+# the cut, and a run of name characters the cut ends might be the head of a token: each is withheld whole.
 _OPEN_AUTHORITY = re.compile(r"(?<=//)[^/?#\s]*$")
-_OPEN_BARE = re.compile(r"(?<![\w.%+:/-])[\w.%+-]{1,64}:[^\s/@:]*$")
+_OPEN_BARE = re.compile(r"[^\s/@:<>]{1,64}:[^\s/@<>]*$")
+_OPEN_RUN = re.compile(r"[A-Za-z0-9_+%/=.:@-]+$")
+
+
+def cut_safely(text, limit):
+    """`text` cut to at most `limit` characters (plus a marker), never leaving the head of a run the cut split: a text
+    is withheld by shape BEFORE it is cut, and what the cut leaves open is withheld whole, not shown in part."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if _OPEN_RUN.match(text, limit):          # the cut fell inside a run
+        head = _OPEN_RUN.sub(lambda m: _withheld("open run at a cut", len(m.group()), "cut"), head)
+    head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+    return _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+
+
+def brief(text, limit=300):
+    """A message from a library or a program, withheld by shape whole and then cut safely: never cut first."""
+    return cut_safely(scrub(text if isinstance(text, str) else str(text)), limit)
 
 
 class Shower:
     """Every string the answer shows a name, a path or a value of passes through here: token-shaped runs and user-info are
     withheld, a text over `limit` characters is shown cut with its whole length, and the original of what was changed goes
     to the values file when one was asked for (never anywhere else). Only the first EXAMINED characters of a long text are
-    checked (the check is not linear in the length of an adversary's text); the last 20 of them are dropped so that no
-    fragment of a token the cut split can be shown, and a run that is still open at the cut and might be user-info is
-    withheld whole."""
+    checked (the check is not linear in the length of an adversary's text): a run of name characters, an authority or a
+    name:secret run that the EXAMINED cut leaves open is withheld whole before the shape check, so that no fragment of a
+    token the cut split can be shown; the check runs on the whole examined text, and the shorter cut to `limit` comes
+    after it and leaves no run open either."""
 
     EXAMINED = 4096
 
@@ -518,13 +545,11 @@ class Shower:
         total = len(text)
         head = text
         if total > self.EXAMINED:
-            head = text[:self.EXAMINED - 20]
-            head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-            head = _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-        shown = scrub(head)
+            head = cut_safely(text, self.EXAMINED)
+        shown = seal_text(head, "text")
         was_cut = total > self.EXAMINED
         if len(shown) > self.limit:
-            shown = shown[:self.limit]
+            shown = cut_safely(shown, self.limit)
             was_cut = True
         if was_cut:
             shown += "...(whole text: %d characters)" % total
@@ -542,6 +567,179 @@ def withheld_summary(shower):
                      "are withheld, and a string over %d characters is shown cut with its whole length. A secret that does not look "
                      "like a token (a short password in a name) is not recognised, so run the tool as a job with secret_output: true.") % shower.limit}
 # END SHARED COMMON
+# BEGIN SHARED BOUNDARY
+# The same text is in virtualization_inventory, snapshot_chain_check and backup_audit_normalise; tests/pack-virtualization-
+# shared.test.ts holds the copies equal. The one way out. Every key and every value of an answer, of an error answer and of
+# every row a paging file holds is sealed when it is serialised, whatever code made it: the whole string is withheld by
+# shape (the rules of the shared withholding block, plus the shapes below that block does not catch) before anything cuts
+# or folds it, and the rules are applied until they change nothing more. A GUID that stands alone is shown as it is: it
+# is an identifier the formats carry, and the shape check would take it for a token. Then the serialised text is read back
+# and checked with the same rules: a string they would still change is replaced by <withheld: N bytes> and the answer is
+# partial and says how many. That check is a backstop: it fires only when a string bypassed the seal.
+#
+# The shapes added here: user-info after `:` or `/` (a Proxmox storage:user:password@host, a path with user:password@host
+# in it), which the shared block's lookbehind leaves alone; a base64 key with its padding that holds `/` or `+` (a 16-byte
+# key is 24 characters, under the shared block's 30-character slashed rule); and the head of a prefixed token (AKIA..., ghp_...,
+# github_pat_..., xoxb-..., eyJ...) too short for the shared rule, as a cut or a damaged file can leave it; and a base64 run
+# with a `/` in it whose letters change case as random text does (an AWS-style secret key with one `/`, which the shared
+# block's three-piece rule misses). A word of the tool's own closed vocabulary (VOCABULARY, set by each tool: VMDK create
+# types) is shown as it is, as a GUID is.
+BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
+_GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@)")
+_SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
+_BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
+_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")
+# A string none of whose rules can match is passed without the slow path: every rule needs one of these.
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s")
+# The tool's own file names, made from the job's or agent's id and random digits: shown as they are.
+_OWN_PATH = re.compile(r"(?:work/[A-Za-z0-9_.-]{1,64}|store/jobs/[A-Za-z0-9_.-]{1,64}/out)/(?:tool-output/[a-z_]{1,40}-[a-z_]{1,40}-[0-9]{16}\.jsonl|[a-z]{1,20}-values\.jsonl)")
+_SEALED = {}
+
+
+def _random_slashed(run):
+    """A base64 run holding `/`: random when its letters change case as random text does, or digits sit among them."""
+    if "/" not in run:
+        return False
+    flat = run.replace("/", "").rstrip("=")
+    letters = [c for c in flat if c.isalpha()]
+    if not (any(c.isdigit() for c in flat) and any(c.islower() for c in letters) and any(c.isupper() for c in letters)):
+        return False
+    flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
+    packed = len(re.findall(r"(?<=[A-Za-z])[0-9]{1,3}(?=[A-Za-z])", flat))
+    return len(letters) >= 16 and (flips >= 0.33 * len(letters) or (packed and flips >= 0.25 * len(letters))) or _token_run(flat)
+
+
+def _rules_once(text, kind="boundary"):
+    """One application of every withholding rule to a whole string; a GUID standing alone and a word of VOCABULARY are kept."""
+    if not _QUICK.search(text) or _OWN_PATH.fullmatch(text) or text in VOCABULARY:
+        return text
+    out, last = [], 0
+    for m in _GUID_ALONE.finditer(text):
+        out.append(_rules_piece(text[last:m.start()], kind))
+        out.append(m.group())
+        last = m.end()
+    out.append(_rules_piece(text[last:], kind))
+    if kind == "boundary":
+        COUNTS.pop("boundary", None)
+    return "".join(out)
+
+
+def _rules_piece(piece, kind):
+    if not piece or not _QUICK.search(piece):
+        return piece
+    if not piece.startswith("UPID:"):          # a Proxmox task id is fields joined by `:` ending in user@realm, not user-info
+        piece = _ANY_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), piece)
+    piece = _SLASHED_RANDOM.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if _random_slashed(m.group()) else m.group(), piece)
+    piece = _BASE64_KEY.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if re.search(r"[/+]", m.group()) else m.group(), piece)
+    piece = scrub(piece, kind)
+    return _TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind), piece)
+
+
+def seal_text(text, kind="boundary"):
+    """The rules applied to a whole string until they change nothing (a string that keeps changing is withheld whole), so
+    that the backstop's one application finds nothing to change. The Shower uses this too, so that what it shows and what
+    the way out lets through are judged by the same rules."""
+    if not isinstance(text, str):
+        text = str(text)
+    hit = _SEALED.get(text)
+    if hit is None:
+        hit = text
+        for _ in range(6):
+            before, hit = hit, _rules_once(hit, kind)
+            if hit == before:
+                break
+        else:
+            hit = "<withheld: %d bytes>" % blen(text)
+        if len(text) <= 2048:
+            if len(_SEALED) >= 50000:
+                _SEALED.clear()
+            _SEALED[text] = hit
+    return hit
+
+
+def boundary_text(text):
+    """The seal of one string at the way out, counted when it changed something."""
+    hit = seal_text(text)
+    if hit != text:
+        BOUNDARY["withheld"] += 1
+    return hit
+
+
+def seal(value, depth=0):
+    """Every key and every value of a structure, as JSON will write it, through boundary_text; a key two keys seal to is
+    numbered (`<key> #2`), never merged."""
+    if isinstance(value, str):
+        return boundary_text(value)
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else boundary_text(repr(value))
+    if depth > 64:
+        return boundary_text(json.dumps(value, default=str))
+    if isinstance(value, dict):
+        out, taken = {}, {}
+        for k, v in value.items():
+            key = boundary_text(k if isinstance(k, str) else json.dumps(k) if isinstance(k, (bool, type(None))) else str(k))
+            if key in out:
+                n = taken.get(key, 1) + 1
+                while "%s #%d" % (key, n) in out:
+                    n += 1
+                taken[key] = n
+                key = "%s #%d" % (key, n)
+            out[key] = seal(v, depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [seal(v, depth + 1) for v in value]
+    return boundary_text(str(value))
+
+
+def backstop(value, where=""):
+    """The serialised answer read back and checked with the same rules: a string they would still change (a key or a
+    value) is replaced by <withheld: N bytes>, counted, and its place named."""
+    if isinstance(value, str):
+        if _rules_once(value) == value:
+            return value
+        BOUNDARY["replaced"] += 1
+        if len(BOUNDARY["where"]) < 20:
+            BOUNDARY["where"].append(where or "/")
+        return "<withheld: %d bytes>" % blen(value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = backstop(k, where + "/(key)")
+            while key in out:
+                key += " #"
+            out[key] = backstop(v, where + "/" + key)
+        return out
+    if isinstance(value, list):
+        return [backstop(v, "%s/%d" % (where, i)) for i, v in enumerate(value)]
+    return value
+
+
+def row_text(row, where):
+    """One row of a paging file: sealed, serialised, read back and checked."""
+    text = json.dumps(seal(row))
+    before = BOUNDARY["replaced"]
+    checked = backstop(json.loads(text), where)
+    return text if BOUNDARY["replaced"] == before else json.dumps(checked)
+
+
+def answer_text(doc):
+    """The answer (or an error answer): sealed, serialised, read back and checked; a string the check had to replace,
+    here or in a paging file, makes a complete answer partial, and the answer says so."""
+    text = json.dumps(seal(doc), indent=2)
+    checked = backstop(json.loads(text), "")
+    checked["boundary"] = {"strings_withheld_at_the_way_out": BOUNDARY["withheld"], "strings_replaced_by_the_check": BOUNDARY["replaced"],
+                           "replaced_at": list(BOUNDARY["where"]),
+                           "note": "every key and value of this answer and of its paging files was withheld by shape as it was written, then read back "
+                                   "and checked with the same rules; a string the check replaced is <withheld: N bytes>"}
+    if BOUNDARY["replaced"] and checked.get("status") == "complete":
+        checked["status"] = "partial"
+        checked["status_basis"] = "%s; %d string(s) still held a token-shaped text when the answer was checked on its way out and were replaced by <withheld: N bytes> (see boundary)" % (
+            checked.get("status_basis") or "", BOUNDARY["replaced"])
+    return json.dumps(checked, indent=2)
+# END SHARED BOUNDARY
 # BEGIN SHARED FILES
 # The same text is in virtualization_inventory and snapshot_chain_check; tests/pack-virtualization-shared.test.ts holds the
 # copies equal. The evidence is a set of files: a directory walked without following a link, and/or files named one by one.
@@ -700,6 +898,18 @@ class Index:
         if len(hits) > 1:
             return None, "ambiguous_basename"
         return None, "not_in_set"
+
+
+EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}")
+
+
+def ext_of(rel):
+    """The extension a file is counted under: a short one of letters and digits as it is (lower case), none as (none),
+    and any other under one bucket that shows nothing of it (a file name can carry a token after its last dot)."""
+    ext = posixpath.splitext(posixpath.basename(rel))[1]
+    if not ext:
+        return "(none)"
+    return ext.lower() if EXTENSION.fullmatch(ext) else "(other extensions)"
 # END SHARED FILES
 
 
@@ -773,7 +983,7 @@ def load_xml(source, limit):
             parser.Parse(chunk, False)
         parser.Parse(b"", True)
     except (expat.ExpatError, ValueError, RecursionError, MemoryError) as exc:
-        return None, "not well-formed or over a limit (%s)" % str(exc)[:120]
+        return None, "not well-formed or over a limit (%s)" % brief(exc, 160)
     return state["root"], None
 
 
@@ -879,7 +1089,8 @@ def read_lines(fh):
 
 
 def key_report(not_shown, sensitive):
-    return {"keys_not_shown": not_shown, "keys_that_look_like_credentials": [{"name": k, "line": n, "value_chars": v} for k, n, v in sensitive[:MAX_NAMED_KEYS]],
+    return {"keys_not_shown": not_shown, "keys_that_look_like_credentials": [dict({"name": e[0], "line": e[1], "value_chars": e[2]}, **({"section": e[3]} if len(e) > 3 else {}))
+                                                                             for e in sensitive[:MAX_NAMED_KEYS]],
             "credential_like_keys_total": len(sensitive),
             "note": "a value under such a key is at that line of the file, not in this answer; treat it as a secret to rotate"}
 
@@ -921,9 +1132,11 @@ def parse_vmx(fh, sink, rec, shown):
         name, line = fields.get("filename", (None, None))
         if name is None:
             continue
-        kind = (fields.get("devicetype", (None,))[0] or "").lower()
-        sink.disk_ref(vm, rec["rel"], name, device=dev, device_type=kind or None, present=fields.get("present", (None,))[0], mode=fields.get("mode", (None,))[0],
-                      locator={"file": rec["id"], "line": line}, role="optical or image" if "cdrom" in kind or name.lower().endswith(".iso") else "disk")
+        raw_type = fields.get("devicetype", (None,))[0]
+        kind = (raw_type or "").lower()        # folded for the comparison only: the value is shown as written, through the shape check
+        sink.disk_ref(vm, rec["rel"], name, device=dev, device_type=shown(raw_type, rec["id"], "deviceType") if raw_type else None, present=fields.get("present", (None,))[0],
+                      mode=fields.get("mode", (None,))[0], locator={"file": rec["id"], "line": line},
+                      role="optical or image" if "cdrom" in kind or name.lower().endswith(".iso") else "disk")
     if capped:
         return "partial", "the file has more than %d lines: read to that point, and what was read is listed" % MAX_LINES
     return ("parsed", None) if not bad else ("parsed", "%d line(s) were neither a key = \"value\" line nor a comment: counted, not read" % bad)
@@ -977,8 +1190,10 @@ def parse_vmsd(fh, sink, rec, shown):
 
 
 def vmware_path(path):
-    """The datastore a /vmfs/volumes/<datastore>/... path names, which is all this tool takes from the path."""
-    m = re.match(r"^/vmfs/volumes/([^/]+)/", path or "")
+    """The datastore a /vmfs/volumes/<datastore>/... path names, which is all this tool takes from the path. The piece
+    is taken from the path AFTER the whole was withheld by shape: a token split at `/` is withheld as one, never shown
+    piece by piece."""
+    m = re.match(r"^/vmfs/volumes/([^/]+)/", seal_text(path, "text") if path else "")
     return m.group(1) if m else None
 
 
@@ -1029,16 +1244,18 @@ def parse_libvirt_domain(root, sink, rec, shown):
     type_el = child(os_el, "type") if os_el is not None else None
     mem = child(root, "memory")
     devices = child(root, "devices")
-    credential_attrs = []
+    credential_attrs, credential_total = [], 0
     if devices is not None:
         for i, g in enumerate(children(devices, "graphics"), 1):
             if "passwd" in g.attrib:
-                credential_attrs.append({"where": "/domain/devices/graphics[%d]@passwd" % i, "value_chars": len(g.attrib["passwd"])})
+                credential_total += 1
+                if len(credential_attrs) < MAX_NAMED_KEYS:          # named up to the cap, all counted
+                    credential_attrs.append({"where": "/domain/devices/graphics[%d]@passwd" % i, "value_chars": len(g.attrib["passwd"])})
     vm = sink.emit("vms", {"format": "libvirt_domain", "name": shown(name, rec["id"], "name"), "uuid": text_of(root, "uuid"), "virt_type": root.attrib.get("type"),
                            "machine": type_el.attrib.get("machine") if type_el is not None else None, "arch": type_el.attrib.get("arch") if type_el is not None else None,
                            "memory": (mem.text or "").strip() + " " + mem.attrib.get("unit", "KiB") if mem is not None else None,
                            "vcpus": text_of(root, "vcpu"), "locator": {"file": rec["id"], "element": "/domain"},
-                           "credential_like_attributes": credential_attrs,
+                           "credential_like_attributes": credential_attrs, "credential_like_attributes_total": credential_total,
                            "credential_note": "a console password sits at that attribute; it is not shown and is a secret to rotate" if credential_attrs else None})
     if devices is None:
         return "parsed", "the domain has no <devices> element"
@@ -1082,10 +1299,23 @@ PVE_SNAP_SHOWN = ("parent", "snaptime", "vmstate", "snapstate", "description")
 
 
 def pve_ids(rel):
-    parts = rel.split("/")
+    parts = seal_text(rel, "text").split("/")      # the pieces of the path after the whole was withheld by shape
     node = parts[parts.index("nodes") + 1] if "nodes" in parts and parts.index("nodes") + 1 < len(parts) - 1 else None
     m = re.match(r"^(\d+)\.conf$", parts[-1])
     return node, (m.group(1) if m else None)
+
+
+def pve_section_kind(sname):
+    """current (the configuration), pending (changes not applied yet), special (Proxmox's own sections such as
+    [special:cloudinit], the cloud-init settings last applied) or snapshot (every other section is named by a snapshot)."""
+    name = sname.split("#dup")[0]
+    if sname == "":
+        return "current"
+    if name == "PENDING":
+        return "pending"
+    if name.startswith("special:"):
+        return "special"
+    return "snapshot"
 
 
 def parse_pve_conf(fh, sink, rec, shown):
@@ -1125,17 +1355,21 @@ def parse_pve_conf(fh, sink, rec, shown):
         for k, (v, n) in sec["kv"].items():
             if sname == "" and k not in PVE_SHOWN and not PVE_DISK.match(k) and not re.match(r"^net\d+$", k) and k not in PVE_SNAP_SHOWN:
                 not_shown += 1
-                if SENSITIVE_KEY.search(k):
-                    sensitive.append((shown(k, rec["id"], "key"), n, len(v)))
+            # a credential-like key is named wherever it sits: a snapshot or a special section keeps its own copy of the settings
+            if SENSITIVE_KEY.search(k) and (sname != "" or k not in PVE_SHOWN):
+                sensitive.append((shown(k, rec["id"], "key"), n, len(v), "current" if sname == "" else shown(sname.split("#dup")[0], rec["id"], "section")))
     vm = sink.emit("vms", {"format": "pve_conf", "vmid": vmid, "node": shown(node, rec["id"], "node"), "name": shown((main.get("name") or main.get("hostname") or (None,))[0], rec["id"], "name"),
                            "kind": "container" if "/lxc/" in "/" + rec["rel"] else "qemu", "os_type": (main.get("ostype") or (None,))[0], "machine": (main.get("machine") or (None,))[0],
                            "bios": (main.get("bios") or (None,))[0], "cores": (main.get("cores") or (None,))[0], "sockets": (main.get("sockets") or (None,))[0],
                            "memory_mb": (main.get("memory") or (None,))[0], "lock": (main.get("lock") or (None,))[0], "template": (main.get("template") or (None,))[0],
-                           "current_parent_snapshot": shown((main.get("parent") or (None,))[0], rec["id"], "parent"), "snapshot_sections": [s for s in sections if s not in ("", "PENDING")],
+                           "current_parent_snapshot": shown((main.get("parent") or (None,))[0], rec["id"], "parent"),
+                           "snapshot_sections": [shown(s.split("#dup")[0], rec["id"], "snapshot") for s in sections if pve_section_kind(s) == "snapshot"],
+                           "special_sections": [shown(s.split("#dup")[0], rec["id"], "section") for s in sections if pve_section_kind(s) == "special"],
+                           "special_sections_note": "a [special:...] section is Proxmox's own (such as the cloud-init settings last applied), not a snapshot",
                            "pending_section_present": "PENDING" in sections, "comment_lines_not_shown": sections[""]["comment_lines"],
                            "locator": {"file": rec["id"], "first_line": 1}, **key_report(not_shown, sensitive)})
     for sname, sec in sections.items():
-        is_snap = sname not in ("", "PENDING")
+        is_snap = pve_section_kind(sname) == "snapshot"
         label = "snapshot %s" % sname if is_snap else ""
         sid = None
         if is_snap:
@@ -1150,7 +1384,7 @@ def parse_pve_conf(fh, sink, rec, shown):
             m = PVE_DISK.match(k)
             if m or re.match(r"^(mp\d+|rootfs)$", k):
                 volume, _, options = v.partition(",")
-                storage, _, vol = volume.partition(":")
+                storage, _, vol = seal_text(volume, "text").partition(":")    # split after the whole was withheld: user-info spans the `:`
                 opts = dict(o.split("=", 1) for o in options.split(",") if "=" in o) if options else {}
                 sink.disk_ref(sid or vm, rec["rel"], volume if (":" in volume or "/" in volume) else None, file_like=bool(re.search(r"\.(qcow2|raw|vmdk|vhdx?|img|iso)$", volume, re.I)), section=sname or "current", device=k, role=("snapshot disk" if is_snap else "disk"),
                               storage=shown(storage, rec["id"], "storage") if vol else None, volume=shown(vol, rec["id"], "volume") if vol else None,
@@ -1303,7 +1537,7 @@ def main():
                 kind = classify(rec, head, max_file)
                 kinds[kind.split(":")[0] if kind.startswith(("unsupported", "refused")) else kind] += 1
                 if kind == "other":
-                    ext = posixpath.splitext(rec["rel"])[1].lower()[:32] or "(none)"
+                    ext = ext_of(rec["rel"])
                     other_ext[ext if (ext in other_ext or len(other_ext) < 2000) else "(other extensions)"] += 1
                     continue
                 sink.current_file = rec
@@ -1358,7 +1592,7 @@ def main():
         skipped = sum(files.skipped_counts.values())
         outcome = ({"status": "partial", "status_basis": "the set holds no file that could be read; %d entr(ies) were skipped (links, special files, directories too deep, unreadable)%s: the answer names them" % (skipped, ("; " + "; ".join(partial)) if partial else "")}
                    if skipped or partial else {"status": "failed", "status_basis": "the set holds no file"})
-    print(json.dumps({
+    print(answer_text({
         "parser": PARSER, **outcome,
         "root": files.root_shown, "files_in_set": len(files.files), "kinds": dict(kinds), "states": dict(states),
         "other_files_by_extension": dict(other_ext.most_common(20)),
@@ -1373,7 +1607,7 @@ def main():
                    "xml_elements": MAX_XML_ELEMENTS, "xml_depth": MAX_XML_DEPTH},
         "note": "An inventory lists what the files say exist. A configuration or an inventory entry does not show that a VM ran, still exists or was not deleted; a disk 'not in the set' is a "
                 "statement about the files given. Versions are the strings the files carry; what they mean for a given product release is for the vendor's documentation of that release.",
-    }, indent=2))
+    }))
     return 0 if outcome["status"] != "failed" else 1
 
 
