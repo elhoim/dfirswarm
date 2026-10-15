@@ -415,3 +415,37 @@ test("a piece of a key next to a piece withheld alone is withheld with it (the g
     assert.deepEqual(JSON.parse(r.stdout), cases.map((c) => c[1]), path);
   }
 });
+
+test("a URL target's path is read by the `/` rule in shown_target itself, not only when the answer is sanitised again: random AWS and base64 keys in https:// paths at the measured residue", () => {
+  const items = realistic(5151, 400).map((x) => ({ ...x, text: `https://h.example/${x.secret}` }));
+  const r = py(DOC_STRUCTURE, "print(json.dumps([m.shown_target(t) for t in json.load(sys.stdin)]))", items.map((i) => i.text));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout) as string[];
+  const tally: Record<string, { n: number; whole: number }> = {};
+  items.forEach((it, k) => {
+    const t = (tally[it.shape] ??= { n: 0, whole: 0 });
+    t.n++;
+    if (out[k]!.includes(it.secret)) t.whole++;
+  });
+  for (const [shape, t] of Object.entries(tally)) assert.ok(t.whole / t.n <= RESIDUE[shape]!.whole, `${shape}: printed whole ${t.whole} of ${t.n}`);
+  // the review's example
+  const one = py(DOC_STRUCTURE, "print(json.dumps(m.shown_target('https://h.example/FpZlLqsVwBAfe5y41rIEM/i8VNUPl9SmEEoWL2Hy')))");
+  assert.equal(JSON.parse(one.stdout), "https://h.example/<token-shaped text withheld 40 characters>");
+});
+
+test("a password that holds `@` is withheld to the last `@` before the host, cut or not, and in a mailto: address; plain addresses are kept", () => {
+  const cases: [string, string][] = [
+    ["u:p@ss@host.example", "<userinfo withheld 6 characters>@host.example"],
+    ["x/u:p@ss@w0rd@host.example/a", "x/<userinfo withheld 11 characters>@host.example/a"],
+    ["svc:Hunter@2Secret@", "<userinfo withheld 18 characters>@"],
+    ["mailto:usr:pa@ss@host.example", "mailto:usr:<userinfo withheld 5 characters>@host.example"],
+    ["contact a@b.com and c@d.com", "contact a@b.com and c@d.com"],
+  ];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", cases.map((c) => c[0]));
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), cases.map((c) => c[1]), path);
+  }
+  const url = py(DOC_STRUCTURE, "print(json.dumps(m.shown_target('https://u:p@ss@h.example/x')))");
+  assert.equal(JSON.parse(url.stdout), "https://<userinfo withheld 6 characters>@h.example/x");
+});

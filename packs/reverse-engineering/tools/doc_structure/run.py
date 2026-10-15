@@ -343,7 +343,9 @@ def shown_target(text):
     if len(text) > SHOWN_TARGET:
         return "<a target of %d characters: longer than the %d shown, so not shown; the whole is in the values file with write_values>" % (len(text), SHOWN_TARGET)
     if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text):
-        return redact_target(text)
+        # the URL's own rules (user-info to the last `@`, query values, fragment, host), then the sanitiser over the whole, as for any
+        # other string: a base64 key joined by `/` in the path is read across its pieces here too
+        return shown_path(redact_target(text))
     return cell(shown_path(text))
 
 
@@ -384,11 +386,12 @@ VALUES = [None]    # the values file of this call, once it exists: an answer tha
 # the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
-# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@`) is withheld here.
+MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^?\s<>]*)(?=@)", re.I)
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
-# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A format string (`user:%s@%s`) is kept.
-CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A password may hold `@`: the user-info
+# runs to the last `@` before the host, as a URL's does (RFC 3986 3.2.1). A format string (`user:%s@%s`) is kept.
+CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/:<>]{1,128}(?=@)", re.I)
 # The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
 # the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
 # its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
