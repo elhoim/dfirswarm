@@ -347,7 +347,7 @@ test("P2-2 the value of a secret-named key is withheld after `=` or `:`, quoted 
     ["password: Hunter2Secret", "password: <withheld 13 characters>"],
     ['{"AccountKey": "Zm9vYmFyYmF6"}', '{"AccountKey": "<withheld 12 characters>"}'],
     ['Pwd="Hunter 2 Secret"', 'Pwd="<withheld 15 characters>"'],
-    ["pass=Hunter2Secret&x=1", "pass=<withheld 13 characters>&x=1"],
+    ["pass=Hunter2Secret&x=1", "pass=<withheld 17 characters>"],   // `&` stays in the value: a password may hold one (a URL query is split at `&` before, in redact_url)
     ["passphrase=Hunter2Secret", "passphrase=<withheld 13 characters>"],
     ["pw=Hunter2Secret", "pw=<withheld 13 characters>"],
     ["credential=Hunter2Secret", "credential=<withheld 13 characters>"],
