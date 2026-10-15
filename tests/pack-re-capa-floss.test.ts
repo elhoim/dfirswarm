@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RE, childrenOf, gone, pidFile, put, startDetached, stub, withCwd } from "./pack-re-harness.ts";
@@ -201,7 +201,9 @@ test("the harness kills the recipe's process group: the engine and what it start
     assert.notEqual((await coverage(out)).status, "complete", "a receipt from the first moment says the recipe did not finish");
     // SIGTERM
     const out2 = join(cwd, "catalog2");
-    await put(cwd, "pids/.keep", "");
+    // the first run's pid file goes first: read again at once, it named the engine of the first run, and the signal could reach the
+    // second recipe before it had started its engine (or its handlers)
+    await rm(join(cwd, "pids", "capa.pid"), { force: true });
     const run2 = startDetached(CAPA_FLOSS, cwd, {}, { PIDS: join(cwd, "pids") }, bin, ["run", "--target", JSON.stringify({ paths: [join(cwd, "inputs/s.exe")] }), "--out", out2]);
     const capa2 = await pidFile(join(cwd, "pids", "capa.pid"));
     await new Promise((r) => setTimeout(r, 300));
