@@ -268,7 +268,8 @@ test("recovery_key_scan declares the same, and writes no value in a job that is 
   const args = JSON.stringify({ path: "work/a1/notes.txt", write_values: true });
   const hand = await submitted(svc, "a1", { kind: "command", command: `printf '%s' '${args}' | python3 tools/recovery_key_scan/run.py > "$OUT/answer.json"; true`, inputs: undefined });
   const answer = JSON.parse(await outFile(S, hand.id, "answer.json"));
-  assert.deepEqual([answer.ok, answer.write_values, answer.written], [false, "refused", false]);
+  assert.deepEqual([answer.write_values, answer.written], ["refused", false]);
+  assert.match(answer.error, /not run as secret output/);
   assert.equal(existsSync(join(storePaths(S).jobs, hand.id, "out", "recovery-passwords.jsonl")), false);
   await svc.stop("test over");
 });

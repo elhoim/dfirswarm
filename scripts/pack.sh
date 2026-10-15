@@ -139,6 +139,24 @@ if os.path.isdir(tdir):
             errors.append("tools/%s: entry %s is missing" % (name, entry))
         if not tm.get("description", "").strip():
             errors.append("tools/%s has an empty description" % name)
+        # The harness reads one key of its own, secret_output (scripts/output-hygiene.ts parseSecretDeclaration): "required", or
+        # { "when_args": [names of this tool's params] }. A declaration it cannot read would be refused at every job of the tool.
+        if "secret_output" in tm:
+            decl, tparams = tm["secret_output"], tm.get("params")
+            if decl == "required":
+                pass
+            elif not (isinstance(decl, dict) and list(decl) == ["when_args"]):
+                errors.append('tools/%s/manifest.json: secret_output is "required" or { "when_args": [parameter names] }' % name)
+            else:
+                names = decl["when_args"]
+                if not isinstance(names, list) or not 1 <= len(names) <= 16 or not all(isinstance(n, str) and n for n in names):
+                    errors.append("tools/%s/manifest.json: secret_output.when_args is a list of one to sixteen parameter names" % name)
+                else:
+                    if len(set(names)) != len(names):
+                        errors.append("tools/%s/manifest.json: secret_output.when_args names a parameter twice" % name)
+                    for n in names:
+                        if not isinstance(tparams, dict) or n not in tparams:
+                            errors.append("tools/%s/manifest.json: secret_output.when_args names %s, which is not a parameter of the tool" % (name, n))
         tools[name] = tm
 
 # --- recipes ----------------------------------------------------------------

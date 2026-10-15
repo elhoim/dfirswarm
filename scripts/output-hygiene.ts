@@ -18,9 +18,13 @@
  * with its sha256, and the whole package is scanned for what should not be
  * in it, the small text outputs of sensitive jobs included.
  *
+ * A tool's manifest may declare it too (`secret_output`, below): a job of
+ * such a tool is run as if the agent had said so, so the protection does not
+ * rest on an agent remembering a skill's sentence.
+ *
  * Nothing here knows a tool or a format: sensitivity comes from what the
- * agent declared and what the job service recorded, and is matched by path,
- * digest and job id.
+ * agent declared, what a tool's manifest declared and what the job service
+ * recorded, and is matched by path, digest and job id.
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -31,6 +35,8 @@ export type Sensitivity = {
   /** The sensitive jobs it was made from (derived). */
   from: string[];
   note: string;
+  /** secret_output only: the tool's manifest declared it (the agent's flag was not needed). */
+  declared?: "tool_manifest";
 };
 
 /** A sealed output file, as its job's manifest lists it. */
@@ -50,8 +56,62 @@ export type SensitiveIndex = {
 };
 
 /** A job's sensitivity for its own spec: secret_output, or null (derived sensitivity is decided at seal, from what it read). */
-export function ownSensitivity(spec: { secret_output?: unknown }): Sensitivity | null {
-  return spec.secret_output === true ? { why: "secret_output", from: [], note: "run with secret_output: every output it sealed is sensitive" } : null;
+export function ownSensitivity(spec: { secret_output?: unknown; secret_output_by?: unknown }): Sensitivity | null {
+  if (spec.secret_output !== true) return null;
+  return spec.secret_output_by === "tool_manifest"
+    ? { why: "secret_output", from: [], note: "run with secret_output, as the tool's manifest declares: every output it sealed is sensitive", declared: "tool_manifest" }
+    : { why: "secret_output", from: [], note: "run with secret_output: every output it sealed is sensitive" };
+}
+
+/**
+ * What a tool's manifest says about its jobs' secret output, one key,
+ * `secret_output`:
+ *
+ *   "required"                      every job of the tool is secret output
+ *   { "when_args": ["a", "b"] }     a job is secret output when any of these
+ *                                   arguments is set (the tool's secret mode,
+ *                                   such as a flag that writes values to a file)
+ *
+ * A name in `when_args` is one of the tool's own `params`. Left out, the tool
+ * declares nothing and the agent's flag decides, as before. A declaration that
+ * is not one of these is not guessed at: the job is refused with the reason,
+ * because ignoring it would drop the protection the author asked for.
+ * Pure; it reads one key and knows no tool.
+ */
+export type SecretDeclaration = { mode: "required" } | { mode: "when_args"; args: string[] };
+
+export function parseSecretDeclaration(raw: unknown, params: Record<string, unknown> | undefined, present: boolean): { ok: true; declaration: SecretDeclaration | null } | { ok: false; reason: string } {
+  if (!present) return { ok: true, declaration: null };
+  if (raw === "required") return { ok: true, declaration: { mode: "required" } };
+  const bad = (why: string) => ({ ok: false as const, reason: `its manifest's secret_output is not understood (${why}); it is "required", or { "when_args": [parameter names] }` });
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("not \"required\" and not an object");
+  const keys = Object.keys(raw);
+  if (keys.length !== 1 || keys[0] !== "when_args") return bad("an object takes when_args and nothing else");
+  const args = (raw as { when_args: unknown }).when_args;
+  if (!Array.isArray(args) || !args.length || args.length > 16 || args.some((a) => typeof a !== "string" || !a)) return bad("when_args is a list of one to sixteen parameter names");
+  const seen = new Set<string>();
+  for (const a of args as string[]) {
+    if (seen.has(a)) return bad(`${a} is named twice`);
+    seen.add(a);
+    if (!params || !Object.hasOwn(params, a)) return bad(`${a} is not a parameter of the tool`);
+  }
+  return { ok: true, declaration: { mode: "when_args", args: args as string[] } };
+}
+
+/** Whether an argument is set: true, a number other than zero, or a string, list or object that is not empty (false, null, "", 0, [] and {} are not). */
+export function argIsSet(v: unknown): boolean {
+  if (v === undefined || v === null || v === false) return false;
+  if (typeof v === "number") return v !== 0 && !Number.isNaN(v);
+  if (typeof v === "string") return v.length > 0;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "object") return Object.keys(v as object).length > 0;
+  return true;
+}
+
+/** Whether a tool's declaration makes a job with these arguments secret output. */
+export function declaredSecretOutput(declaration: SecretDeclaration | null, args: Record<string, unknown>): boolean {
+  if (!declaration) return false;
+  return declaration.mode === "required" || declaration.args.some((a) => argIsSet(args[a]));
 }
 
 /**

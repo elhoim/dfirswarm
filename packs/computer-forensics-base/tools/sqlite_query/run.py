@@ -62,7 +62,8 @@ a 0600 file under $OUT, and the answer carries locators (table, a row locator, c
     magnitude (a PIN stored as an integer loses its leading zeros: 0123 is integer:3); a real's is the characters of Python's
     shortest repr, which does not (1e+20 is real:5, 12345.6 is real:7).
   * It follows the secret-safe output pattern of recovery_key_scan (docs/packs.md, "Secrets and sensitive output"): refused
-    outside a job (JOB_ID and OUT set) as a JSON answer before anything is opened; the values file created once the table is
+    outside a job (JOB_ID and OUT set), and in a job the harness did not run as secret output (SECRET_OUTPUT=1 is set for the
+    process of a secret job; the manifest makes a job of this tool with write_values one), as a JSON answer before anything is opened; the values file created once the table is
     found and its layout read, before the first row, with O_EXCL and O_NOFOLLOW and mode 0600 (a wrong table name, or a file
     that is not SQLite, leaves nothing behind; a second export in one job's $OUT is refused by name, never overwrites); no hash,
     digest or fragment of a value anywhere; a printed name that is shaped like a token withheld by the shared block below (the
@@ -955,8 +956,9 @@ class SecretValues:
         self.shown = None
         if not enabled:
             return
-        if not (self.job and self.out):
-            raise SecretValuesRefused(REFUSED_OUTSIDE_A_JOB)
+        refusal = values_refusal()
+        if refusal:
+            raise SecretValuesRefused(refusal)
         self.path = Path(self.out) / VALUES_NAME
         self.shown = "store/jobs/%s/out/%s" % (safe_name(self.job), VALUES_NAME)
         # Created once the table is known and before its first row is read: a file or a link already at that name is refused by
@@ -1128,6 +1130,20 @@ class SecretValues:
 REFUSED_OUTSIDE_A_JOB = ("write_values is refused outside a job: a value written here would be an ordinary file, not a sealed secret "
                          "output. Run it as job_run(tool: \"sqlite_query\", secret_output: true, args: {...}) and ask again there. "
                          "Nothing was written.")
+REFUSED_NOT_SECRET = ("write_values is refused in a job that was not run as secret output: its files would be sealed as ordinary output. "
+                      "The harness sets SECRET_OUTPUT=1 for a secret job's process and it is not set here. Run it as "
+                      "job_run(tool: \"sqlite_query\", args: {...}), whose manifest makes the job secret output, or give a command job "
+                      "secret_output: true. Nothing was written.")
+
+
+def values_refusal():
+    """Why write_values cannot be honoured here, or None: outside a job (JOB_ID and OUT not both set), or in a job the harness did not
+    run as secret output (SECRET_OUTPUT not 1). Decided before anything is opened or written."""
+    if not (os.environ.get("JOB_ID") and os.environ.get("OUT")):
+        return REFUSED_OUTSIDE_A_JOB
+    if os.environ.get("SECRET_OUTPUT") != "1":
+        return REFUSED_NOT_SECRET
+    return None
 
 
 def values_fail(message, **extra):
@@ -1898,8 +1914,9 @@ def main():
         say({"ok": False, "error": "apply_wal is not a parameter of sqlite_query, which opens the file it is given read-only and immutable and never applies a WAL. "
                                    "Run sqlite_snapshot on the database: it copies the set (database, -wal, -shm, -journal) with hashes and has SQLite apply the WAL "
                                    "in the copy, and then give this tool the snapshot's directory or its `database` as db_path.", "db_path": db}, 1)
-    if write_values and not (os.environ.get("JOB_ID") and os.environ.get("OUT")):
-        say({"ok": False, "error": REFUSED_OUTSIDE_A_JOB, "tool": TOOL, "write_values": "refused", "written": False}, 1)
+    refusal = values_refusal() if write_values else None
+    if refusal:
+        say({"ok": False, "error": refusal, "tool": TOOL, "write_values": "refused", "written": False}, 1)
     if not os.path.exists(db):
         say({"ok": False, "error": "database not found", "db_path": db}, 1)
     given = db

@@ -44,7 +44,7 @@ import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sa
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
-import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
+import { declaredSecretOutput, derivedFrom, derivedSensitivity, ownSensitivity, parseSecretDeclaration, sensitiveIndex, snapshotObjects, type SecretDeclaration, type Sensitivity } from "./output-hygiene.ts";
 import { execRefused, execRefusedWords, type ExecRefused } from "./job-exec-refused.ts";
 import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
@@ -219,10 +219,13 @@ export type JobSpec = {
   independent?: boolean;
   /**
    * Every output this job seals is sensitive (docs/adr/0016): its result
-   * may hold a secret. Said by the agent; the harness never reads the bytes
-   * to decide.
+   * may hold a secret. Said by the agent, or declared by the tool's manifest
+   * (secret_output_by); the harness never reads the bytes to decide. The
+   * job's process is told with SECRET_OUTPUT=1.
    */
   secret_output?: boolean;
+  /** The tool's manifest declared this job secret output (a "secret_output" key it reads: output-hygiene.ts parseSecretDeclaration), whether or not the agent said so. */
+  secret_output_by?: "tool_manifest";
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -809,9 +812,9 @@ export class JobService {
   }
 
   /** A pack or forged tool, sealed as its manifest says, and its arguments checked against the manifest's params. */
-  private async toolCheck(name: string, args: Record<string, unknown>): Promise<{ ok: true; runtime: string; entry: string; sha256: string } | { ok: false; reason: string }> {
+  private async toolCheck(name: string, args: Record<string, unknown>): Promise<{ ok: true; runtime: string; entry: string; sha256: string; secret: boolean } | { ok: false; reason: string }> {
     if (!/^[a-z0-9_]{1,64}$/.test(name)) return { ok: false, reason: `${name} is not a tool name` };
-    let man: { runtime?: string; entry?: string; sha256?: string; params?: Record<string, { type?: string; required?: boolean; enum?: string[] }> };
+    let man: { runtime?: string; entry?: string; sha256?: string; secret_output?: unknown; params?: Record<string, { type?: string; required?: boolean; enum?: string[] }> };
     try {
       man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8"));
     } catch {
@@ -837,7 +840,13 @@ export class JobService {
       if (p.enum && !p.enum.includes(String(v))) return { ok: false, reason: `tool ${name}: ${key} must be one of ${p.enum.join(", ")}` };
     }
     for (const key of Object.keys(args)) if (!(key in (man.params ?? {}))) return { ok: false, reason: `tool ${name} takes no ${key}` };
-    return { ok: true, runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha };
+    // Its manifest's word on secret output (a job of the tool is run as the
+    // agent's secret_output would run it): read here, from the manifest this
+    // job runs, and refused when it is not understood.
+    const declared = parseSecretDeclaration(man.secret_output, man.params, Object.hasOwn(man, "secret_output"));
+    if (!declared.ok) return { ok: false, reason: `tool ${name}: ${declared.reason}` };
+    const secret = declaredSecretOutput(declared.declaration as SecretDeclaration | null, args);
+    return { ok: true, runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, secret };
   }
 
   /**
@@ -1034,6 +1043,8 @@ export class JobService {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
       if (!checked.ok) return { reason: checked.reason };
+      // The tool's manifest says this job is secret output: so it is, whatever the agent said (false included).
+      if (checked.secret) return { ...base, secret_output: true, secret_output_by: "tool_manifest", tool: String(raw.tool), args };
       return { ...base, tool: String(raw.tool), args };
     }
     if (kind === "command") {
@@ -1327,7 +1338,8 @@ export class JobService {
       observe
         ? [...pip, ...HEARTBEAT_LINES, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), HEARTBEAT_STOP, ...pipAfter]
         : [...pip, ...HEARTBEAT_LINES, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", HEARTBEAT_STOP, ...pipAfter];
-    const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`];
+    // SECRET_OUTPUT=1 for a job run as secret output (the agent's flag, or its tool's manifest), so a tool can refuse a values mode in a job that is not; unset for any other, whatever the image carries.
+    const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`, job.spec.secret_output === true ? "export SECRET_OUTPUT=1" : "unset SECRET_OUTPUT"];
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
       if (!checked.ok) throw new Error(checked.reason);
@@ -1452,7 +1464,7 @@ export class JobService {
       maxDurationSec: job.spec.timeout_seconds + 120,
       workdir: this.S,
       mounts: placed.mounts,
-      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(net?.env ?? {}) },
+      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(job.spec.secret_output === true ? { SECRET_OUTPUT: "1" } : {}), ...(net?.env ?? {}) },
       network,
       ...(net ? { hostPorts: [net.port] } : {}),
       command: ["bash", "/job/run.sh"],
@@ -2687,7 +2699,7 @@ export function describe(job: JobRecord): string {
 /** What a sensitive job's outputs mean for whoever uses them, in one sentence. */
 export function sensitiveWords(job: Pick<JobRecord, "id" | "sensitive">): string {
   if (!job.sensitive) return "";
-  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? "it ran with secret_output" : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
+  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? `it ran with secret_output${job.sensitive.declared === "tool_manifest" ? ", which the tool's manifest declares" : ""}` : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
 }
 
 
@@ -2720,6 +2732,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
+    ...(job.spec.secret_output_by ? { secret_output_declared_by: "the tool's manifest" } : {}),
     ...(job.sensitive ? { sensitive: sensitiveWords(job) } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
