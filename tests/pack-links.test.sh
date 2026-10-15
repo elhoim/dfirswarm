@@ -69,7 +69,8 @@
 #     `unreferenced_ok`;
 #   - the report rules read a skill's whole file, front matter included (without
 #     `mentions:`, `id:` and `needs:`: an id is a path and `id: aws/cloudtrail` does
-#     not name the program `aws`), since a `tools:` list is a naming too, and the
+#     not name the program `aws`, and neither does a body that cites a skill of its
+#     own pack by that id: a router cites every leaf), since a `tools:` list is a naming too, and the
 #     `unused` check makes sure the body agrees; but a plain-word program in a
 #     front matter list is no command in code, so a `requires_host: [make]` names
 #     nothing;
@@ -204,7 +205,17 @@ for pid in sorted(os.listdir(root)):
             # the file without `mentions:`, `id:` and `needs:` (`id: aws/cloudtrail`
             # does not name the program `aws`).
             kept = "\n".join(l for l in m.group(1).splitlines() if not l.startswith(NOT_NAMING))
-            skills[rel] = {"fm": fm, "all": Text("---\n" + kept + "\n---\n" + text[m.end():]), "body": Text(text[m.end():])}
+            skills[rel] = {"fm": fm, "kept": kept, "text": text, "end": m.end()}
+    # A skill cited by its id names nothing: an id is a path, and `aws/cloudtrail` is not the
+    # program `aws`. Only a pack's own skill ids are blanked, and only whole (a router cites them all).
+    own_ids = sorted((r[len("skills/"):-3].replace(os.sep, "/") for r in skills), key=len, reverse=True)
+    cited = re.compile(r"(?<![A-Za-z0-9_./-])(?:%s)(?![A-Za-z0-9_/-])" % "|".join(re.escape(i) for i in own_ids)) if own_ids else None
+    for rel, s in skills.items():
+        text, end, kept = s.pop("text"), s.pop("end"), s.pop("kept")
+        whole_file, body = "---\n" + kept + "\n---\n" + text[end:], text[end:]
+        if cited:
+            whole_file, body = cited.sub("<skill>", whole_file), cited.sub("<skill>", body)
+        s["all"], s["body"] = Text(whole_file), Text(body)
     packs[pid] = {"meta": meta, "tools": tools, "bins": bins, "pys": pys, "skills": skills,
                   "depends": [re.split(r"[<>=!~ ]", d)[0].strip() for d in meta.get("depends") or []]}
 
@@ -473,6 +484,9 @@ M = {
     # an id or a needs entry is no naming of a program
     "id-spells-program": lambda: (packs["base"]["bins"].append("idbin"),
                                   packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")})),
+    "id-cited-spells-program": lambda: (packs["base"]["bins"].append("idbin"),
+                                        packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                        edit("base", "s/one", more("See `idbin/x` too.\n"))),
     "needs-spells-program": lambda: (packs["base"]["bins"].append("needsbin"),
                                      packs["child"]["skills"].update({"c/two": skill(["child_tool"], [], "Call child_tool.\n", needs=["needsbin"])})),
     # a finding in a pack of its own
@@ -576,6 +590,7 @@ links_case "method_only that is no list" 1 1 "child: method_only is a list of" m
 # an id or a needs entry is no naming (`id: aws/cloudtrail` does not name the program aws)
 links_case "a skill id that spells a program names nothing" 0 1 "base: idbin" id-spells-program
 links_case "a needs entry that spells a program names nothing" 0 1 "base: needsbin" needs-spells-program
+links_case "a skill cited by its id names nothing, though the id spells a program" 0 1 "base: idbin" id-cited-spells-program
 
 # mentions: what a skill discusses and cannot depend on
 links_case "a mention is exempt from the closure" 0 0 "" mention
