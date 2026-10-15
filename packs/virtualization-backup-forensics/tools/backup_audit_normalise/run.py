@@ -253,9 +253,10 @@ def in_job():
 
 
 def describe(exc):
-    """An exception as text for an answer: its type and errno name, and its message withheld by shape, never cut."""
+    """An exception as text for an answer: its type and errno name, and its message withheld by shape (the way out's whole
+    rules, so that nothing they would take is split first), never cut."""
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
+    return seal_text("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)), "text")
 
 
 def fail(message, **extra):
@@ -368,7 +369,7 @@ def decode(data):
 
 # Lossless paging: the page an agent reads stays small, and when there are more rows the whole result is written as JSON
 # Lines under work/<agent>/tool-output (in a job, $OUT/tool-output) and named. The file name is random: it is never a
-# digest of anything asked for (sixteen decimal digits, a shape the withholding rules leave alone). Every row is sealed
+# digest of anything asked for (sixteen decimal digits), and the way out shows this exact name, registered here, as it is. Every row is sealed
 # (the one way out, below) as it is written. A write that fails is an error answer naming the file, never a loss that
 # goes unsaid.
 class LosslessPage:
@@ -391,6 +392,7 @@ class LosslessPage:
             agent = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool")
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
+        OWN_NAMES.update((self.shown, str(self.path)))     # this exact name, and no other of its shape, is shown as it is
 
     def _write(self, row):
         line = row_text(row, "pages/%s/all_results" % self.key)
@@ -462,6 +464,7 @@ class TextFile:
                               "Nothing was written." % (flag, TOOL))
         self.path = Path(out) / name
         self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", job), name)
+        OWN_NAMES.update((self.shown, str(self.path)))
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -524,7 +527,7 @@ def cut_safely(text, limit):
 
 def brief(text, limit=300):
     """A message from a library or a program, withheld by shape whole and then cut safely: never cut first."""
-    return cut_safely(scrub(text if isinstance(text, str) else str(text)), limit)
+    return cut_safely(seal_text(text if isinstance(text, str) else str(text), "text"), limit)
 
 
 class Shower:
@@ -578,29 +581,56 @@ def withheld_summary(shower):
 # The same text is in virtualization_inventory, snapshot_chain_check and backup_audit_normalise; tests/pack-virtualization-
 # shared.test.ts holds the copies equal. The one way out. Every key and every value of an answer, of an error answer and of
 # every row a paging file holds is sealed when it is serialised, whatever code made it: the whole string is withheld by
-# shape (the rules of the shared withholding block, plus the shapes below that block does not catch) before anything cuts
-# or folds it, and the rules are applied until they change nothing more. A GUID that stands alone is shown as it is: it
-# is an identifier the formats carry, and the shape check would take it for a token. Then the serialised text is read back
-# and checked with the same rules: a string they would still change is replaced by <withheld: N bytes> and the answer is
-# partial and says how many. That check is a backstop: it fires only when a string bypassed the seal.
+# shape before anything cuts or folds it, and the rules are applied until they change nothing more. One pass: user-info
+# first (name:password@host is withheld up to the LAST `@` before the host, so an `@` inside a password shows nothing of
+# it), then the shared withholding block's user-info rules, then every token rule (the shared block's and the shapes
+# added here) on the same text: the spans they find are joined where they touch or overlap and each is withheld once, so
+# that no rule's order leaves a piece of what another would take (a JWT in a path, an AWS-style key after `=`). A string
+# that holds zero-width or control characters, a byte that was not UTF-8, or the escape of one (\u200b, \x00) is judged
+# with them taken out as well, and when that reading has something to withhold it is the one shown.
 #
-# The shapes added here: user-info after `:` or `/` (a Proxmox storage:user:password@host, a path with user:password@host
-# in it), which the shared block's lookbehind leaves alone; a base64 key with its padding that holds `/` or `+` (a 16-byte
-# key is 24 characters, under the shared block's 30-character slashed rule); and the head of a prefixed token (AKIA..., ghp_...,
-# github_pat_..., xoxb-..., eyJ...) too short for the shared rule, as a cut or a damaged file can leave it; and a base64 run
-# with a `/` in it whose letters change case as random text does (an AWS-style secret key with one `/`, which the shared
-# block's three-piece rule misses). A word of the tool's own closed vocabulary (VOCABULARY, set by each tool: VMDK create
-# types) is shown as it is, as a GUID is.
-BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
-_GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
-_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@)")
-_SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
+# Shown as they are: a GUID or a VMFS volume id that stands alone (or follows `_`, as in a Hyper-V file name), an
+# identifier the formats carry that the shape check would take for a token; the exact names of the files this run made
+# (its paging files and its values file, registered as each is created: never a pattern, so that a name in the evidence
+# shaped like one is withheld like any other); and a word of the tool's own closed vocabulary (VOCABULARY, set by each
+# tool: VMDK create types). An integer of more than 18 digits is withheld by its size.
+#
+# The shapes added to the shared block's: user-info after `:` or `/` (a Proxmox storage:user:password@host, a path with
+# user:password@host in it); a base64 key with its padding that holds `/` or `+` (a 16-byte key is 24 characters, under
+# the shared block's 30-character slashed rule); a base64 run with a `/` in it whose letters change case as random text
+# does (an AWS-style secret key with one `/`), also right after `=`; the head of a prefixed token (AKIA..., ghp_...,
+# github_pat_..., xoxb-..., eyJ...) too short for the shared rule, as a cut or a damaged file can leave it, and prefixes
+# the shared block does not know (glpat-, sk_live_ and its kin, SG., AIza); the value after a name that says it is a
+# secret (password=, secret:, AccountKey=, api_key=, token=); a private key in PEM form; and a run of more than 18 digits.
+#
+# Then the serialised text is read back and checked (the backstop): by the same rules once, and by a second check written
+# apart from them (_suspect: a PEM private-key marker, a named secret, a long digit run, a known token prefix, user-info,
+# and a long run whose letters and digits change class as random text does, each after zero-width and control characters,
+# their escapes and bytes that were not UTF-8 are taken out), so that a gap in the rules is not by itself a gap in the
+# check. A string either would still change is replaced by <withheld: N bytes>, its place and the check that fired are
+# listed in boundary.replaced_at, and the answer is partial.
+BOUNDARY = {"withheld": 0, "replaced": 0, "where": [], "not_listed": 0, "by": collections.Counter()}
+OWN_NAMES = set()               # the exact names of the files this run made, as the answer shows them
+MAX_REPLACED_LISTED = 1000
+# a GUID, or a VMFS volume id (8-8-4-12 hexadecimal digits), standing alone or after `_` as a Hyper-V file name puts it
+_GUID_ALONE = re.compile(r"(?<![A-Za-z0-9+%/=-])(?:\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?|[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12})(?![A-Za-z0-9_+%/=-])")
+_MARKER = re.compile(r"<(?:[a-z][a-z -]{0,40} )?withheld(?: \d+ characters|: \d+ bytes|: an integer of \d+ bits)>")
+# name:secret@host, the secret running to the last `@` before the host (an `@` inside a password is part of it)
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/<>\"'`]{1,128}(?=@[^\s/@<>\"'`]*(?:[\s/<>\"'`?#]|$))")
+_SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
 _BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
-_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")
+_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}"
+                         r"|glpat-[A-Za-z0-9_-]{4,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{4,}|SG\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?|AIza[0-9A-Za-z_-]{8,}")
+_NAMED_SECRET = re.compile(r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_.-])*(?:pass(?:word|wd|phrase)|secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
+                           r"|private[_-]?key|client[_-]?secret)s?[\"']?\s*[=:]\s*[\"']?)([^\s\"'<>;,&]{1,512})")
+_LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
+_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
+# zero-width and control characters, and a byte that was not UTF-8 (a lone surrogate)
+_INVISIBLE = re.compile("[\x00-\x08\x0b-\x1f\x7f\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\udc80-\udcff]")
+# the same characters written as escapes (a nested JSON value a tool shows as text, a control byte a path shows as \xNN)
+_INVISIBLE_TEXT = re.compile(r"\\u(?:00[01][0-9A-Fa-f]|007[Ff]|00[Aa][Dd]|180[Ee]|200[B-Fb-f]|202[A-Ea-e]|206[0-4]|[Ff][Ee][Ff][Ff])|\\x(?:[01][0-9A-Fa-f]|7[Ff])")
 # A string none of whose rules can match is passed without the slow path: every rule needs one of these.
-_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s")
-# The tool's own file names, made from the job's or agent's id and random digits: shown as they are.
-_OWN_PATH = re.compile(r"(?:work/[A-Za-z0-9_.-]{1,64}|store/jobs/[A-Za-z0-9_.-]{1,64}/out)/(?:tool-output/[a-z_]{1,40}-[a-z_]{1,40}-[0-9]{16}\.jsonl|[a-z]{1,20}-values\.jsonl)")
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|[0-9]{19}|(?i:pass|secret|token|key)|-----BEGIN")
 _SEALED = {}
 
 
@@ -617,30 +647,74 @@ def _random_slashed(run):
     return len(letters) >= 16 and (flips >= 0.33 * len(letters) or (packed and flips >= 0.25 * len(letters))) or _token_run(flat)
 
 
-def _rules_once(text, kind="boundary"):
-    """One application of every withholding rule to a whole string; a GUID standing alone and a word of VOCABULARY are kept."""
-    if not _QUICK.search(text) or _OWN_PATH.fullmatch(text) or text in VOCABULARY:
-        return text
+def _outside(text, pattern, fn):
+    """`fn` applied to the parts of `text` that `pattern` does not match; the matches are kept as they are."""
     out, last = [], 0
-    for m in _GUID_ALONE.finditer(text):
-        out.append(_rules_piece(text[last:m.start()], kind))
+    for m in pattern.finditer(text):
+        out.append(fn(text[last:m.start()]) if m.start() > last else "")
         out.append(m.group())
         last = m.end()
-    out.append(_rules_piece(text[last:], kind))
+    out.append(fn(text[last:]) if last < len(text) else "")
+    return "".join(out)
+
+
+def _rules_once(text, kind="boundary"):
+    """One application of every withholding rule to a whole string; a GUID standing alone, a name this run made and a word
+    of VOCABULARY are kept. A string that holds zero-width or control characters is judged with them taken out as well:
+    when that reading has something to withhold, it is the one shown (a token split by invisible characters is a token)."""
+    if text in OWN_NAMES or text in VOCABULARY:
+        return text
+    if _INVISIBLE.search(text) or _INVISIBLE_TEXT.search(text):
+        flat = _INVISIBLE.sub("", _INVISIBLE_TEXT.sub("", text))
+        sealed = _rules_once(flat, kind)
+        if sealed != flat:
+            return sealed
+    if not _QUICK.search(text):
+        return text
+    hit = _outside(text, _GUID_ALONE, lambda piece: _rules_piece(piece, kind))
     if kind == "boundary":
         COUNTS.pop("boundary", None)
-    return "".join(out)
+    return hit
 
 
 def _rules_piece(piece, kind):
     if not piece or not _QUICK.search(piece):
         return piece
-    if not piece.startswith("UPID:"):          # a Proxmox task id is fields joined by `:` ending in user@realm, not user-info
-        piece = _ANY_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), piece)
-    piece = _SLASHED_RANDOM.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if _random_slashed(m.group()) else m.group(), piece)
-    piece = _BASE64_KEY.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if re.search(r"[/+]", m.group()) else m.group(), piece)
-    piece = scrub(piece, kind)
-    return _TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind), piece)
+    piece = _ANY_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), piece)
+    # the shared block's user-info rules, then every token rule on the same text: what any of them takes is withheld as one
+    # run, so that no rule's order leaves a piece of what another would have taken
+    piece = _outside(piece, _MARKER, lambda part: _BARE_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind),
+                                                                      _USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), part)))
+    return _outside(piece, _MARKER, lambda part: _spans_withheld(part, kind))
+
+
+def _spans_withheld(part, kind):
+    """Every span the shared block's token rules and the shapes added here find in `part`, joined where they touch or
+    overlap, each withheld once."""
+    spans = [(a, b, "token-shaped text") for a, b in token_spans(part)]
+    spans += [m.span() + ("token-shaped text",) for m in _SLASHED_RANDOM.finditer(part) if _random_slashed(m.group())]
+    spans += [m.span() + ("token-shaped text",) for m in _BASE64_KEY.finditer(part) if re.search(r"[/+]", m.group())]
+    spans += [m.span() + ("token-shaped text",) for m in _TOKEN_HEAD.finditer(part)]
+    spans += [m.span(2) + ("secret",) for m in _NAMED_SECRET.finditer(part)]
+    spans += [m.span() + ("long number",) for m in _LONG_DIGITS.finditer(part)]
+    spans += [m.span() + ("private key",) for m in _PRIVATE_KEY.finditer(part)]
+    if not spans:
+        return part
+    spans.sort()
+    merged = []
+    for a, b, what in spans:
+        if merged and a <= merged[-1][1]:
+            prev = merged[-1]
+            merged[-1] = (prev[0], max(prev[1], b), prev[2] if prev[2] == what else "token-shaped text")
+        else:
+            merged.append((a, b, what))
+    out, last = [], 0
+    for a, b, what in merged:
+        out.append(part[last:a])
+        out.append(_withheld(what, b - a, kind))
+        last = b
+    out.append(part[last:])
+    return "".join(out)
 
 
 def seal_text(text, kind="boundary"):
@@ -673,11 +747,19 @@ def boundary_text(text):
     return hit
 
 
+def big_int(value):
+    """An integer of more than 18 digits: no format this pack reads carries one, and its digits can be a secret's."""
+    return isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10 ** 18
+
+
 def seal(value, depth=0):
     """Every key and every value of a structure, as JSON will write it, through boundary_text; a key two keys seal to is
     numbered (`<key> #2`), never merged."""
     if isinstance(value, str):
         return boundary_text(value)
+    if big_int(value):
+        BOUNDARY["withheld"] += 1
+        return "<withheld: an integer of %d bits>" % value.bit_length()
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
@@ -701,16 +783,101 @@ def seal(value, depth=0):
     return boundary_text(str(value))
 
 
+# The second check, written apart from the rules above (none of their patterns is reused): what a secret looks like after
+# zero-width and control characters (or their escapes) and bytes that were not UTF-8 are taken out.
+_S_INVISIBLE = re.compile("[\x00-\x08\x0b-\x1f\x7f\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\udc80-\udcff]|\\\\u(?:00[01][0-9a-f]|20(?:0[b-f]|2[a-e]|6[0-4])|feff|00ad|180e|007f)|\\\\x(?:[01][0-9a-f]|7f)", re.I)
+_S_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY|PRIVATE KEY-----")
+_S_NAMED = re.compile(r"(?i)(?<![a-z])(?:pass(?:word|wd|phrase)|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|client[_-]?secret)s?"
+                      r"[\"']?\s*[=:]\s*[\"']?(?![<\s\"'])[^\s\"']")
+_S_DIGITS = re.compile(r"[0-9]{19}")
+_S_PREFIX = re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12}|(?:gh[pousr]_|github_pat_|glpat-|xox[a-z]-|xapp-|sk-|sk_live_|rk_live_|pk_live_|sk_test_"
+                       r"|npm_|pypi-|shpat_|dop_v1_|AIza|ya29\.|SG\.)[A-Za-z0-9_-]{12}|eyJ[A-Za-z0-9_-]{12}")
+_S_USERINFO = re.compile(r"[^\s/@:<>\"']{1,64}:[^\s/<>\"']{1,128}@[A-Za-z0-9\[]")
+_S_RUN = re.compile(r"[A-Za-z0-9+/_-]{20,}")
+_S_HEX = re.compile(r"[0-9A-Fa-f-]+")
+_S_IDS = re.compile(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+
+
+def _class(c):
+    return 0 if c.isdigit() else 1 if c.isupper() else 2
+
+
+def _random_run(run):
+    """A run that changes between capitals, small letters and digits as random text does (an English name, a path, a
+    version or a hexadecimal identifier does not)."""
+    if _S_HEX.fullmatch(run):
+        return False
+    pieces = [p for p in re.split(r"[/_+-]", run) if p]
+    alnum = "".join(pieces)
+    if len(alnum) < 20 or max(len(p) for p in pieces) < 12:
+        return False
+    kinds = {_class(c) for c in alnum}
+    if len(kinds) < 2:
+        return False
+    lower = [len(r) for r in re.findall(r"[a-z]+", alnum)]
+    if lower and sum(lower) >= 3 * len(lower) and not re.search(r"[A-Z]{2}", alnum):
+        return False                        # words written together (WebServerPrimary01): capitals one at a time, words of three letters or more
+    changes = sum(1 for a, b in zip(alnum, alnum[1:]) if _class(a) != _class(b)) / (len(alnum) - 1)
+    digit_runs = len(re.findall(r"[0-9]+", alnum))
+    if kinds == {0, 1, 2}:
+        return changes >= 0.42 or (changes >= 0.3 and digit_runs >= 4 and len(set(alnum)) >= 0.6 * len(alnum))
+    if kinds == {1, 2}:                    # letters only: only a case pattern no word has
+        return changes >= 0.5 and len(alnum) >= 24
+    return changes >= 0.4 and digit_runs >= 5 and len(set(alnum)) >= 0.5 * len(alnum)     # one case of letters and digits
+
+
+def _suspect(text):
+    """The name of the check a string fails, or None."""
+    if text in OWN_NAMES or text in VOCABULARY:
+        return None
+    flat = _S_INVISIBLE.sub("", text)
+    for name, rule in (("a PEM marker", _S_PEM), ("a named secret", _S_NAMED), ("a long digit run", _S_DIGITS), ("a token prefix", _S_PREFIX), ("user-info", _S_USERINFO)):
+        if rule.search(flat):
+            return name
+    for m in _S_RUN.finditer(_S_IDS.sub(" ", flat)):
+        if _random_run(m.group()):
+            return "a random-looking run"
+    return None
+
+
+def _replace(value, where, check):
+    BOUNDARY["replaced"] += 1
+    BOUNDARY["by"][check] += 1
+    if len(BOUNDARY["where"]) < MAX_REPLACED_LISTED:
+        BOUNDARY["where"].append({"at": where or "/", "check": check})
+    else:
+        BOUNDARY["not_listed"] += 1
+    return "<withheld: %d bytes>" % blen(value)
+
+
+_CHECKED = {}
+
+
+def _verdict(text):
+    """None when the string passes both checks, else the check it fails; remembered per string (keys and values repeat
+    across rows)."""
+    hit = _CHECKED.get(text, False)
+    if hit is False:
+        if _rules_once(text) != text:
+            hit = "the same rules"
+        else:
+            check = _suspect(text)
+            hit = "second check: %s" % check if check else None
+        if len(text) <= 2048:
+            if len(_CHECKED) >= 50000:
+                _CHECKED.clear()
+            _CHECKED[text] = hit
+    return hit
+
+
 def backstop(value, where=""):
-    """The serialised answer read back and checked with the same rules: a string they would still change (a key or a
-    value) is replaced by <withheld: N bytes>, counted, and its place named."""
+    """The serialised answer read back and checked by the same rules once and by the second check: a string either would
+    still change (a key or a value) is replaced by <withheld: N bytes>, counted, and its place named."""
     if isinstance(value, str):
-        if _rules_once(value) == value:
-            return value
-        BOUNDARY["replaced"] += 1
-        if len(BOUNDARY["where"]) < 20:
-            BOUNDARY["where"].append(where or "/")
-        return "<withheld: %d bytes>" % blen(value)
+        check = _verdict(value)
+        return _replace(value, where, check) if check else value
+    if big_int(value):
+        return _replace(str(value), where, "second check: a long digit run")
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
@@ -738,9 +905,10 @@ def answer_text(doc):
     text = json.dumps(seal(doc), indent=2)
     checked = backstop(json.loads(text), "")
     checked["boundary"] = {"strings_withheld_at_the_way_out": BOUNDARY["withheld"], "strings_replaced_by_the_check": BOUNDARY["replaced"],
-                           "replaced_at": list(BOUNDARY["where"]),
+                           "replaced_by_check": dict(BOUNDARY["by"]), "replaced_at": list(BOUNDARY["where"]), "replaced_not_listed": BOUNDARY["not_listed"],
                            "note": "every key and value of this answer and of its paging files was withheld by shape as it was written, then read back "
-                                   "and checked with the same rules; a string the check replaced is <withheld: N bytes>"}
+                                   "and checked by the same rules and by a second check written apart from them; a string either check replaced is "
+                                   "<withheld: N bytes> and its place is in replaced_at (the first %d)" % MAX_REPLACED_LISTED}
     if BOUNDARY["replaced"] and checked.get("status") == "complete":
         checked["status"] = "partial"
         checked["status_basis"] = "%s; %d string(s) still held a token-shaped text when the answer was checked on its way out and were replaced by <withheld: N bytes> (see boundary)" % (
@@ -965,12 +1133,26 @@ def parse_task_index(fh, source, events, clock, max_line, stats):
             result, result_basis = "ok", "status OK"
         elif status.upper().startswith("WARNINGS"):
             result, result_basis = "warning", "status begins WARNINGS"
+        elif status.lower() == "unknown":
+            # the product wrote that it does not know how the task ended (a task whose worker went away); not an error
+            result, result_basis = "unknown", "status unknown: the product did not derive how the task ended (this tool's mapping of that word)"
         else:
-            result, result_basis = "error", "status other than OK"
+            result, result_basis = "error", "status other than OK, WARNINGS or unknown (this tool's mapping)"
         stats["parsed"] += 1
         task = {"pid": int(pid, 16), "pstart": pstart, "upid_layout": product}
         if product == "proxmox_backup_server":
-            task.update(task_counter=int(task_no, 16), worker_id_as_written=wid or None,
+            # Each form shows what the other holds (\x41 is A; unescaping turns `-` into `/`, which can split a token the
+            # written form holds whole): when either is withheld, both are.
+            as_written = None
+            if wid:
+                where = "%s#%d" % (source["id"], events.n + 1)
+                obj_shown, wid_shown = events.shown(tid, where, "worker id"), events.shown(wid, where, "worker id as written")
+                if obj_shown == tid and wid_shown == wid:
+                    as_written = wid
+                else:
+                    as_written = "<withheld %d characters: the worker id is withheld in both its forms>" % len(wid)
+                    tid = "<withheld %d characters: the worker id is withheld in both its forms>" % len(tid)
+            task.update(task_counter=int(task_no, 16), worker_id_as_written=as_written,
                         worker_id_note="Proxmox Backup Server writes the worker id escaped as a systemd unit name; object is it unescaped")
         events.add(source, {"line": n, "byte_offset": off, "byte_length": length}, "pve_task_index", time_utc=start_utc, time_raw=starttime, time_basis="start time, epoch seconds in hexadecimal, UTC by definition",
                    end_time_utc=end_utc, end_time_raw=endtime, category=category, category_basis=basis, action_raw=ttype, object=tid or None, actor=user or None, host=node or None,
@@ -1144,7 +1326,7 @@ def parse_csv(fh, source, events, clock, max_line, stats, mapping, times, catego
 
 
 def shown_names(names):
-    return [scrub(n) for n in names]
+    return [seal_text(n, "text") for n in names]
 
 
 def parse_jsonl(fh, source, events, clock, max_line, stats, mapping, times, category_map, result_map):
@@ -1301,11 +1483,12 @@ def parse_xml(fh, source, events, clock, stats, mapping, times, category_map, re
     import xml.parsers.expat as expat
     try:
         count = xml_stream(fh, record_tag, on_record, max_bytes, clock, on_over)
-    except (expat.ExpatError, ValueError, RecursionError) as exc:
-        stats["read_errors"].append("the XML stopped being readable (%s)" % brief(exc, 160))
+    except (expat.ExpatError, ValueError, LookupError, RecursionError, MemoryError) as exc:
+        # one file's damage (an encoding the reader does not know is a LookupError) ends the reading of that file only
+        stats["read_errors"].append("%s: the XML stopped being readable (%s)" % (source["id"], brief(exc, 160)))
         return
     if count == 0:
-        stats["read_errors"].append("no <%s> element in the file" % scrub(record_tag))
+        stats["read_errors"].append("%s: no <%s> element in the file" % (source["id"], seal_text(record_tag, "text")))
 
 
 # ---- the run ---------------------------------------------------------------------------------------------------------
@@ -1352,7 +1535,7 @@ def main():
     if product and fmt == "auto" and product.lower() not in ("proxmox", "proxmox_ve", "proxmox_backup_server", "pve", "pbs"):
         known = product.lower() in KNOWN_UNSUPPORTED
         fail("product %s is unsupported: no fixture of its format exists, so none is read (%s). Use format declared_csv, declared_jsonl or declared_xml with a mapping you declare." % (
-            scrub(product), "a product this tool knows it does not read" if known else "this tool does not know it"), status_note="unsupported", unsupported_product=scrub(product))
+            seal_text(product, "text"), "a product this tool knows it does not read" if known else "this tool does not know it"), status_note="unsupported", unsupported_product=seal_text(product, "text"))
     limit = want_int(args, "limit", DEFAULT_LIMIT, 1, 100000)
     max_line = want_int(args, "max_line_bytes", MAX_LINE, 4096, 16 << 20)
     max_file = want_int(args, "max_file_bytes", 8 << 30, 1 << 20, 64 << 30)
@@ -1418,7 +1601,7 @@ def main():
             sources.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "state": "unreadable"})
             continue
         with os.fdopen(fd, "rb") as fh:
-            before_n, before = events.n, dict(stats, problem_lines=len(stats["problem_lines"]))
+            before_n, before_errors = events.n, len(stats["mapping_errors"]) + len(stats["read_errors"])
             kind = fmt
             if fmt == "auto":
                 head = fh.read(4096)
@@ -1452,14 +1635,14 @@ def main():
             except Overtime:
                 state = "partial"
                 partial.append("the read stopped at max_seconds (%s) in %s: the lines after the last event of that file were not read" % (seconds, rec["id"]))
-            except ValueError as exc:
+            except (ValueError, LookupError) as exc:
                 state = "failed"
                 problems.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "reason": brief(exc, 300)})
             except OSError as exc:
                 state = "failed"
                 problems.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "reason": "a read failed (%s)" % describe(exc)})
-            if state == "parsed" and (stats["mapping_errors"] or stats["read_errors"]):
-                state = "partial"
+            if state == "parsed" and len(stats["mapping_errors"]) + len(stats["read_errors"]) > before_errors:
+                state = "partial" if events.n > before_n else "failed"     # this file's own errors, not an earlier file's
             sources.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "size": rec["size"], "format": kind, "state": state, "events": events.n - before_n})
         if clock.left() <= 0:
             partial.append("max_seconds (%s) was reached: the files after %s were not read" % (seconds, rec["id"]))
@@ -1482,7 +1665,7 @@ def main():
                         "no event could be read")
     print(answer_text({
         "parser": PARSER, **outcome,
-        "format_requested": fmt, "product_label": scrub(product) if product else None,
+        "format_requested": fmt, "product_label": seal_text(product, "text") if product else None,
         "product_label_note": "the caller's label for a declared format; not verified" if product and fmt.startswith("declared_") else None,
         "sources": sources, "unrecognised": unrecognised, "problems": problems,
         "events": events.page.page, "pages": {"events": page},
