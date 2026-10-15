@@ -426,7 +426,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
 # long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
 # the tool, never of the file: the count says how many.
-_CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN = set()                      # strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+_CLEAN_CHARS = [0]                  # their total length, bounded
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@` within
 # MAILTO_SPAN characters, no `?`, space, `<` or `>` before it) is withheld here. It is found with one pass over the `mailto:name:`
@@ -468,8 +469,8 @@ CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/:<>]{1,1
 # A URL's user-info whose password holds `/`, `?` or `#` (files hold them raw, though RFC 3986 3.2.1 asks for percent-encoding): the
 # first `@` of such a string follows a `/`, `?` or `#`, which no authority holds, so the password is read to the last `@` of the same
 # whitespace-delimited token. A port (`host:8080/path@x`) is not one: only digits and then `/`, `?`, `#` or the end after the `:`. The
-# bare form (`name:pass/word@host`, no `//`) is not read: a path with an `@` in it (`C:/Dir/icon@2x.png`) is not user-info.
-SLASH_USERINFO = re.compile(r"(?<=//)[\w.%+-]{1,64}:(?!\d{1,5}(?:[/?#]|$))(?=[^\s@/?#]{0,256}[/?#][^\s@]{0,256}@)(?:[^\s@]|@(?=[^\s@]*@)){1,512}(?=@)")
+# `///` (a file URL: `file:///C:/Dir/icon@2x.png`) is not one. The bare form (`name:pass/word@host`, no `//`) is not read: a path with an `@` in it (`C:/Dir/icon@2x.png`) is not user-info.
+SLASH_USERINFO = re.compile(r"(?:(?<=[^/]//)|(?<=^//))[\w.%+-]{1,64}:(?!\d{1,5}(?:[/?#]|$))(?=[^\s@/?#]{0,256}[/?#][^\s@]{0,256}@)(?:[^\s@]|@(?=[^\s@]*@)){1,512}(?=@)")
 
 
 def slash_userinfo(text):
@@ -695,10 +696,14 @@ def _shown_pass(out):
     if ":" in out:
         out = mailto_userinfo(out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+        # first: a rule that withheld a piece of a password with a `:` in it would leave the marker, which breaks the token this one reads
+        out = slash_userinfo(out)
     if "=" in out or ":" in out:
+        # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
     # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
@@ -707,7 +712,7 @@ def _shown_pass(out):
         # host a split would remove; then each component alone
         found = [(s, e, "token-shaped text") for s, e in _slash_spans(out)]
         found += [(m.start(), m.end(), "token-shaped text") for rule in (GLUED, JWT_TAIL) for m in rule.finditer(out)]
-        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO, SLASH_USERINFO) for m in rule.finditer(out)]
+        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO) for m in rule.finditer(out)]
         if found:
             found.sort()
             merged = []
@@ -779,16 +784,23 @@ def _shown_one(text):
     return out, passes
 
 
-# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
-# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
-# tested joined by unhidden.
-_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+# The escapes cell() writes (\xNN and \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a word, and the `x06` of
+# its escape is not a part of the word (whose digit would make it read as random). What an escape splits is tested joined by unhidden.
+# A backslash of the file is written doubled and is a character of its piece, not an end of it (a password holding one is read whole);
+# it is found as a pair only so that the `\x06` written for a file's own backslash and `x06` is not taken for an escape.
+_ESCAPE = re.compile(r"\\\\|(\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
 
 
 def _shown(text):
     if "\\" not in text:
         return _shown_one(text)
-    parts, passes = _ESCAPE.split(text), 1
+    parts, passes, start = [], 1, 0
+    for m in _ESCAPE.finditer(text):
+        if m.group(1) is not None:
+            parts.append(text[start:m.start()])
+            parts.append(m.group(1))
+            start = m.end()
+    parts.append(text[start:])
     for k in range(0, len(parts), 2):
         parts[k], n = _shown_one(parts[k])
         passes = max(passes, n)
@@ -811,8 +823,12 @@ def shown_path(text):
     for bare in hidden_copies(out):
         if bare != out and _shown(bare)[0] != bare:
             return _withheld("token-shaped text", len(text), "names")
-    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+    # A result that settled (the last pass changed nothing, and the hidden-character copies above held nothing more) is known to be a
+    # fixed point: the backstop and the next write of the same string do not read it again, so that a file of thousands of hostile names
+    # costs the sanitiser one pass over each and not three. (Four passes may not have settled: that result is read again.)
+    if passes < 4 and len(out) <= 8192 and len(_CLEAN) < 200000 and _CLEAN_CHARS[0] + len(out) <= (1 << 25):
         _CLEAN.add(out)
+        _CLEAN_CHARS[0] += len(out)
     return out
 
 
