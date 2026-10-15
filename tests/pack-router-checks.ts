@@ -31,6 +31,35 @@ import { ROOT } from "./tool-library-harness.ts";
 const TOKENS = (text: string): number => Buffer.byteLength(text) / 4.245;
 const ROUTER_MAX = 400;
 
+// A router line says where to read, never what to do. The shape check (no `. : ;`, a few words) lets a rule through when it has no
+// punctuation ("Never replay a recovered token"), so a line is also refused when it holds a word of obligation or prohibition, or when
+// it opens with an imperative verb (a one-word group heading such as "Identify" or "Start" is a name, not an order).
+const OBLIGATION = /\b(never|always|must|should|shall|ensure|avoid|mandatory|forbidden|prohibited|do not|don't|cannot|only if|only when|unless)\b/i;
+const IMPERATIVE = /^(never|always|do|don't|use|run|load|read|check|treat|state|write|record|cite|replay|open|verify|confirm|report|keep|call|ask|pick|choose|make|take|put|set|stop|find|look|see|say|name|mark|label|reject|refuse|accept|trust|assume|prefer|compare|extract|decode|decrypt|crack|try|test|scan|search|list)\b/i;
+const HEADING_WORDS = 5;
+const PHRASE_WORDS = 8;
+const wordCount = (t: string): number => t.split(/\s+/).filter(Boolean).length;
+
+// What a leaf is about, as words: lower case, at least three letters, no function words, a crude stem (a suffix off, six letters at most),
+// so "protects" and "protectors" meet and "the", "of" and "what" do not count.
+const STOP = new Set("the and for with from not any all one two than then there their them your you our can may will would should could into onto over under out about before after only also each every both other such via per use used using note notes what which who how when where whether this that these those its are".split(" "));
+function contentWords(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    if (raw.length < 3 || STOP.has(raw)) continue;
+    let w = raw;
+    for (const suf of ["ings", "ing", "ions", "ion", "ies", "ed", "es", "s"]) {
+      if (w.endsWith(suf) && w.length - suf.length >= 3) {
+        w = w.slice(0, -suf.length);
+        break;
+      }
+    }
+    out.add(w.slice(0, 6));
+  }
+  return out;
+}
+const sharedWords = (a: Set<string>, b: Set<string>): number => [...a].filter((w) => b.has(w)).length;
+
 type Skill = { id: string; meta: Record<string, string | string[]>; body: string; text: string };
 
 async function loadSkills(dir: string): Promise<Map<string, Skill>> {
@@ -98,7 +127,11 @@ export type RouterSpec = {
   pack: string;
   /** The router's id (`<topic>/router`). */
   router: string;
-  /** Every skill id of the pack before the router: other packs' `needs` and text name them, so all stay. */
+  /**
+   * Every skill id of the pack before the router: other packs' `needs` and text name them, so all stay. This list is
+   * written out per pack, so a PR that adds a leaf to the pack (a Phase C skill) must add its id here in the same
+   * commit; the tests below say so (the pack's skills are one more than this list, and the router names each of them).
+   */
   before: string[];
   /** Skills of other packs the pack's text names that the router must not (it names its own leaves only). */
   foreign?: string[];
@@ -130,16 +163,38 @@ export function routerChecks(spec: RouterSpec): void {
     // No rule and no tool instruction: after the opening line a group heading (no code, short) or one line per leaf (the id, then
     // a few words), nothing longer, no sentence, no command.
     const lines = router.body.trim().split("\n").slice(1).filter((l) => l.trim());
-    const leafLine = /^`[a-z0-9-]+\/[a-z0-9-]+` [^`.:;]{3,70}$/;
+    const leafLine = /^(`[a-z0-9-]+\/[a-z0-9-]+`) ([^`.:;]{3,70})$/;
     const heading = /^[A-Za-z][^`.:;]{1,40}$/;
-    for (const l of lines) assert.ok(leafLine.test(l) || heading.test(l), `a router line is a heading or an id and a few words: "${l}"`);
+    const phrases = new Map<string, string>();
+    for (const l of lines) {
+      const leaf = leafLine.exec(l);
+      assert.ok(leaf || heading.test(l), `a router line is a heading or an id and a few words: "${l}"`);
+      const said = leaf ? leaf[2]! : l;
+      const limit = leaf ? PHRASE_WORDS : HEADING_WORDS;
+      assert.ok(wordCount(said) <= limit, `a router ${leaf ? "phrase" : "heading"} is at most ${limit} words: "${l}"`);
+      assert.ok(!OBLIGATION.test(said), `a router line holds no obligation or prohibition: "${l}"`);
+      assert.ok(!IMPERATIVE.test(said) || (!leaf && wordCount(said) === 1), `a router line does not open with an order: "${l}"`);
+      if (leaf) phrases.set(leaf[1]!.slice(1, -1), said);
+    }
+    // The phrase tells where to read, so it has to be about its leaf: it shares a content word with the leaf's title or when, and no other
+    // leaf of the pack shares more (two leaves' phrases swapped, a router that sends a question to the wrong note, fail here). A failure
+    // means the phrase says something the leaf does not; rewrite the phrase from the leaf's title and when.
+    const about = new Map([...skills.values()].map((k) => [k.id, contentWords(`${k.meta.title ?? ""} ${k.meta.when ?? ""}`)]));
+    for (const [id, said] of phrases) {
+      const mine = sharedWords(contentWords(said), about.get(id)!);
+      assert.ok(mine >= 1, `the router's phrase for ${id} shares no content word with its title or when: "${said}"`);
+      for (const [other, words] of about) {
+        if (other === id || other === spec.router) continue;
+        assert.ok(sharedWords(contentWords(said), words) <= mine, `the router's phrase for ${id} ("${said}") fits ${other} better than ${id}`);
+      }
+    }
     assert.ok(!/```/.test(router.body), "no code block");
     // It names no tool and no program of the pack (an id may spell one: `aws/cloudtrail` is not the program `aws`).
     const bare = router.body.replace(/`[a-z0-9-]+\/[a-z0-9-]+`/g, "");
     const tools = (await readdir(join(PACK, "tools"), { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory()).map((e) => e.name);
     const host = JSON.parse(await readFile(join(PACK, "requires", "host.json"), "utf8").catch(() => '{"binaries":[]}')) as { binaries: Array<{ name: string }> };
     for (const name of [...tools, ...host.binaries.map((b) => b.name)]) {
-      assert.ok(!new RegExp(`(?<![\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(bare), `the router names ${name}`);
+      assert.ok(!new RegExp(`(?<![\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "i").test(bare), `the router names ${name}`);
     }
     // The ids of the pack as they were before the router (other packs' `needs` and text name them): all of them still resolve.
     for (const id of spec.before) assert.ok(skills.has(id), `${id} is still a skill`);

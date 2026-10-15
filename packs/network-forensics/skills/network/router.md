@@ -18,7 +18,7 @@ The capture and the logs
 
 Content and metadata
 `metadata/dns-tls` encrypted traffic, what stays visible
-`metadata/fingerprints` JA3, JA4, Suricata match
+`metadata/fingerprints` JA3, JA4, signature matches
 `sessions/reconstruct` what was actually sent
 `sessions/objects` exporting protocol objects
 
