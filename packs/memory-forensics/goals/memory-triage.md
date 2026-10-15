@@ -46,11 +46,12 @@ own. The sign-off is these acts, not a post. Nothing else is assigned.
 through `## 7.`. Every memory claim names a process and a region, or an offset.
 The ledger holds one `answer` entry per question (`question:1` to `question:7`)
 and one each for `summary` and `narrative`, with every defect the answers check
-fixed (a limitation that names a defect lets the run end and leaves the defect
-counted; it does not fix it), evidence that is not there stated as a supported
-partial, bounded-negative or not-determinable answer, and the critic, who wrote
-none of them, has recorded `attest` or `dispute` on each answer, saying what
-they verified.
+fixed where the evidence allows it, or named by a limitation that says what could
+not be established and why (the run may then end and the defect stays counted; a
+limitation does not fix it), and the critic, who wrote none of them, has recorded
+`attest` or `dispute` on each answer, saying what they verified. Evidence that is
+not there is stated as a supported partial, bounded-negative or not-determinable
+answer, not as a finding.
 `inputs/` is unchanged.
 
 ## Checks
