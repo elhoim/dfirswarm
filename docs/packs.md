@@ -263,7 +263,9 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`: its
+disk profile (base, encrypted-containers, windows) does not fit the run's index
+budget without it.
 
 ### Tool help stays out of the context window
 
@@ -533,7 +535,7 @@ checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
-| `computer-forensics-base` | 25 | 14 | — | the method true of any platform; everything else depends on it |
+| `computer-forensics-base` | 29 | 16 | — | the method true of any platform; everything else depends on it |
 | `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
@@ -716,6 +718,33 @@ import each other), and holds to this:
   that names the tool has its "Sensitive output" line say the job runs with
   `secret_output: true`, and that the ledger cites the finding's file and
   offset, never the value.
+- *No filter over a withheld value.* A tool that takes a query or an expression
+  (a SQL statement, a regular expression, a name filter) must not offer it
+  while the values are withheld: with text you cannot see, each call is one bit
+  of every row, and a few hundred calls confirm a guess. The values-to-file
+  mode takes the table, not the query (`sqlite_query` with `write_values`), or
+  lets the expression narrow only what goes into the sealed file and never what
+  the answer counts (`sqlite_freespace`'s `contains`). A position is not free of
+  the values by itself, either. A range over a key is a filter over that key
+  when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
+  KEY` column, so `sqlite_query` refuses a rowid range on such a table, never
+  prints its rowid and locates its rows by their position. The order rows are
+  read in can rank values: an index's order is the indexed column's, so the
+  tool reads the table itself, and a WITHOUT ROWID table (whatever its columns
+  are named) or an INTEGER PRIMARY KEY table comes in the order of its key,
+  which the answer names (`n_ranks`); SQLite reads a WITHOUT ROWID table
+  through a covering index unless the ORDER BY is its whole key. A locator
+  query a skill gives for use outside the mode reads the table the same way
+  (`SELECT rowid, length(col), typeof(col) FROM t NOT INDEXED ORDER BY rowid`):
+  without the clause an index on the column returns the rowids in its values'
+  order. Where a size cap stops an export is decided on what the answer prints
+  of each cell (its type and length), never on the bytes its value took, which
+  follow how the value escapes; the run's time still follows them. And an error
+  message can quote a value (a generated column's `json_extract` does), and so
+  can what Python makes of one (a message that quotes bytes that are not UTF-8
+  is a `UnicodeDecodeError`): the answer says the row and what the error's code
+  decides (the time budget, the authorizer, a value over the length limit),
+  never the message or the class, and no decision reads the message.
 - *The manifest says SENSITIVE* and names the flag. The harness reads no
   manifest-level flag yet, and a tool cannot see whether its job was run with
   `secret_output`, so what keeps a value out of an ordinary run is the refusal
@@ -881,6 +910,14 @@ and what is sensitive, in the shortest form that keeps the content. The content
 survives; it is spread over leaves, not cut. A router is the one note of a pack
 that says which other note answers which question; it is what a run shows in the
 prompt when the pack's index is over budget.
+
+**The base pack's index is near its budget.** `computer-forensics-base` has 986
+of the 1,000 tokens a pack's index entries may have (the harness's count: each
+entry line of `skills/INDEX.md` is its bytes over 4.245, rounded up; the file's
+header lines are not counted), and `tests/pack-base-skills.test.ts` fails past
+1,000. Past it the harness shows the base pack by its router alone in every
+run, the base pack alone included. A new base entry (a dozen tokens at least)
+therefore needs a shorter `title` or `when:` elsewhere in the same change.
 
 **Findings that already exist.** Some shipped skills are over a budget. They are
 listed in `tests/skill-budgets.golden`, one line per finding: `pack kind skill
