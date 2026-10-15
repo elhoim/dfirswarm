@@ -287,6 +287,7 @@ class HiveBounds:
         self.key_cells = max(size // KEY_CELL_BYTES, 1)
         self.value_cells = max(size // VALUE_CELL_BYTES, 1)
         self.keys_read = 0                      # subkey elements read over the whole walk
+        self.data_read = 0                      # bytes of value data read over the whole walk
         self.repeats = 0                        # elements that named a key already named in the same list
 
     def subkeys(self, node, where, problems):
@@ -316,13 +317,23 @@ class HiveBounds:
         return distinct
 
     def values(self, node, where, problems, **kwargs):
-        """At most the values the hive can hold, as a list; a key that lists more is a problem line."""
-        raw = list(itertools.islice(node.iter_values(**kwargs), self.value_cells + 1))
-        if len(raw) > self.value_cells:
-            raw = raw[: self.value_cells]
-            problems.append({"where": where, "what": "values",
-                             "error": "its value list yields more values than a %d-byte hive can hold (%d at most): the elements past that are not read"
-                                      % (self.hive_bytes, self.value_cells)})
+        """At most the values the hive can hold, as a list, and at most the data it can hold over the whole walk (a value list that names one big
+        record again and again reads that record every time); a key that lists more is a problem line."""
+        raw = []
+        for v in itertools.islice(node.iter_values(**kwargs), self.value_cells + 1):
+            if len(raw) >= self.value_cells:
+                problems.append({"where": where, "what": "values",
+                                 "error": "its value list yields more values than a %d-byte hive can hold (%d at most): the elements past that are not read"
+                                          % (self.hive_bytes, self.value_cells)})
+                break
+            data = getattr(v, "value", None)
+            self.data_read += len(data) if isinstance(data, (bytes, bytearray, str)) else sum(len(x) for x in data if isinstance(x, (str, bytes))) if isinstance(data, list) else 0
+            if self.data_read > 4 * self.hive_bytes:
+                problems.append({"where": where, "what": "values",
+                                 "error": "the values read in this walk hold more data than a %d-byte hive can: records that a value list names again and again; "
+                                          "the values past that are not read" % self.hive_bytes})
+                break
+            raw.append(v)
         return raw
 # END SHARED HIVE BOUNDS
 
