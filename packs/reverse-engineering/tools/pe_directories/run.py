@@ -454,7 +454,9 @@ KEYVALUE_HINT = re.compile(r"pw|pass|psw|secret|private|token|key|cred|auth|sig"
 # The name of an element (or of a `name="..."` attribute) that holds a secret. Its text is withheld to the next `<` (or `&lt;`), the end of the
 # line or the end of the text: nothing has to follow it, a `>` or `&gt;` inside the text does not end it and its length is not bounded, so that
 # a value that is not closed, that holds `>` or that is longer than any window is withheld to its end and not printed whole. A text that begins
-# with white space is read only when it is closed (`<token> x` in prose is no value; a padded `<Password> pw </Password>` is).
+# with white space is read only when it is closed (`<token> x` in prose is no value; a padded `<Password> pw </Password>` is). The element
+# may carry a namespace prefix (`<wsse:Password>`), and the setting forms are `<setting name="Password"><value>...`, and the element whose
+# `name` or `key` attribute names the secret (`<property name="password">...`, `<entry key="password">...`).
 _EL_NAMES = (r"pass[_-]?word|pass[_-]?wd|pass[_-]?phrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
              r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret")
 # attributes of the open tag (`<Password Type="x">`, also with `&quot;`): `name=value` pairs, so that prose such as `<secret key>` is no element
@@ -465,9 +467,13 @@ _EL_ATTRS = (r"(?:[ \t]+[\w:.-]{1,64}[ \t]*=[ \t]*(?:\"[^\"<>\r\n]{0,128}\"|'[^'
 _EL_REST = r"[^<&\r\n]*(?:&(?!lt;)[^<&\r\n]*)*"
 _EL_TEXT = r"(?:[^<&\r\n]|&(?!lt;))" + _EL_REST
 _EL_LEAD = r"(?:<|&lt;)(?!/?[A-Za-z][\w:.-]*(?:[ \t][^<>\r\n]{0,256})?/?(?:>|&gt;)|[!?/])"
-ELEMENT_SECRET = re.compile(r"((?:(?:<|&lt;)(?:" + _EL_NAMES + r")" + _EL_ATTRS + r"(?<!/)(?:>|&gt;)"
-                            r"|<setting[ \t]+name=[\"'](?:" + _EL_NAMES + r")[\"']" + _EL_ATTRS + r"(?<!/)>(?:\s|\\[nrt]){0,256}<value>))"
-                            r"((?:(?=\S)(?:" + _EL_LEAD + _EL_REST + r"|" + _EL_TEXT + r")|" + _EL_TEXT + r"(?=<|&lt;)))", re.I)
+# White space, `*`, `${NAME}`, `%NAME%` and `%s` in front of a value that begins with a `<` that is no tag are part of that value, not the text before it
+# (`<Password>*****<8r$...` is a password after a mask, withheld whole). Each unit begins with a character of its own, so the run has one reading.
+_EL_PREFIX = r"(?:[ \t*]|\$\{[A-Za-z_][A-Za-z0-9_]{0,31}\}|%(?:[A-Za-z_][A-Za-z0-9_]{0,31}%?|@))*"
+ELEMENT_SECRET = re.compile(r"((?:(?:<|&lt;)(?:[A-Za-z_][\w.-]{0,31}:)?(?:" + _EL_NAMES + r")" + _EL_ATTRS + r"(?<!/)(?:>|&gt;)"
+                            r"|<setting[ \t]+name[ \t]*=[ \t]*[\"'](?:" + _EL_NAMES + r")[\"']" + _EL_ATTRS + r"(?<!/)>(?:\s|\\[nrt]){0,256}<value>"
+                            r"|<(?:property|entry)[ \t]+(?:name|key)[ \t]*=[ \t]*[\"'](?:" + _EL_NAMES + r")[\"']" + _EL_ATTRS + r"(?<!/)>))"
+                            r"((?:" + _EL_PREFIX + _EL_LEAD + _EL_REST + r"|(?=\S)(?:" + _EL_LEAD + _EL_REST + r"|" + _EL_TEXT + r")|" + _EL_TEXT + r"(?=<|&lt;)))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # What is no secret in a secret-named key's place: a format (above), a run of `*` (a mask), `${NAME}` and `%NAME%` (a variable a file names). Only
 # those two rules use it; a user-info keeps FORMAT_ONLY. The other rules still read what is kept.
@@ -684,7 +690,7 @@ def _shown_pass(out):
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if PLACEHOLDER_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
     if ">" in out or "&gt;" in out:
-        out = ELEMENT_SECRET.sub(lambda m: m.group() if PLACEHOLDER_ONLY.fullmatch(m.group(2)) and _ends_element(m) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+        out = ELEMENT_SECRET.sub(lambda m: m.group() if PLACEHOLDER_ONLY.fullmatch(m.group(2).strip(" \t")) and _ends_element(m) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if "@" in out:
         out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
@@ -1106,7 +1112,7 @@ class LosslessPage:
                 except FileExistsError:
                     continue
                 self.shown = made(self.prefix + name)
-                self._out = os.fdopen(fd, "w", encoding="utf-8")
+                self._out = os.fdopen(fd, "w", encoding="utf-8", buffering=1)
                 for kept in self.page:
                     self._write(kept)
                 return
@@ -1116,8 +1122,8 @@ class LosslessPage:
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
-        self._out.write(json.dumps(final_check(shown_answer(row), safe_made)))
-        self._out.write("\n")
+        # one write for the row and its line break, and the file is line-buffered: a call stopped by the hard limit leaves whole rows
+        self._out.write(json.dumps(final_check(shown_answer(row), safe_made)) + "\n")
 
     @staticmethod
     def _clean(row):
@@ -1204,13 +1210,12 @@ class SecretValues:
             raise SecretValuesRefused("the values file already exists: %s" % shown_path(str(self.path)))
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (shown_path(str(self.path)), describe(exc)))
-        self._fh = os.fdopen(fd, "w", encoding="utf-8")
+        self._fh = os.fdopen(fd, "w", encoding="utf-8", buffering=1)
 
     def add(self, finding_id, locator, value):
         if not self.enabled or self._fh is None:
             return
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}))
-        self._fh.write("\n")
+        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}) + "\n")
         self.written += 1
 
     def close(self):
@@ -2394,21 +2399,29 @@ PRINTING = [False]                  # the answer has begun to be written: a sign
 
 
 def _stopped_by_signal(signum, frame):
-    """SIGINT, SIGTERM and SIGHUP end the call with one JSON answer and the exit code 128 + the signal, not a traceback and not silence."""
-    if not PRINTING[0]:
+    """SIGINT, SIGTERM and SIGHUP end the call with one JSON answer and the exit code 128 + the signal, not a traceback and not silence. A signal
+    while the partial answer of the hard limit is being built (not yet being written) is answered by a minimal failed document; one while a
+    document is being written leaves that document, which is cut (the reader of a half-written answer has to expect that)."""
+    if not PRINTING[0] or (PARTIAL_BUILDING[0] and not PARTIAL_WRITING[0]):
         PRINTING[0] = True
+        PARTIAL_BUILDING[0] = False
         sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the tool was stopped by signal %d before it finished; a file it was writing can be incomplete" % signum}) + "\n")
         sys.stdout.flush()
     raise SystemExit(128 + signum)
 
 
 HARD_GRACE = 5                      # seconds the partial answer of the hard limit has, before the failed one
+PARTIAL_BUILDING = [False]          # the partial answer of the hard limit is being built
+PARTIAL_WRITING = [False]           # and has begun to be written: no other document may follow it
 
 
 def _hard_limit_last(signum, frame):
-    sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120) and the partial answer of what "
-                                 "had been read was not finished either; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
-    sys.stdout.flush()
+    """The partial answer was not finished in HARD_GRACE seconds. One document only: when its writing had begun (a reader that does not read
+    the pipe) nothing is appended to it, and the call ends with what the reader took; else the failed one is the document."""
+    if not PARTIAL_WRITING[0]:
+        sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120) and the partial answer of what "
+                                     "had been read was not finished either; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
+        sys.stdout.flush()
     os._exit(1)
 
 
@@ -2422,23 +2435,35 @@ def _hard_limit(signum, frame):
     if PRINTING[0]:
         return
     PRINTING[0] = True
+    PARTIAL_BUILDING[0] = True
     # should the partial answer itself not be finished in HARD_GRACE seconds, the failed one ends the call
     signal.signal(signal.SIGALRM, _hard_limit_last)
     signal.setitimer(signal.ITIMER_REAL, HARD_GRACE)
     note = ("time: the call had not answered within %d seconds (the manifest's limit is 120): this answer holds what had been read and withheld by then "
-            "(the problems, the limits and the first rows of each table); the rest of the structure is not in it, and a file the call wrote can be incomplete; "
+            "(the problems, the limits and the first rows of each table); the rest of the structure is not in it, and a file the call wrote can be incomplete "
+            "(a table file named in `all_results` holds the rows written so far, one complete row to a line, and its last line can be cut); "
             "read with a smaller limit or max_seconds" % HARD_SECONDS)
     try:
         ctx = ASSEMBLED.get("ctx")
         if ctx is None:
             raise LookupError("nothing was read")
+        tables = {}
+        for name, page in list(ctx.pages.items()):
+            table = {"matched": page.total, "returned": len(page.page), "rows_shown": min(len(page.page), SPILL_FLOOR), "rows": page.page[:SPILL_FLOOR]}
+            if page.shown and page._out is not None:
+                table["all_results"] = page.shown
+            tables[name] = table
         partial = {**ASSEMBLED["head"], "status": "partial", "status_basis": note, "problems": list(ctx.problems), "limits_hit": list(ctx.limits) + [note],
-                   "tables": {name: {"matched": page.total, "returned": len(page.page), "rows_shown": min(len(page.page), SPILL_FLOOR), "rows": page.page[:SPILL_FLOOR]}
-                              for name, page in list(ctx.pages.items())}, "withheld": COUNTS, "note": NOTE}
-        sys.stdout.write(json.dumps(build_answer(partial, None, 4)) + "\n")
+                   "tables": tables, "withheld": COUNTS, "note": NOTE}
+        document = json.dumps(build_answer(partial, None, 4)) + "\n"
+        PARTIAL_WRITING[0] = True
+        sys.stdout.write(document)
         sys.stdout.flush()
         os._exit(0)
     except Exception:
+        if PARTIAL_WRITING[0]:
+            os._exit(1)
+        PARTIAL_BUILDING[0] = False
         sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120) and nothing "
                                      "had been read yet; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
         sys.stdout.flush()

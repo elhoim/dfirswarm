@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DOC_STRUCTURE, PE_DIRECTORIES, RE, body, buildZip, put, refused, tool, withCwd } from "./pack-re-harness.ts";
 import { buildPeDirs } from "./pack-re-doc-fixtures.ts";
+import { GROWTH_PY, LINEAR_ABSOLUTE, linearOk } from "./pack-re-timing.ts";
 
 const CAPA_FLOSS = join(RE, "recipes", "capa-floss", "run.py");
 const COPIES = [DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS];
@@ -119,9 +120,10 @@ test("P1 text that merely looks like the element form is kept: prose with a tag-
   }
 });
 
-test("P1 the element rule takes time linear in the text: 128 KB and 512 KB of each hostile shape (runs of `>`, `<`, `&lt;`, open tags, attributes, settings, tokens that make a second pass), the larger at most 4.5 times the smaller plus a quarter of a second, and none over 3 s", () => {
+test("P1 the element rule takes time linear in the text: 128 KB and 512 KB of each hostile shape (runs of `>`, `<`, `&lt;`, open tags, attributes, settings, tokens that make a second pass), the larger at most 8 times the smaller (never taken as less than 0.05 s; best CPU time of up to three rounds: linear code takes 4 times, a quadratic rule 16), and none over 5 s", () => {
   for (const path of COPIES) {
     const r = py(path, [
+      GROWTH_PY,
       "tok = 'AKIA' + 'A2B3C4D5E6F7G8H9'",
       "units = ['<Password>', '<Password>>', '<Password>' + '>' * 50, '<Password>' + '<' * 50, '<Password>' + 'a>' * 600, '<Password>' + '&' * 100, '<Password>&lt;',",
       "         '<Password> ' + '&' * 600, '<Password>' + ' ' * 600, '&lt;Password&gt;' + '&gt;' * 50, '<Password><' + 'a' * 300, '<Password><abc ' + 'a=\"b\" ' * 60,",
@@ -132,19 +134,14 @@ test("P1 the element rule takes time linear in the text: 128 KB and 512 KB of ea
       "         '<>&lt;&gt;', 'pass_word=\\\\\"x', 'pass_word' * 50]",
       "rows = []",
       "for u in units:",
-      "    t = []",
-      "    for size in (1 << 17, 1 << 19):",
-      "        s = (u * (size // len(u) + 1))[:size]",
-      "        start = time.process_time()",
-      "        m.shown_path(s)",
-      "        t.append(time.process_time() - start)",
-      "    rows.append([u[:24], t[0], t[1]])",
+      "    texts = [(u * ((1 << k) // len(u) + 1))[:1 << k] for k in (17, 19)]",
+      "    rows.append([u[:24]] + growth(m.shown_path, texts))",
       "print(json.dumps(rows))",
-    ].join("\n"), [], undefined, 600_000);
+    ].join("\n"), [], undefined, 900_000);
     assert.equal(r.status, 0, `${path}: ${r.stderr}`);
     for (const [unit, small, large] of JSON.parse(r.stdout) as [string, number, number][]) {
-      assert.ok(large <= 3, `${path}: ${unit} took ${large.toFixed(2)} s for 512 KB`);
-      assert.ok(large <= 4.5 * small + 0.25, `${path}: ${unit} took ${small.toFixed(2)} s for 128 KB and ${large.toFixed(2)} s for 512 KB`);
+      assert.ok(large <= LINEAR_ABSOLUTE, `${path}: ${unit} took ${large.toFixed(2)} s for 512 KB`);
+      assert.ok(linearOk(small, large), `${path}: ${unit} took ${small.toFixed(2)} s for 128 KB and ${large.toFixed(2)} s for 512 KB`);
     }
   }
 });

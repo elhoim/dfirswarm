@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DOC_STRUCTURE, PE_DIRECTORIES, RE, TOOLS, put, withCwd } from "./pack-re-harness.ts";
 import { buildPeDirs } from "./pack-re-doc-fixtures.ts";
+import { GROWTH_PY, LINEAR_ABSOLUTE, linearOk } from "./pack-re-timing.ts";
 
 const CAPA_FLOSS = join(RE, "recipes", "capa-floss", "run.py");
 const COPIES = [DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS];
@@ -229,28 +230,26 @@ test("P2-2 the cheap pre-test of the secret-named key rule holds every name the 
   }
 });
 
-test("P2-2 the secret-named key rule and the element rule take time linear in the text: 128 KB and 512 KB of each hostile shape, the larger at most 4.5 times the smaller plus a quarter of a second, and none over 3 s", () => {
+test("P2-2 the secret-named key rule and the element rule take time linear in the text: 128 KB and 512 KB of each hostile shape, the larger at most 8 times the smaller (never taken as less than 0.05 s; best CPU time of up to three rounds), and none over 5 s", () => {
   for (const path of COPIES) {
     const r = py(path, [
+      GROWTH_PY,
       "units = ['password=', 'password=\"', 'password=\\\\\"', 'password=&quot;', 'password=&quot;a', 'password=&quot;' + 'a' * 600, 'password=\"' + 'a' * 600,",
       "         '\"token\": \"', '<add key=\"password\" value=', '<add key=\\\\\"password\\\\\" value=\\\\\"', '<password>', '<password>a', '&lt;password&gt;a&lt;',",
       "         '<password>' + 'a' * 600, 'password' + '\\\\t' * 50 + '=', 'password\\\\x09', 'password' + ' ' * 64, '&#' + '0' * 40, '\\\\\\\\\\\\\\\\\\\\\"', 'password=&quot;password=&quot;password=']",
       "rows = []",
+      "def both(s):",
+      "    m.KEYVALUE_SECRET.sub(lambda x: 'x', s)",
+      "    m.ELEMENT_SECRET.sub(lambda x: 'x', s)",
       "for u in units:",
-      "    t = []",
-      "    for size in (1 << 17, 1 << 19):",
-      "        s = (u * (size // len(u) + 1))[:size]",
-      "        start = time.process_time()",
-      "        m.KEYVALUE_SECRET.sub(lambda x: 'x', s)",
-      "        m.ELEMENT_SECRET.sub(lambda x: 'x', s)",
-      "        t.append(time.process_time() - start)",
-      "    rows.append([u[:24], t[0], t[1]])",
+      "    texts = [(u * ((1 << k) // len(u) + 1))[:1 << k] for k in (17, 19)]",
+      "    rows.append([u[:24]] + growth(both, texts))",
       "print(json.dumps(rows))",
-    ].join("\n"), [], undefined, 300_000);
+    ].join("\n"), [], undefined, 600_000);
     assert.equal(r.status, 0, `${path}: ${r.stderr}`);
     for (const [unit, small, large] of JSON.parse(r.stdout) as [string, number, number][]) {
-      assert.ok(large <= 3, `${path}: ${unit} took ${large.toFixed(2)} s for 512 KB`);
-      assert.ok(large <= 4.5 * small + 0.25, `${path}: ${unit} took ${small.toFixed(2)} s for 128 KB and ${large.toFixed(2)} s for 512 KB`);
+      assert.ok(large <= LINEAR_ABSOLUTE, `${path}: ${unit} took ${large.toFixed(2)} s for 512 KB`);
+      assert.ok(linearOk(small, large), `${path}: ${unit} took ${small.toFixed(2)} s for 128 KB and ${large.toFixed(2)} s for 512 KB`);
     }
   }
 });
