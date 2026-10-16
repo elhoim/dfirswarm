@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { runPy, withCwd } from "./tool-library-harness.ts";
 import { WIN, body, everyFileUnder, failed, stubModule, tool } from "./windows-pack-harness.ts";
 import { EVTX_CARVE_STUB, eventXml, evtxChunk, evtxFileHeader } from "./windows-stub-evtx.ts";
-import { SHAPES, leaked, plant, type Canary, type Shape } from "./windows-canary.ts";
+import { SHAPES, leaked, plant, prng, type Canary, type Shape } from "./windows-canary.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -87,7 +87,7 @@ test("evtx_query and evtx_carve: contains is looked for in what is shown, so a n
       // ... and the answer does not say "complete, none": one record was not matched and has text withheld in it
       assert.equal(blind(hit), 1, `${name}: the record whose text is withheld is counted`);
       assert.equal(hit.status, "partial", name);
-      assert.match(JSON.stringify(hit.problems ?? hit.problem_page ?? hit), /contains looks only in the text that is shown/, name);
+      assert.match(JSON.stringify(hit.problems ?? hit.problem_page ?? hit), /contains looks only in the text the answer prints/, name);
       // the count does not depend on the needle: it is no way to test a guess
       const other = body<Answer>(await tool(name, cwd, { path: p, contains: "no-such-needle-at-all" }, env));
       assert.equal(blind(other), 1, `${name}: the same count for another needle`);
@@ -105,6 +105,80 @@ test("evtx_query and evtx_carve: contains is looked for in what is shown, so a n
       assert.equal(matched(absent), 0);
       assert.equal(blind(absent), 0);
       assert.equal(absent.status, "complete", `${name}: nothing is withheld, so none is none`);
+    }
+  });
+});
+
+/** Rows (JSON lines) of every file a run left that is not the log itself. */
+async function rowsOf(cwd: string): Promise<Answer[]> {
+  const rows: Answer[] = [];
+  for (const text of await reachable(cwd)) {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try { rows.push(JSON.parse(line) as Answer); } catch { /* an answer printed with indent, not a row */ }
+    }
+  }
+  return rows;
+}
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+test("evtx_query and evtx_carve: contains reads the text the answer prints, so a true piece of a secret that only the backstop replaces cannot be told from a wrong needle", async () => {
+  await withCwd(async (cwd) => {
+    // the layers show a 40-character base64 key in a command line; the backstop replaces it (about 0.3% of random keys): find some with the tool itself
+    const rnd = prng(77);
+    const candidates = Array.from({ length: 2400 }, () => Array.from({ length: 40 }, () => B64[Math.floor(rnd() * 64)]).join(""));
+    const command = (c: string): string => `C:\\tool.exe --key ${c}`;
+    const probeEnv = await put(cwd, candidates.map((c, i) => ({ number: i + 1, xml: eventXml({ eid: 4688, rec: i + 1, data: [["CommandLine", command(c)]] }) })));
+    const probe = await tool("evtx_query", cwd, { path: "work/Security.evtx", limit: 1 }, probeEnv);
+    body<Answer>(probe);
+    const backstopped = new Set<number>();
+    for (const row of await rowsOf(cwd)) {
+      const shown = (row.data as Answer | undefined)?.CommandLine;
+      if (typeof shown === "string" && shown.includes("backstop: a random-looking run") && typeof row.record_id === "number") backstopped.add(row.record_id);
+    }
+    const found = candidates.map((c, i) => ({ c, rec: i + 1 })).filter((x) => backstopped.has(x.rec)).slice(0, 2);
+    assert.ok(found.length >= 1, "the planted keys include one that only the backstop replaces");
+    const matched = (a: Answer): number => a.events_matched ?? a.record_count;
+    for (const { c } of found) {
+      for (const [name, p] of [["evtx_query", "work/Security.evtx"], ["evtx_carve", "work/blob.bin"]] as const) {
+        const env = await put(cwd, [{ number: 1, xml: eventXml({ eid: 4688, rec: 1, data: [["CommandLine", command(c)]] }) }, { number: 2, xml: eventXml({ eid: 4688, rec: 2, data: [["CommandLine", "whoami /all"]] }) }]);
+        const wrong = Array.from({ length: 10 }, () => B64[Math.floor(rnd() * 64)]).join("");
+        const needles = [c.slice(0, 10), c.slice(20, 30), c.slice(30), c, wrong, c.slice(0, 9) + (c[9] === "x" ? "y" : "x"), "tool.exe"];
+        const answers: Array<[number, string, number, number]> = [];
+        for (const contains of needles) {
+          const run = await tool(name, cwd, { path: p, contains }, env);
+          const a = body<Answer>(run);
+          assert.ok(!(await reachable(cwd, (f) => f.endsWith("blob.bin"))).concat([run.stdout, run.stderr]).some((t) => t.includes(c.slice(0, 12))), `${name}: the secret is not printed (needle ${contains.length} characters)`);
+          answers.push([matched(a), String(a.status), a.contains_blind_records, (a.problems ?? []).length]);
+        }
+        assert.deepEqual(new Set(answers.map((a) => JSON.stringify(a))).size, 1, `${name}: a true piece, the whole secret and a wrong needle give different answers: ${JSON.stringify(answers)}`);
+        assert.equal(answers[0][0], 0, `${name}: nothing matches in text that is replaced`);
+        assert.equal(answers[0][2], 1, `${name}: the record is counted as one the needle may be in`);
+      }
+    }
+  });
+});
+
+test("evtx_query and evtx_carve: RelatedActivityID=\"\", EventSourceName= and processorArchitecture= do not make a record partial, and a process id is not taken for a SID", async () => {
+  await withCwd(async (cwd) => {
+    const token = "gh" + "p_" + Array.from({ length: 36 }, (_, i) => B64[(i * 7 + 3) % 62]).join("");
+    const base = eventXml({ eid: 4688, rec: 1, data: [["CommandLine", `run ${token} now`], ["ProcessId", "0x0000000000000124"], ["NewProcessId", "1160"], ["ParentProcessId", "0x1d4"], ["ClientProcessId", "4"],
+      ["TargetUserSid", "S-1-5-21-1004336348-1177238915-682003330-1001"], ["SubjectUserSid", "S-1-5-18"], ["LogonId", "0x3E7"], ["EventSourceName", "Service Control Manager"], ["NumberOfGPOsDownloaded", "3"]] });
+    const xml = base.replace("<Channel>", `<Correlation ActivityID="{8F1C0B6E-6C3A-4C7B-9A57-2B7B0F1E4A10}" RelatedActivityID=""></Correlation><Channel>`).replace("</EventData>", `</EventData><RenderingInfo processorArchitecture="amd64" EventSourceName=""></RenderingInfo>`);
+    for (const [name, p] of [["evtx_query", "work/Security.evtx"], ["evtx_carve", "work/blob.bin"]] as const) {
+      const env = await put(cwd, [{ number: 1, xml }]);
+      const run = await tool(name, cwd, { path: p, limit: 5 }, env);
+      const a = body<Answer>(run);
+      assert.equal(a.boundary.strings_replaced_by_the_backstop, 0, `${name}: nothing is replaced by the backstop`);
+      assert.equal(a.status, "complete", `${name}: ${a.status_basis}`);
+      const row = (await rowsOf(cwd)).find((r) => typeof r.xml === "string" && r.xml.includes("Correlation"));
+      assert.ok(row, `${name}: the record is in the result file`);
+      assert.ok((row!.xml as string).includes('RelatedActivityID=""') && (row!.xml as string).includes('processorArchitecture="amd64"'), `${name}: the attributes are kept in the XML`);
+      assert.ok(!(row!.xml as string).includes(token), `${name}: the token in the same record is still withheld`);
+      const data = (row!.data ?? {}) as Answer;
+      for (const [k, v] of [["ProcessId", "0x0000000000000124"], ["NewProcessId", "1160"], ["ParentProcessId", "0x1d4"], ["ClientProcessId", "4"], ["TargetUserSid", "S-1-5-21-1004336348-1177238915-682003330-1001"],
+        ["SubjectUserSid", "S-1-5-18"], ["LogonId", "0x3E7"], ["NumberOfGPOsDownloaded", "3"]] as const) assert.equal(data[k], v, `${name}: ${k} is shown as it is`);
     }
   });
 });
