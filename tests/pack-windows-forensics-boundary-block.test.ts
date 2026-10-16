@@ -98,6 +98,68 @@ for (const name of names) {
     assert.deepEqual(r.slow, [], `slower than 2.5 s: ${JSON.stringify(r.slow)}`);
   });
 
+  test(`${name}: strings past the 100,000-character window of the old PEM pattern (110,000, 262,144 and 1 MiB), with a token that makes a layer change them, are judged in CPU seconds, not minutes, and the token is not printed`, async () => {
+    const r = await drive(name, "big", "110000,262144,1048576");
+    assert.deepEqual(r.slow, [], `slower than 4 s of CPU, or the leading token printed: ${JSON.stringify(r.slow)}`);
+    assert.ok(r.cases >= 40, `${r.cases} cases`);
+  });
+
+  test(`${name}: an answer that takes longer than the seal budget has the rest of its strings replaced whole, is partial, and the clock stops`, async () => {
+    const r = await drive(name, "budget");
+    assert.equal(r.status, "partial");
+    assert.ok(r.late_marks >= 30, `${r.late_marks} strings replaced for the clock`);
+    assert.equal(r.unjudged_printed, 0, "no string that was not judged is printed");
+    assert.equal(r.short_kept, true, "short plain strings and the structure of the answer are kept");
+    assert.equal(r.tail_withheld, true);
+    assert.ok(r.counted >= r.late_marks, "they are counted under their own reason");
+    assert.equal(r.clock_stopped, true);
+    assert.equal(r.after, true, "the next seal is not late");
+    assert.equal(r.stop_late, true, "a seal that starts past the tool's hard stop withholds what is not short and plain");
+    assert.equal(r.stop_cleared, true);
+    assert.ok(r.seconds < 8, `${r.seconds} s of CPU`);
+    assert.match(r.basis, /^\d+ string\(s\) still held/);
+  });
+
+  test(`${name}: a contains filter sees the text the answer prints: a true piece of a secret that only the backstop replaces and a wrong one give the same answer`, async () => {
+    const r = await drive(name, "contains_sealed");
+    assert.equal(r.plants, 16);
+    assert.equal(r.differ, 0, "a true piece, the whole secret and a wrong needle are told apart in the count or in the blind spot");
+    assert.equal(r.secret_in_sealed, 0, "the text the filter reads does not hold the secret");
+    assert.equal(r.counters_moved, 0, "sealing a string for the filter counts and lists nothing");
+    assert.equal(r.whole_string_gone, r.plants, "the rest of a replaced string cannot be matched either: the filter reads what is printed");
+    assert.deepEqual(r.blind_when_hidden, [false, true]);
+    assert.deepEqual(r.plain_text_found, [true, false]);
+    assert.deepEqual(r.plain_text_absent, [false, false]);
+  });
+
+  test(`${name}: the residue check does not take the attributes of an event (RelatedActivityID="", EventSourceName=, processorArchitecture=) for a padded base64 key`, async () => {
+    const r = await drive(name, "residue_fp");
+    assert.equal(r.replaced_by_the_backstop, 0, "nothing is replaced by the backstop");
+    assert.equal(r.attributes_kept, r.n);
+    assert.equal(r.status_complete, r.n, "the answers stay complete");
+    assert.equal(r.real_b64_found, true, "a real padded base64 key is still found");
+  });
+
+  test(`${name}: acronym names are plain, a typed version has the shape of a version, sk- with a late digit, a full-width token in hexadecimal data, and the names of the component store`, async () => {
+    const r = await drive(name, "shapes_p3");
+    assert.deepEqual(r.names_changed, [], "NumberOfGPOsDownloaded and its kind are plain names");
+    assert.equal(r.random_names_withheld, 100, "random names of 24 characters are still withheld");
+    assert.deepEqual(r.version_ok_flagged, []);
+    assert.equal(r.version_base62_flagged, 200, "a base62 string that starts with a digit is not a version, for the backstop on its own");
+    assert.equal(r.sk_late_digit_flagged_backstop, true);
+    assert.equal(r.sk_late_digit_layer2, true);
+    assert.equal(r.sk_words_kept, true);
+    assert.deepEqual(r.wide_hex_flagged, [true, true, true], "UTF-8, UTF-16LE and UTF-16BE hexadecimal data holding a full-width token");
+    assert.deepEqual(r.wide_hex_printed, [false, false]);
+    assert.equal(r.random_binary_still_printed, 20, "random bytes with no text in them are still printed (documented)");
+    assert.deepEqual(r.winsxs_kept, [true, true, true, true, true, true], "names of the component store are shown in a name and a key slot");
+    assert.deepEqual(r.winsxs_in_path_and_key_kept, [true, true], "a component of the component store in a path or a key is not replaced by the backstop");
+    assert.equal(r.dressed_in_path_not_printed, true, "a secret dressed as one, in a path, is not printed");
+    assert.equal(r.text_slot_not_exempt, true, "free text is not exempt");
+    assert.equal(r.winsxs_hash_names_cut_once, true, "a component name that is a hash is cut by layer 1 and not replaced again by the backstop");
+    assert.deepEqual(r.dressed_exempt, [false, false, false], "a secret dressed as one is not exempt");
+  });
+
   test(`${name}: user-info with a random user, a password holding / and +, and a user over 64 characters: none printed, by the layers alone, the backstop alone and together`, async () => {
     const r = await drive(name, "userinfo");
     for (const mode of ["together", "layers_only", "backstop_only"]) {
@@ -153,6 +215,8 @@ for (const name of names) {
     assert.ok(r.distinct_orders > 10, "the order of equal placeholders changes with the salt");
     assert.equal(r.rank_order_always, false, "the order of the raw names is not the printed order");
     assert.equal(r.plain_names_sorted_among_themselves, true);
+    assert.ok(r.backstop_only_distinct_orders > 10, "names the layers show and the backstop replaces are in an order of their own too");
+    assert.equal(r.backstop_only_rank_order_always, false, "and it is not the order of their raw text");
     assert.equal(r.order_counts_nothing, true, "judging for the order is not withholding");
     assert.deepEqual(r.contains_hit_shown, [true, false]);
     assert.deepEqual(r.contains_in_withheld, [false, true], "not found in the text shown, and text is withheld: blind");

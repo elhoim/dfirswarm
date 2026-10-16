@@ -238,3 +238,19 @@ test("the windows-forensics tools that carry the SHARED BOUNDARY block carry it 
   assert.ok(Object.keys(found).length >= 1);
   assert.equal(new Set(Object.values(found).map((b) => createHash("sha256").update(b).digest("hex"))).size, 1, `the block differs between ${Object.keys(found).join(", ")}`);
 });
+
+test("esedb_query: a row of three cells of 262,144 characters made of PEM markers with no end (one led by a token) is sealed in seconds, not the 30 the quadratic window took", async () => {
+  const token = "gh" + "p_" + Array.from({ length: 36 }, (_, i) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(i * 11 + 5) % 62]).join("");
+  const rep = (atom: string, lead = ""): string => (lead + atom.repeat(Math.ceil(262144 / atom.length))).slice(0, 262144);
+  await withCwd(async (cwd, bin) => {
+    const cells = [rep("-----BEGIN PRIVATE KEY-----"), rep("-----BEGIN RSA PRIVATE KEY-----", token + " "), rep("PRIVATE KEY-----", "x ")];
+    const env = await setup(cwd, bin, "A\tB\tC\n" + cells.join("\t") + "\n");
+    const started = Date.now();
+    const run = await tool("esedb_query", cwd, { path: "work/x.edb", table: "T", limit: 2 }, env, bin);
+    const seconds = (Date.now() - started) / 1000;
+    const out = body<Answer>(run);
+    assert.ok(seconds < 15, `${seconds} s`);
+    assert.ok(![run.stdout, ...(await reachable(cwd))].some((t) => t.includes(token.slice(4, 20))), "the token is not printed");
+    assert.ok(["complete", "partial"].includes(out.status), String(out.status));
+  });
+});
