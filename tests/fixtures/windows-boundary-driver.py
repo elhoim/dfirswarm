@@ -93,6 +93,127 @@ elif case == "redos":
             measure(lambda n, prefix=prefix, atom=atom: prefix + atom * (n // len(atom)), prefix + " + " + atom, ("text",))
     print(json.dumps({"slow": slow, "worst": round(worst, 2), "cases": cases}))
 
+elif case == "big":
+    # strings past the 100,000-character window the old PEM pattern scanned from every marker, with a leading token that makes a layer change the string (so the
+    # backstop reads the original too): every shape of the cost, at the largest size a string is judged at (262,144) and past it, in CPU seconds
+    sizes = [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [120000, 262144]
+    lead = "gh" + "p_" + rs(36) + " "
+    atoms = ["-----BEGIN PRIVATE KEY-----", "PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----\n", "ey" + "J", "gh" + "p_", "password=", "Password: ", "AK" + "IA", "=", ":", "@", "a:b@",
+             "ABCDEFGHIJKLMNOP=", "sk-", "SG.", "\\", " ", "-----END ", "token=", "A1"]
+    slow, worst, cases = [], 0.0, 0
+    for size in sizes:
+        for atom in (atoms if size <= 300000 else atoms[:6]):               # past the size a string is judged at, the rest is withheld by its length: a few shapes
+            for kind in ("text", "path"):
+                text = lead + (atom * (size // len(atom) + 1))[:size]
+                t0 = time.process_time()
+                out = blk.seal({"v": blk.T(kind, text)})
+                took = time.process_time() - t0
+                cases += 1
+                worst = max(worst, took)
+                if took > 4 or lead[:40] in json.dumps(out):
+                    slow.append([size, atom, kind, round(took, 2), lead[:40] in json.dumps(out)])
+    print(json.dumps({"slow": slow, "worst": round(worst, 2), "cases": cases, "sizes": sizes}))
+
+elif case == "budget":
+    # an answer that takes longer than the budget to seal has the rest of its strings replaced whole, is partial, and the clock is stopped after it
+    blk.SEAL_BUDGET = 0.05
+    big = "gh" + "p_" + rs(36) + " " + ("ey" + "J") * 80000
+    doc = {"status": "complete", "name": "short", "items": [{"id": i, "text": big + str(i)} for i in range(40)], "tail": "x" * 40}
+    out = {}
+    t0 = time.process_time()
+    sealed = blk.answer_object(doc)
+    out["seconds"] = round(time.process_time() - t0, 2)
+    out["status"] = sealed["status"]
+    texts = [i["text"] for i in sealed["items"]]
+    out["late_marks"] = sum("the judging time ran out" in t for t in texts)
+    out["unjudged_printed"] = sum(big[:50] in t for t in texts)
+    out["short_kept"] = sealed["name"] == "short" and sealed["items"][-1]["id"] == 39
+    out["tail_withheld"] = "the judging time ran out" in sealed["tail"]
+    out["counted"] = sealed["boundary"]["replaced_by_check"].get("the judging time ran out", 0)
+    out["clock_stopped"] = blk._CLOCK["deadline"] is None
+    out["basis"] = sealed.get("status_basis", "")[:40]
+    blk.SEAL_BUDGET = 10.0
+    again = blk.seal({"v": "plain words"})
+    out["after"] = again == {"v": "plain words"}
+    # the hard stop of a tool: a seal that starts past it withholds all but the short plain strings
+    blk.seal_stop_after(-1)
+    late = blk.seal({"long": "a longer text than fifteen characters", "short": "short"})
+    out["stop_late"] = late["long"].startswith("<withheld") and "the judging time ran out" in late["long"] and late["short"] == "short"
+    blk._CLOCK["stop"] = None
+    out["stop_cleared"] = blk.seal({"v": "a longer text than fifteen characters"}) == {"v": "a longer text than fifteen characters"}
+    print(json.dumps(out))
+
+elif case == "contains_sealed":
+    # a secret that ONLY the backstop catches (the layers show it, the backstop replaces the string): a `contains` filter must not tell a true piece of it from a
+    # wrong one, in the count of matches or in the blind spot
+    res = {"plants": 0, "differ": 0, "secret_in_sealed": 0, "counters_moved": 0, "whole_string_gone": 0}
+    BAK = A + "+/"
+    for slot in ("text", "path"):
+        for _ in range(8):
+            while True:
+                sec = rs(40, BAK)
+                text = "C:\\tool.exe --key " + sec
+                shown = blk.show(text, slot, "")
+                if sec in shown and blk._suspect(shown, slot):
+                    break
+            before = (blk.BOUNDARY["withheld"], blk.BOUNDARY["replaced"], len(blk.BOUNDARY["where"]))
+            needles = [sec[0:10], sec[15:25], sec[30:40], sec]
+            wrongs = [rs(10, BAK), sec[:9] + ("x" if sec[9] != "x" else "y"), rs(14, BAK)]
+            got = [blk.contains_check(n.lower(), text, slot) for n in needles]
+            bad = [blk.contains_check(n.lower(), text, slot) for n in wrongs]
+            res["plants"] += 1
+            res["differ"] += len({tuple(g) for g in got + bad}) != 1
+            res["secret_in_sealed"] += sec[:12] in blk.sealed_text(text, slot)
+            res["whole_string_gone"] += blk.contains_check("tool.exe", text, slot) == tuple(bad[0])
+            res["counters_moved"] += before != (blk.BOUNDARY["withheld"], blk.BOUNDARY["replaced"], len(blk.BOUNDARY["where"]))
+    res["blind_when_hidden"] = blk.contains_check("zzzzzzzz", "C:\\tool.exe --key " + sec, "text")
+    res["plain_text_found"] = blk.contains_check("tool.exe", "C:\\tool.exe --verbose", "text")
+    res["plain_text_absent"] = blk.contains_check("qq", "C:\\tool.exe --verbose", "text")
+    print(json.dumps(res))
+
+elif case == "shapes_p3":
+    out = {}
+    # a field name with an acronym in the plural is a plain name; random names of 16+ characters still are not
+    names = ["NumberOfGPOsDownloaded", "NumberOfGPOsApplicable", "ProcessorArchitecture", "SubjectUserSid", "TargetLogonId", "NumberOfDCsFound", "ServicePackMajorVersion", "IPAddressList"]
+    out["names_changed"] = [n for n in names if blk.show(n, "name", "") != n]
+    out["random_names_withheld"] = sum("withheld" in blk.show(rs(24), "name", "") for _ in range(100))
+    # a typed version holds the shape of a version, whatever the first layer does
+    ver_ok = ["10.0.19041.1", "6.1.7601.17514", "1.2.3-beta+build.5", "v2.0", "3", "7.0.0.0-rc.1"]
+    out["version_ok_flagged"] = [v for v in ver_ok if blk._suspect(v, "version")]
+    out["version_base62_flagged"] = sum(bool(blk._suspect(str(rnd.randint(1, 9)) + rs(rnd.randint(19, 40)), "version")) for _ in range(200))
+    # sk- with its only digit late
+    plain = "sk-" + "".join(rnd.choice(string.ascii_letters) for _ in range(34)) + str(rnd.randint(0, 9)) + rs(6, string.ascii_letters)
+    out["sk_late_digit_flagged_backstop"] = bool(blk._suspect(plain)) and "token prefix" in str(blk._suspect(plain))
+    out["sk_late_digit_layer2"] = plain not in blk.show("key " + plain, "text", "")
+    out["sk_words_kept"] = blk.show("sk-learn-contrib and sk-image", "text", "") == "sk-learn-contrib and sk-image"
+    # a full-width token written as hexadecimal (UTF-8 and UTF-16LE) is read like a plain one
+    core = rs(36)
+    wide = "".join(chr(ord(c) + 0xFEE0) for c in "gh" + "p_" + core)
+    out["wide_hex_flagged"] = [bool(blk._verdict(wide.encode(enc).hex(), "hex")) for enc in ("utf-8", "utf-16-le", "utf-16-be")]
+    out["wide_hex_printed"] = [wide.encode(enc).hex() in json.dumps(answer("hex", wide.encode(enc).hex())) for enc in ("utf-8", "utf-16-le")]
+    out["random_binary_still_printed"] = sum((lambda h: h in json.dumps(answer("hex", h)))(bytes(rnd.randrange(256) for _ in range(48)).hex()) for _ in range(20))
+    # the names of components of the component store are not replaced by the backstop in a name or key slot (and nothing else is exempt)
+    sxs = ["amd64_microsoft-windows-ndis-minwin_31bf3856ad364e35_0.0.0.0_none_" + rs(16, "0123456789abcdef"), "wow64_microsoft-windows-font-fms.resources_31bf3856ad364e35_sk-sk_" + rs(16, "0123456789abcdef"),
+           "x86_microsoft.vc90.crt_1fc8b3b9a1e18e3b_9.0.30729.9247_none_" + rs(16, "0123456789abcdef")]
+    out["winsxs_kept"] = [blk.seal({"v": blk.T(k, n)})["v"] == n for n in sxs for k in ("name", "key")]
+    # the component names that are a hash (32 hexadecimal digits) are cut by layer 1; what is left of them is not replaced again by the backstop
+    hashed = ["amd64_" + rs(32, "0123456789abcdef") + "_31bf3856ad364e35_none_" + rs(16, "0123456789abcdef") for _ in range(20)]
+    sealed = [blk.seal({"v": blk.T("key", n)})["v"] for n in hashed]
+    out["winsxs_hash_names_cut_once"] = all("withheld" in v and "backstop" not in v and "_none_" in v for v in sealed)
+    # a secret dressed as one is not exempt: upper case, a long random middle, a base64 middle
+    dressed = ["amd64_" + rs(30) + "_31bf3856ad364e35_0.0.0.0_none_" + rs(16, "0123456789abcdef"), "amd64_" + rs(40, "abcdefghijklmnopqrstuvwxyz0123456789") + "_31bf3856ad364e35_none_" + rs(8, "0123456789abcdef"),
+               "gh" + "p_" + rs(36) + "_31bf3856ad364e35_none_" + rs(16, "0123456789abcdef")]
+    out["dressed_exempt"] = [bool(blk._WINSXS.fullmatch(d)) for d in dressed]
+    # as a component of a key or a path
+    pathed = "C:\\Windows\\WinSxS\\" + sxs[0] + "\\ndis.sys"
+    keyed = "Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\ComponentDetect\\" + sxs[1]
+    out["winsxs_in_path_and_key_kept"] = [blk.seal({"v": blk.T("path", pathed)})["v"] == pathed, blk.seal({"v": blk.T("key", keyed)})["v"] == keyed]
+    core = rs(30)
+    secret_path = "C:\\Windows\\WinSxS\\amd64_" + core + "_31bf3856ad364e35_0.0.0.0_none_" + rs(16, "0123456789abcdef") + "\\x.dll"
+    out["dressed_in_path_not_printed"] = core not in json.dumps(blk.seal({"v": blk.T("path", secret_path)}))
+    out["text_slot_not_exempt"] = blk._without_components(sxs[0], "text") == sxs[0] and blk._without_components(sxs[0], "name") == "w"
+    print(json.dumps(out))
+
 elif case == "same_marker_keys":
     count = 6000
     names = {rs(24): i for i in range(count)}
@@ -272,6 +393,20 @@ elif case == "order_and_contains":
         orders.add(tuple(ordered))
         if [n for n in ordered if len(n) == 24] != sorted(n for n in names if len(n) == 24):
             first_always_rank = False
+    # names that only the backstop replaces (the layers show them): the order of their placeholders is not the order of their raw text either
+    hidden = []
+    while len(hidden) < 8:
+        cand = rs(40, A + "+/")
+        if blk.show(cand, "text", "") == cand and blk._suspect(cand):
+            hidden.append(cand)
+    seen_orders, rank = set(), True
+    for _ in range(25):
+        blk._ORDER_SALT = os.urandom(16)
+        got = blk.print_order(list(hidden), "text")
+        seen_orders.add(tuple(got))
+        rank = rank and got == sorted(hidden)
+    res["backstop_only_distinct_orders"] = len(seen_orders)
+    res["backstop_only_rank_order_always"] = rank
     res["distinct_orders"] = len(orders)
     res["rank_order_always"] = first_always_rank
     res["plain_names_sorted_among_themselves"] = all([n for n in o if len(n) != 24] == ["Alpha", "Beta", "Containers", "Zeta"] for o in orders)
@@ -320,6 +455,31 @@ elif case == "residue":
                        "b": "it = _tokenize.TokenizerIter(source, encoding=encoding, extra_tokens=extra_tokens)"})
     res["benign_backstop_replaced"] = blk.BOUNDARY["replaced"] - before
     print(json.dumps(res))
+
+elif case == "residue_fp":
+    # the residue check takes a padded base64 run only in the shape of one (a length that is a multiple of 4 and a digit, + or /): the attributes of an event
+    # (RelatedActivityID="", EventSourceName=, processorArchitecture=) are not secrets, whatever else a layer cut from the same text
+    guid = "{" + "-".join(rs(n, "0123456789ABCDEF") for n in (8, 4, 4, 4, 12)) + "}"
+    token = "gh" + "p_" + rs(36)
+    n, replaced, kept, quiet = 120, 0, 0, 0
+    for i in range(n):
+        xml = ("<Event xmlns='x'><System><Provider Name='Microsoft-Windows-Security-Auditing'/><Correlation ActivityID='%s' RelatedActivityID=''/><Execution ProcessID='4' ThreadID='8'/>"
+               "</System><EventData><Data Name='CommandLine'>run %s now</Data><Data Name='EventSourceName'>x</Data></EventData>"
+               "<RenderingInfo processorArchitecture='amd64' EventSourceName=''/></Event>") % (guid, token + rs(i % 5))
+        before = blk.BOUNDARY["replaced"]
+        out = blk.answer_object({"status": "complete", "xml": xml})
+        replaced += blk.BOUNDARY["replaced"] - before
+        kept += "RelatedActivityID=''" in out["xml"] and "processorArchitecture='amd64'" in out["xml"]
+        quiet += out["status"] == "complete"
+    # and a real padded base64 key in the same text is still found (by the backstop alone, whatever the layers do)
+    b64 = rs(31, A + "+/") + "="
+    saved = blk._show
+    blk._show = lambda s, kind, field: s
+    try:
+        found = blk._verdict("key was " + b64 * 1 + " end", "text")
+    finally:
+        blk._show = saved
+    print(json.dumps({"n": n, "replaced_by_the_backstop": replaced, "attributes_kept": kept, "status_complete": quiet, "real_b64_found": bool(found)}))
 
 elif case == "basis":
     saved = blk._verdict

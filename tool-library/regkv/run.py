@@ -385,26 +385,38 @@ class HiveBounds:
 # AND the original: a window of 12 characters of anything it calls secret in the original that is still in the shown string means the
 # layers above left a piece of a secret between two cuts. A string it finds suspect is replaced by <withheld N bytes: backstop: why>,
 # counted, its place named in boundary.replaced_at (built from the keys on the way as they are SHOWN, or their positions), and the
-# answer is partial. A placeholder is only a placeholder when its reason is one of the fixed list.
+# answer is partial. A placeholder is only a placeholder when its reason is one of the fixed list. The names of the components of the Windows
+# component store (WinSxS: lower case, a public key token, a language or `none`, a hash) are not judged by the backstop in a name or key slot:
+# a real SOFTWARE hive lists them by the thousand and their hash looked random to it; layer 1 judges them as it does every name.
 #
 # ONE WAY OUT: emit() writes an answer, row_text() a row of a paging file, and both seal every key and value first (a value that is not
 # a string, a number or a container is sealed as the text str() makes of it). Binary data written as hex (a REG_BINARY value, an ESE
-# binary column) is decoded and its printable views (Latin-1 and UTF-16LE) are judged by the free-text rules, by both layers and the
+# binary column) is decoded and its printable views (Latin-1 and UTF-16LE, and runs holding full-width characters read as UTF-8 and UTF-16LE with
+# the width folded) are judged by the free-text rules, by both layers and the
 # backstop; hex that holds a secret-shaped text is withheld, and any other hex is shown (random bytes with no text in them are printed).
 # What is withheld is a placeholder with its length and the reason; its original goes to the values file only when write_values was
 # asked for in a job run as secret output. A list of names is printed in the order of the text shown for each, the placeholders of
-# withheld names in a random order that is new every run (print_order); a `contains` filter is applied to the text as shown, and
-# contains_check says when the needle could have been in what is hidden.
+# withheld names in a random order that is new every run (print_order); a `contains` filter is applied to the text the answer PRINTS (the
+# string after the layers and the backstop, sealed_text), never to what is withheld or replaced, and contains_check says when the needle
+# could have been in what is hidden. Every string is judged in linear time (a string is read to 256 KiB, the pieces the backstop compares
+# are at most 64, a PEM body at most 20,000 characters), and an answer or a row that takes longer than SEAL_BUDGET seconds to seal, or that is
+# still being sealed at the tool's hard stop (seal_stop_after), has the rest of its strings replaced whole (<withheld N bytes: backstop: the
+# judging time ran out>) and is partial.
 # NOT RECOGNISED, by design: a secret that does not look like one (a plain password, a pronounceable passphrase, a UUID-shaped key,
 # anything under 16 characters in a name, a secret hidden in words or in an encoding this block does not read).
 import collections
 import hashlib
 import signal
+import time
 import unicodedata
 
 LMIN = 16
 MAX_ONE_STRING = 1 << 18
 MAX_HEX_JUDGED = 1 << 20
+MAX_PIECES = 64                 # the pieces of a string the backstop compares with what was shown (it stops collecting at this many)
+MAX_PEM_BODY = 20000            # a PEM body is read to this many characters (a 16,384-bit RSA key is about 13,000)
+SEAL_BUDGET = 10.0              # seconds one answer, or one row of a paging file, may take to be sealed; a tool may set another
+_CLOCK = {"deadline": None, "stop": None}
 _BIGRAMS_TEXT = "aaabacadaeafagahaiajakalamanaoapaqarasatauavawaxayazbabbbcbdbebfbhbibjblbmbnbobpbrbsbtbubvbycacbcccdcecfchcickclcncocqcrcsctcucydadbdcdddedfdgdhdidjdldmdndodpdrdsdtdudvdwdyeaebecedeeefegeheiejekelemeneoepeqereseteuevewexeyezfafbfcfdfefffiflfofrftfufygagbgdgegfggghgiglgmgngogrgsgtgugwgyhahbhchdhehfhhhihlhmhnhohphrhshthuhwhyiaibicidieifigihiiijikiliminioipiqirisitiuiviwixizjajejijojukakbkekfkhkikkklkmknkokpkrksktkukwkylalblcldlelflglhlilklllmlnlolplrlsltlulvlwlymambmemfmimlmmmnmompmrmsmumwmynanbncndnenfngnhninjnknlnmnnnonpnqnrnsntnunvnwnxnynzoaobocodoeofogohoiojokolomonooopoqorosotouovowoxoyozpapbpcpepfphpiplpmpnpoppprpsptpupwpyqurarbrcrdrerfrgrhrirjrkrlrmrnrorprqrrrsrtrurvrwryrzsasbscsdsesfsgshsiskslsmsnsospsqsrssstsusvswsytatbtctdtetftgthtitltmtntotptrtstttutvtwtytzuaubucudueufuguhuiukulumunuoupurusutuvuxuyuzvavevivovuvywawbwdwewfwhwiwkwlwmwnwowrwswtwuwyxaxcxexhxixoxpxtxuxxxyyaybycydyeyfygyhyiylymynyoypyrysytyuywyxyyyzzazezizlzozuzyzz"           # the 474 letter pairs that words and identifiers use (the system word list and Python identifiers)
 _BIGRAMS = frozenset(_BIGRAMS_TEXT[i:i + 2] for i in range(0, len(_BIGRAMS_TEXT), 2))
 BOUNDARY = {"withheld": 0, "by": collections.Counter(), "replaced": 0, "replaced_by": collections.Counter(), "where": [], "not_listed": 0}
@@ -430,7 +442,7 @@ def _mark(n, label, unit="characters"):
 
 # the reasons a placeholder can give: a fixed list, so that text which only looks like a placeholder is not taken for one (and not skipped by the rules)
 _CHECKS = ("a PEM marker", "a named secret", "a token prefix", "user-info", "not the typed grammar", "a long digit run", "a long hexadecimal run",
-           "a base64 run with / and +", "a padded base64 run", "a random-looking run", "a part of a secret-shaped text")
+           "a base64 run with / and +", "a padded base64 run", "a random-looking run", "a part of a secret-shaped text", "the judging time ran out")
 _LABELS = ("not a plain name", "token-shaped text", "user-info", "secret value", "private key", "long number", "rest of a long string",
            "binary data over the judged size", "binary data holding a secret-shaped text", "invisible characters in a name", "not a port", "query value", "fragment",
            "not a guid", "not a digest", "not a sid", "not a mac", "not a ip", "not a time", "not a number", "not a version") + \
@@ -538,7 +550,7 @@ def _flat(text):
 
 
 # ---- layer 1: the allow-list ------------------------------------------------------------------------------------------------------
-_PIECE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+_PIECE = re.compile(r"[A-Z]{2,}s(?![a-z])|[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")        # (GPOs, an acronym in the plural, is one piece)
 _GUID = re.compile(r"\{?[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}?|[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SID = re.compile(r"S-1-[0-9]{1,2}(?:-[0-9]{1,10}){1,15}")
 _IPV4 = re.compile(r"(?<![0-9A-Za-z.])[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?![0-9A-Za-z])")
@@ -808,7 +820,7 @@ _NAMED = re.compile(r"(?i)(?:(?<![Bb]y)(?<![Cc]om)(?<![Oo]ver)(?<![Uu]nder)(?<![
 _PEM = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
 _PREFIX = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abeprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}"
                      r"|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{30,}"
-                     r"|dop_v1_[0-9a-f]{40,}|ya29\.[0-9A-Za-z_-]{30,})|sk-(?=[A-Za-z0-9_-]{0,19}[0-9])[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,2000}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?")
+                     r"|dop_v1_[0-9a-f]{40,}|ya29\.[0-9A-Za-z_-]{30,})|sk-(?=[A-Za-z0-9_-]{0,39}[0-9])[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,300}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?")
 _BASE64_PADDED = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
 _LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
 
@@ -906,15 +918,31 @@ def _deny_text(s, field):
 _MEMO = {}
 
 
+_WIDE_RUN = re.compile(r"[\x20-\x7e\uff01-\uff5e]{4,}")
+
+
+def _wide_views(raw):
+    """Runs of ASCII and full-width ASCII in `raw` read as UTF-8 and as UTF-16LE (at both byte offsets), when it holds a full-width character at
+    all: width is folded afterwards (NFKC), so a full-width token written as hexadecimal is read like a plain one."""
+    views = []
+    if b"\xef\xbc" in raw or b"\xef\xbd" in raw:
+        views += _WIDE_RUN.findall(raw.decode("utf-8", "replace"))
+    if b"\xff" in raw:
+        for offset in (0, 1):
+            views += _WIDE_RUN.findall(raw[offset:len(raw) - (len(raw) - offset) % 2].decode("utf-16-le", "replace"))
+    return [unicodedata.normalize("NFKC", v) for v in views]
+
+
 def _hex_views(s):
-    """The printable views of binary data written as hex: Latin-1 runs of 6 or more and UTF-16LE runs of 4 or more."""
+    """The printable views of binary data written as hex: Latin-1 runs of 6 or more and UTF-16LE runs of 4 or more, and the runs that hold
+    full-width characters (UTF-8 and UTF-16LE), width folded."""
     try:
         raw = bytes.fromhex(s[: MAX_HEX_JUDGED])
     except ValueError:
         return None
     views = [m.group().decode("latin-1") for m in re.finditer(rb"[\x20-\x7e]{6,}", raw)]
     views += [m.group().decode("utf-16-le", "replace") for m in re.finditer(rb"(?:[\x20-\x7e]\x00){4,}", raw)]
-    return views
+    return views + _wide_views(raw)
 
 
 def _show_hex(s, field):
@@ -989,29 +1017,52 @@ def show(s, kind="text", field=""):
 _ORDER_SALT = os.urandom(16)
 
 
-def print_order(items, kind="name", text=str):
-    """`items` in the order an answer prints them: by the text the boundary shows for each, and the items whose text is the same placeholder in a
-    random order that is new for every run. The rank of the withheld texts themselves (the order `sorted` would give, the order a directory or a
-    hive lists them in) must never show in what an answer lists."""
-    saved = (BOUNDARY["withheld"], BOUNDARY["by"].copy(), _VALUES["fh"])
-    _VALUES["fh"] = None                                       # judging for the order is not withholding: nothing is counted or written
+def _quietly(fn):
+    """`fn()` with nothing counted, listed or written: judging a string to see what an answer would show of it is not withholding it."""
+    saved = (BOUNDARY["withheld"], BOUNDARY["by"].copy(), BOUNDARY["replaced"], BOUNDARY["replaced_by"].copy(), BOUNDARY["where"][:], BOUNDARY["not_listed"], _VALUES["fh"])
+    _VALUES["fh"] = None
     try:
-        keyed = [(show(text(i), kind, ""), hashlib.blake2b(_ORDER_SALT + text(i).encode("utf-8", "surrogatepass"), digest_size=8).digest(), n, i)
-                 for n, i in enumerate(items)]
+        return fn()
     finally:
-        BOUNDARY["withheld"], BOUNDARY["by"], _VALUES["fh"] = saved
+        (BOUNDARY["withheld"], BOUNDARY["by"], BOUNDARY["replaced"], BOUNDARY["replaced_by"], BOUNDARY["where"], BOUNDARY["not_listed"], _VALUES["fh"]) = saved
+
+
+def sealed_text(text, kind="text", field=""):
+    """The exact text an answer prints for the string `text` of a field of type `kind`: the layers, then the backstop (a string it replaces comes
+    out as its placeholder). Nothing is counted, listed or written to the values file: this is for what must see what the answer shows (a
+    `contains` filter, the order of a list)."""
+    if not isinstance(text, str) or not text:
+        return text
+    return _quietly(lambda: _seal(text, kind, field, (), True))
+
+
+def print_order(items, kind="name", text=str):
+    """`items` in the order an answer prints them: by the text the answer PRINTS for each (the layers and the backstop, sealed_text), and the items
+    whose text is the same placeholder in a random order that is new for every run. The rank of the withheld texts themselves (the order `sorted`
+    would give, the order a directory or a hive lists them in) must never show in what an answer lists. `kind` is the kind of the field the items
+    are printed in; `text` gives the string of an item."""
+    def judge():
+        out = []
+        for n, i in enumerate(items):
+            raw = text(i)
+            shown = _seal(raw, kind, "", (), True) if isinstance(raw, str) and raw else raw
+            out.append((shown, hashlib.blake2b(_ORDER_SALT + raw.encode("utf-8", "surrogatepass"), digest_size=8).digest(), n, i))
+        return out
+    items = list(items)
+    keyed = _quietly(judge)
     keyed.sort(key=lambda k: (k[0], k[1], k[2]))
     return [k[3] for k in keyed]
 
 
 def contains_check(needle_lower, text, kind="text", field=""):
-    """(matched, blind) for a `contains` filter: the needle is looked for in `text` as it is SHOWN, never in what was withheld. `blind` is true when
-    it was not found and the shown text holds a placeholder: the needle may be in what is hidden. It says nothing of what the hidden text is
-    (it is the same whatever the needle), so counting it opens no way to test a guess."""
-    shown = show(text, kind, field)
-    if needle_lower in shown.lower():
+    """(matched, blind) for a `contains` filter: the needle is looked for in the text the answer will PRINT for `text` (sealed_text: after the layers
+    AND the backstop), never in what either of them withheld or replaced, so that a count of matches cannot tell a true guess of a hidden piece from
+    a wrong one. `blind` is true when it was not found and that text holds a placeholder: the needle may be in what is hidden. It is the same
+    whatever the needle, so counting it opens no way to test a guess."""
+    sealed = sealed_text(text, kind, field)
+    if needle_lower in sealed.lower():
         return True, False
-    return False, _MARK.search(shown) is not None
+    return False, _MARK.search(sealed) is not None
 
 
 # ---- layer 3: the backstop, written apart from the layers above ------------------------------------------------------------------------
@@ -1063,14 +1114,13 @@ _S_B64NOPAD = re.compile(r"[A-Za-z0-9+/]{20,}")
 _S_B64PAD = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{15,}={1,2}(?![A-Za-z0-9+=])")
 # in any case where an upper-case spelling of a lower-case prefix is a likely leak (the vendors' prefixes with a body of 12 or more characters)
 _S_PREFIX = re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12}|(?i:(?<![A-Za-z0-9])(?:akia|asia)[a-z0-9]{12}|(?:gh[pousr]_|github_pat_|glpat-|xox[a-z]-|xapp-|sk_live_|rk_live_|pk_live_|sk_test_)[A-Za-z0-9_-]{12})"
-                       r"|(?:npm_|pypi-|shpat_|dop_v1_|AIza|ya29\.|SG\.)[A-Za-z0-9_-]{12}|sk-(?=[A-Za-z0-9_-]{0,11}[0-9])[A-Za-z0-9_-]{12}|eyJ[A-Za-z0-9_-]{12}")
+                       r"|(?:npm_|pypi-|shpat_|dop_v1_|AIza|ya29\.|SG\.)[A-Za-z0-9_-]{12}|sk-(?=[A-Za-z0-9_-]{0,39}[0-9])[A-Za-z0-9_-]{12}|eyJ[A-Za-z0-9_-]{12}")
 _S_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
 _S_USERINFO = re.compile(r"[^\s/@:<>\"']{1,64}:(?P<pw>[^\s/<>\"']{1,128})@[^\s/@<>\"']")
 _S_USERINFO_MARK = re.compile(r"<>:(?P<pw>[^\s/<>\"']{1,128})@[^\s/@<>\"']")
 _S_USERINFO_URL = re.compile(r"(?<=//)(?![^\s/@:<>\"']*:[0-9]{1,5}(?:[/?#@]|$))[^\s/@:<>\"']{1,64}:(?P<pw>[^\s<>\"']{1,128})@[^\s/@<>\"']")
 _S_VALUE = re.compile(r"(?:[^\s\"'<>;,&]|[;,&](?![A-Za-z0-9_. -]{1,40}=)){1,512}")
 _S_ARGVAL = re.compile(r"(?<![\w-])--?(?:pass|password|passwd|pwd|secret|token|apikey|api-key)[= ](\S{1,512})", re.I)
-_S_PEMBODY = re.compile(r"PRIVATE KEY-----(.{1,100000}?)(?:-----END|$)", re.S)
 _S_PEMLINE = re.compile(r"[A-Za-z0-9+/=]{12,}")
 _S_RUN = re.compile(r"[A-Za-z0-9+/_-]{20,}")
 _S_HEX = re.compile(r"[0-9A-Fa-f-]+")
@@ -1082,7 +1132,7 @@ _TYPED_KINDS = frozenset(("guid", "digest", "sid", "mac", "ip", "time", "number"
 _S_TYPED = {
     "guid": re.compile(r"[0-9A-Fa-f{}-]{1,64}"), "sid": re.compile(r"[Ss0-9-]{1,400}"), "mac": re.compile(r"[0-9A-Fa-f:-]{1,64}"),
     "ip": re.compile(r"[0-9A-Fa-f:.]{1,64}(?:%[0-9A-Za-z_.-]{1,16})?"), "time": re.compile(r"[0-9TtZzDd:.,+' -]{1,64}"),
-    "number": re.compile(r"-?[0-9.]{1,64}|0[xX][0-9A-Fa-f]{1,16}|true|false|null"), "version": re.compile(r"[vV]?[0-9][0-9A-Za-z.+-]{0,63}"),
+    "number": re.compile(r"-?[0-9.]{1,64}|0[xX][0-9A-Fa-f]{1,16}|true|false|null"), "version": re.compile(r"(?=.{1,64}\Z)[vV]?[0-9]+(?:\.[0-9A-Za-z]{1,16}){0,6}(?:[-+][0-9A-Za-z.]{1,32}){0,3}"),
     "digest": re.compile(r"(?:sha256:|sha1:|md5:)?[0-9A-Fa-f]{16,128}|T1[0-9A-Fa-f]{16,80}|[0-9]{1,6}:[A-Za-z0-9+/]+:[A-Za-z0-9+/]+"),
 }
 _S_HEXONLY = re.compile(r"(?:[0-9A-Fa-f]{2})+")
@@ -1117,11 +1167,11 @@ def _random_run(run):
 
 
 def _s_named(flat, values=None):
-    """Whether `flat` holds a value after a secret's name; with a list, the values themselves are added to it (and every one is looked for)."""
+    """Whether `flat` holds a value after a secret's name; with a list, the values themselves are added to it (until it holds MAX_PIECES)."""
     pos, found = 0, False
     while True:
         m = _S_DELIM.search(flat, pos)
-        if not m:
+        if not m or (values is not None and len(values) >= MAX_PIECES):
             return found
         i = m.start()
         pos = m.end()
@@ -1155,7 +1205,7 @@ def _s_hex_views(text):
         raw = bytes.fromhex(text[:MAX_HEX_JUDGED])
     except ValueError:
         return None
-    return [m.group().decode("latin-1") for m in _S_PRINT_L1.finditer(raw)] + [m.group().decode("utf-16-le", "replace") for m in _S_PRINT_U16.finditer(raw)]
+    return [m.group().decode("latin-1") for m in _S_PRINT_L1.finditer(raw)] + [m.group().decode("utf-16-le", "replace") for m in _S_PRINT_U16.finditer(raw)] + _wide_views(raw)
 
 
 def _suspect(text, kind="text"):
@@ -1215,14 +1265,14 @@ def _where_text(where, names=True):
     return "/" + "/".join((w[0][:60] if names else str(w[1])) for w in where)
 
 
-def _replace(value, where, check):
+def _replace(value, where, check, positions=False):
     BOUNDARY["replaced"] += 1
     BOUNDARY["replaced_by"][check] += 1
     if len(BOUNDARY["where"]) < MAX_WHERE:
         # the place is the keys on the way, each of them already sealed; their joining is read once more, and when it is not clean the place is the
         # positions (a key that was replaced or withheld must never come back whole through the report of where something was replaced)
-        at = _where_text(where)
-        if _suspect(at, "label"):
+        at = _where_text(where, False) if positions else _where_text(where)
+        if not positions and _suspect(at, "label"):
             at = _where_text(where, False)
         BOUNDARY["where"].append({"at": at, "check": check})
     else:
@@ -1231,13 +1281,54 @@ def _replace(value, where, check):
 
 
 _CHECKED = {}
+_SHORT_PLAIN = re.compile(r"[A-Za-z0-9_ .-]{0,15}")      # what a string of 15 characters or fewer made of these may be (nothing the block claims is that short)
+
+
+def _late():
+    deadline = _CLOCK["deadline"]
+    return deadline is not None and time.monotonic() > deadline
+
+
+def seal_stop_after(seconds):
+    """The hard stop of a tool: no seal runs on past `seconds` from now (its manifest's time limit less a margin); what is left is withheld whole."""
+    _CLOCK["stop"] = time.monotonic() + seconds
+
+
+def _timed(fn):
+    """`fn()` with the clock of the seal running: SEAL_BUDGET seconds from the outermost call, and never past the tool's hard stop."""
+    first = _CLOCK["deadline"] is None
+    if first:
+        _CLOCK["deadline"] = time.monotonic() + SEAL_BUDGET
+        if _CLOCK["stop"] is not None:
+            _CLOCK["deadline"] = min(_CLOCK["deadline"], _CLOCK["stop"])
+    try:
+        return fn()
+    finally:
+        if first:
+            _CLOCK["deadline"] = None
+
+
+# the name of a component of the Windows component store (WinSxS), as a whole name or as a component of a key or a path: architecture, words (lower case, letters up
+# to 40 or letters and digits up to 16, with `.`, `-` or `_` between them, never a hexadecimal hash), the 16-digit public key token, a four-part version (not always
+# there), a language or `none`, and a hash of 8 to 16 hexadecimal digits; a placeholder that layer 1 put in the place of a word, or of the architecture and a word (a
+# 32-digit hash), stands for it. A real SOFTWARE hive lists them by the thousand and the backstop took their hash for a random run, so it judges the text with such a
+# component taken out; layer 1 judges them as it does every name. Names, keys and paths only, lower case only; every alternative starts with a different character,
+# so that a failing match is not retried in a second way.
+_WORD = r"(?:[a-z]{1,40}|(?=[a-z0-9]*[0-9])[a-z0-9]{1,16}|<withheld [0-9]{1,10} (?:characters|bytes): not a plain name>)"
+_WINSXS = re.compile(r"(?<![^\\/])(?:(?:amd64|x86|wow64|msil|arm64|arm|ia64)_(?![0-9a-f]+_)%s(?:[._-]{1,3}%s){0,12}|<withheld [0-9]{1,10} (?:characters|bytes): not a plain name>)"
+                     r"_[0-9a-f]{16}(?:_[0-9]{1,5}(?:\.[0-9]{1,5}){3})?_[a-z0-9-]{2,12}_[0-9a-f]{8,16}(?![^\\/])" % (_WORD, _WORD))
+
+
+def _without_components(text, kind):
+    """`text` as the backstop judges a name, key or path: a component of the component store is one plain word."""
+    return _WINSXS.sub("w", text) if kind in ("name", "key", "path") and text.count("_") >= 3 else text
 
 
 def _verdict(text, kind):
     memo = (kind, text) if len(text) <= 512 else None
     hit = _CHECKED.get(memo, False) if memo else False
     if hit is False:
-        hit = None if _MARK.fullmatch(text) else _suspect(text, kind)
+        hit = None if _MARK.fullmatch(text) else _suspect(_without_components(text, kind), kind)
         if memo:
             if len(_CHECKED) >= 30000:
                 _CHECKED.clear()
@@ -1246,32 +1337,65 @@ def _verdict(text, kind):
 
 
 # ---- the backstop reads the original too: what of a secret-shaped text is still in what was shown
+def _pem_pieces(flat, found):
+    """The base64 lines of the bodies of PEM keys: after each `PRIVATE KEY-----` (found with str.find, at most MAX_PIECES of them) up to the next
+    `-----END` or MAX_PEM_BODY characters."""
+    pos, bodies = 0, 0
+    while bodies < MAX_PIECES and len(found) < MAX_PIECES:
+        i = flat.find("PRIVATE KEY-----", pos)
+        if i < 0:
+            return
+        start = i + 16
+        end = flat.find("-----END", start, start + MAX_PEM_BODY)
+        stop = start + MAX_PEM_BODY if end < 0 else end
+        bodies += 1
+        for m in _S_PEMLINE.finditer(flat, start, stop):
+            found.append(m.group())
+            if len(found) >= MAX_PIECES:
+                return
+        pos = max(stop, start)
+
+
 def _s_pieces(flat, kind):
     """The parts of `flat` (the original text, normalised) the backstop's own rules call secret: a value after a secret's name, the password of
-    user-info, a vendor token, a key's base64, and (outside typed fields) the long random-looking runs."""
+    user-info, a vendor token, a key's base64, and (outside typed fields) the long random-looking runs. At most MAX_PIECES of them, in this
+    order; every walk over the text stops when the list is full."""
     found = []
     bare = _S_IDS.sub(" ", flat)
     _s_named(bare, found)
-    found += [m.group(1) for m in _S_ARGVAL.finditer(flat)]
-    for m in _S_USERINFO.finditer(flat):
-        found.append(m.group("pw"))
-    for m in _S_USERINFO_URL.finditer(flat):
-        found.append(m.group("pw"))
+    for pattern, group in ((_S_ARGVAL, 1), (_S_USERINFO, "pw"), (_S_USERINFO_URL, "pw")):
+        for m in pattern.finditer(flat):
+            if len(found) >= MAX_PIECES:
+                return found
+            found.append(m.group(group))
     for m in _S_PREFIX.finditer(flat):
+        if len(found) >= MAX_PIECES:
+            return found
         end = m.end()
-        while end < len(flat) and flat[end] in _S_TOKEN_CHARS and end - m.end() < 512:
+        stop = min(len(flat), end + 512)
+        while end < stop and flat[end] in _S_TOKEN_CHARS:
             end += 1
         found.append(flat[m.start():end])
-    for m in _S_PEMBODY.finditer(flat):
-        found += _S_PEMLINE.findall(m.group(1))
+    _pem_pieces(flat, found)
     if kind not in _TYPED_KINDS:
         labelled = _S_DIGEST_LABEL.sub(" ", bare) if "ash" in bare or "sha" in bare.lower() or "md5" in bare.lower() or "ASH" in bare else bare
-        found += [m.group() for m in _S_B64PAD.finditer(labelled)]
-        found += [m.group() for m in _S_HEXRUN.finditer(labelled)]
+        for m in _S_B64PAD.finditer(labelled):
+            if len(found) >= MAX_PIECES:
+                return found
+            if _b64_shape(m.group()):
+                found.append(m.group())
+        for m in _S_HEXRUN.finditer(labelled):
+            if len(found) >= MAX_PIECES:
+                return found
+            found.append(m.group())
         for m in _S_B64NOPAD.finditer(labelled):
+            if len(found) >= MAX_PIECES:
+                return found
             if "/" in m.group() and "+" in m.group():
                 found.append(m.group())
         for m in _S_RUN.finditer(labelled):
+            if len(found) >= MAX_PIECES:
+                return found
             if _random_run(m.group()):
                 found.append(m.group())
     return found
@@ -1288,7 +1412,7 @@ def _residue(original, shown, kind):
         return _RESIDUE[memo]
     verdict = None
     flat = _s_normal(original[:MAX_ONE_STRING])
-    pieces = _s_pieces(flat, kind)[:64]
+    pieces = _s_pieces(flat, kind)[:MAX_PIECES]
     if pieces:
         kept = _S_MARK.sub("\x00", _s_normal(shown[:MAX_ONE_STRING]))
         rest = flat                                    # the original without those parts: a window that is also here is the text's own words, not the secret
@@ -1319,6 +1443,9 @@ def _seal(value, kind, field, where, guard, fname=""):
     kind of what it holds, or to a function of the key of one item for a dict whose items have kinds of their own (event data, registry values).
     `where` is the tuple of (sealed key or position, position) on the way down."""
     if isinstance(value, str):
+        if _late():
+            # past the budget the rest is withheld whole, fail closed (a string of 15 characters or fewer of plain characters is no secret this block claims)
+            return value if _SHORT_PLAIN.fullmatch(value) else _replace(value, where, "the judging time ran out", True)
         k = getattr(value, "kind", kind)
         out = show(value, k, field)
         if guard:
@@ -1337,11 +1464,14 @@ def _seal(value, kind, field, where, guard, fname=""):
         for idx, (key, v) in enumerate(value.items()):
             if isinstance(key, str):
                 kk = KEY_KINDS.get(fname, "name")
-                sk = show(key, kk, field)
-                if guard:
-                    check = _verdict(sk, kk)
-                    if check:
-                        sk = _replace(sk, where + (("(key)", idx),), check)
+                if _late():
+                    sk = key if _SHORT_PLAIN.fullmatch(key) else _replace(key, where + (("(key)", idx),), "the judging time ran out", True)
+                else:
+                    sk = show(key, kk, field)
+                    if guard:
+                        check = _verdict(sk, kk)
+                        if check:
+                            sk = _replace(sk, where + (("(key)", idx),), check)
             elif key is None or isinstance(key, _SCALARS):
                 sk = key
             else:
@@ -1373,12 +1503,12 @@ def _kind_of(field, inherited):
 
 
 def seal(value, kind="text", field=""):
-    return _seal(value, kind, field, (), True)
+    return _timed(lambda: _seal(value, kind, field, (), True))
 
 
 def row_object(row):
     """A row of a paging file, sealed and read back: what the file may hold."""
-    return _seal(row, "text", "", (), True)
+    return _timed(lambda: _seal(row, "text", "", (), True))
 
 
 def boundary_summary():
@@ -1404,7 +1534,7 @@ def _last_look(obj):
 
 def answer_object(doc):
     """The answer (or an error answer), sealed and read back. A string the backstop had to replace makes a complete answer partial."""
-    out = _seal(doc, "text", "", (), True)
+    out = _timed(lambda: _seal(doc, "text", "", (), True))
     if isinstance(out, dict):
         out["boundary"] = _last_look(boundary_summary())
         if BOUNDARY["replaced"] > 0 and out.get("status") == "complete":
@@ -1557,14 +1687,19 @@ def read_values(k, shown, names, withheld, problems, bounds):
                 corrupted.append(name)
     except Exception as exc:                                  # a damaged value list: what was read is kept, the rest is named
         problems.append({"where": shown, "what": "values", "error": "%s: %s" % (type(exc).__name__, exc)})
-    for name, (count, first) in renamed.items():
+    for name in print_order(list(renamed), "key"):
+        count, first = renamed[name]
         problems.append({"where": shown, "what": "values",
                          "error": "the key holds more than one value named %r; the %d later one(s) are listed as %r and so on" % (name, count, first)})
     declared = getattr(k, "values_count", None)
     if isinstance(declared, int) and not isinstance(declared, bool) and declared != read:
         problems.append({"where": shown, "what": "values",
                          "error": "the key declares %d values and %d were read (regipy stops at a value record it cannot parse and skips one of a type it does not know)" % (declared, read)})
-    return values, types, lengths, corrupted
+    # The listing is in the order of the text shown for each name, withheld names in an order of their own that is new for every run: a hive keeps
+    # the names of a key's values (and always of its subkeys) in an order that can follow the names themselves, and the place of a withheld one
+    # among the others must not tell where its name falls. The order the hive holds them in is not kept.
+    order = print_order(list(values), "key")
+    return ({n: values[n] for n in order}, {n: types[n] for n in order}, {n: lengths[n] for n in order}, print_order(corrupted, "key"))
 
 
 def list_id(node):
@@ -1603,6 +1738,7 @@ def dump(hive_path, key, recurse=False, depth=2, limit=500, max_nodes=MAX_NODES)
     out = {"key": key, "values": {}, "subkeys": []}
     values, types, lengths, corrupted = read_values(k, shown, names, withheld, problems, bounds)
     out["values"], out["value_types"], out["value_lengths"] = values, types, lengths
+    withheld[:] = print_order(withheld, "key", lambda e: e["name"])
     if corrupted:
         out["corrupted_values"] = corrupted
     hdr = getattr(k, "header", None)
@@ -1629,7 +1765,7 @@ def dump(hive_path, key, recurse=False, depth=2, limit=500, max_nodes=MAX_NODES)
             break
         node, target, path, d = queue.popleft()
         try:
-            children = bounds.subkeys(node, path, problems)
+            children = print_order(bounds.subkeys(node, path, problems), "key", lambda s: s.name)      # the text shown, not the hive's own (alphabetical) order
         except Exception as exc:
             problems.append({"where": path, "what": "subkeys", "error": "%s: %s" % (type(exc).__name__, exc)})
             stopped.add({"path": path, "reason": "its subkeys could not be read", "error": "%s: %s" % (type(exc).__name__, exc)})
@@ -1721,6 +1857,7 @@ def refuse(message, **extra):
 def main():
     withhold_library_output()
     set_deadline(DEADLINE_SECONDS)
+    seal_stop_after(28)                   # the manifest allows 30: no seal runs on past that (the rest is withheld whole)
     install_signal_handlers(lambda signum: interrupted_answer(signum))
     raw = sys.stdin.read()
     if not raw.strip():
@@ -1763,7 +1900,7 @@ def main():
     try:
         out = dump(hive, key, recurse, depth, limit, max_nodes)
     except KeyMissing as gone:
-        there = gone.there
+        there = print_order(gone.there, "key")
         refuse('key not found', key=key, deepest_found=gone.found, missing=gone.missing, subkeys_there=there[:INLINE_NAMES],
                subkeys_there_count=len(there), subkeys_there_not_shown=max(len(there) - INLINE_NAMES, 0),
                subkeys_there_note="the first %d names of the key that was reached, in order; read that key to list them all (all_subkeys)" % INLINE_NAMES)

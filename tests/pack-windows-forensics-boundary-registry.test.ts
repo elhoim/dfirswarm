@@ -194,7 +194,7 @@ test("shellbags: contains looks at the path as shown, and entries it did not mat
     assert.equal(blind.entry_count, 0);
     assert.equal(blind.contains_blind_entries, 1, "one entry was not matched and has text withheld in it");
     assert.equal(blind.status, "partial");
-    assert.match(blind.status_basis, /contains looks only in the text that is shown/);
+    assert.match(blind.status_basis, /contains looks only in the text the answer prints/);
     const other = await run(["Reports", secret], "another-needle-of-other-length");
     assert.equal(other.contains_blind_entries, 1, "the count says nothing of the needle");
     const hit = await run(["Reports", secret], "report");
@@ -220,9 +220,150 @@ test("regkv: names and data an examiner must be able to read come through unchan
     const values: Val[] = READABLE_DATA.map((t, i) => ({ name: READABLE_NAMES[i % READABLE_NAMES.length] + (i >= READABLE_NAMES.length ? "_" + i : ""), type: "sz" as const, value: t }));
     const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Readable", values, children: READABLE_NAMES.filter((n) => !n.includes("\\")).map((name) => ({ name })) }] });
     const out = body<Answer>(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Readable" }, env));
-    assert.deepEqual(Object.values(out.values), READABLE_DATA);
-    assert.deepEqual(out.subkeys.map((s: Answer) => s.name), READABLE_NAMES.filter((n) => !n.includes("\\")));
+    assert.deepEqual(out.values, Object.fromEntries(values.map((v) => [v.name, v.value])), "every value, under its name (the order is that of the text shown, not the hive's)");
+    assert.deepEqual(out.subkeys.map((s: Answer) => s.name), READABLE_NAMES.filter((n) => !n.includes("\\")).sort(), "the subkeys are listed in the order of their names");
     assert.equal(out.boundary.strings_withheld, 0);
+  });
+});
+
+/** Every row of every file a run left (JSON lines) and the answer's own object. */
+async function rowsOf(cwd: string): Promise<Answer[]> {
+  const rows: Answer[] = [];
+  for (const text of await reachable(cwd)) {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try { rows.push(JSON.parse(line) as Answer); } catch { /* part of an answer printed with indent */ }
+    }
+  }
+  return rows;
+}
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const shellItem = (text: string): Buffer => { const content = Buffer.concat([Buffer.from([0x4e, 0x00]), Buffer.from(text, "latin1"), Buffer.from([0])]); const size = Buffer.alloc(2); size.writeUInt16LE(content.length + 2); return Buffer.concat([size, content]); };
+const bagHive = (names: string[]): Node => {
+  const bag: Node = { name: "BagMRU", values: names.map((n, i) => ({ name: String(i), type: "binary" as const, value: shellItem(n) })), children: names.map((_, i) => ({ name: String(i) })) };
+  return { name: "HIVE", children: [{ name: "Local Settings", children: [{ name: "Software", children: [{ name: "Microsoft", children: [{ name: "Windows", children: [{ name: "Shell", children: [bag] }] }] }] }] }] };
+};
+
+test("shellbags: contains reads the text the answer prints, so a true piece of a name that only the backstop replaces cannot be told from a wrong needle", async () => {
+  await withCwd(async (cwd) => {
+    const rnd = prng(78);
+    const candidates = Array.from({ length: 2400 }, () => Array.from({ length: 40 }, () => B64[Math.floor(rnd() * 64)]).join(""));
+    const env = await V.write(cwd, "work/UsrClass.dat", bagHive(candidates));
+    const probe = body<Answer>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", limit: 3000 }, env));
+    const hidden = new Set<number>();
+    for (const row of probe.entries as Answer[]) {
+      if (typeof row.path === "string" && row.path.includes("backstop: ") && /^\d+$/.test(String(row.slot))) hidden.add(Number(row.slot));
+    }
+    const found = [...hidden].sort((a, b) => a - b).slice(0, 2).map((i) => candidates[i]);
+    assert.ok(found.length >= 1, "the planted names include one that only the backstop replaces");
+    for (const c of found) {
+      const env2 = await V.write(cwd, "work/UsrClass.dat", bagHive([c, "Reports"]));
+      const wrong = Array.from({ length: 10 }, () => B64[Math.floor(rnd() * 64)]).join("");
+      const needles = [c.slice(0, 10), c.slice(20, 30), c.slice(30), c, wrong, c.slice(0, 9) + (c[9] === "x" ? "y" : "x")];
+      const answers: Array<[number, string, number]> = [];
+      for (const contains of needles) {
+        const run = await tool("shellbags", cwd, { hive: "work/UsrClass.dat", contains }, env2);
+        const a = body<Answer>(run);
+        assert.ok(![run.stdout, run.stderr, ...(await reachable(cwd))].some((t) => t.includes(c.slice(0, 12))), "the name is not printed");
+        answers.push([a.entry_count, String(a.status), a.contains_blind_entries]);
+      }
+      assert.equal(new Set(answers.map((a) => JSON.stringify(a))).size, 1, `a true piece, the whole name and a wrong needle give different answers: ${JSON.stringify(answers)}`);
+      assert.equal(answers[0][0], 0);
+      assert.equal(answers[0][2], 1, "the entry whose name is replaced is counted as one the needle may be in: the same for every needle");
+    }
+  });
+});
+
+/** Subkey names a hive stores alphabetically: these plain ones, and three random ones that start at the d, n and t of them (withheld). */
+const PLAIN = ["Alpha", "Charlie", "Echo", "Mike", "Oscar", "Sierra", "Uniform"];
+const rnd24 = (rnd: () => number, first: string): string => first + Array.from({ length: 23 }, () => B64[Math.floor(rnd() * 62)]).join("");
+const sortedNames = (names: string[]): string[] => [...names].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0));
+
+test("regkv: the listing of subkeys and values does not follow the order of the raw names: a withheld name's place says nothing of its first letter (twin trees), and its order changes with the run", async () => {
+  await withCwd(async (cwd) => {
+    const rnd = prng(79);
+    const orders = new Set<string>();
+    const positions: Record<string, number[][]> = { A: [], B: [] };
+    for (const [tree, firsts] of [["A", ["d", "n", "t"]], ["B", ["b", "x", "z"]]] as const) {
+      const raw = firsts.map((f) => rnd24(rnd, f));
+      for (let run = 0; run < 6; run++) {
+        // each withheld key has as many subkeys as its rank among the three, so that the order of the answer shows whose place is whose
+        const kids: Node[] = sortedNames([...PLAIN, ...raw]).map((n) => ({ name: n, children: raw.includes(n) ? Array.from({ length: raw.indexOf(n) + 1 }, (_, k) => ({ name: `c${k}` })) : [] }));
+        const values: Val[] = sortedNames([...PLAIN, ...raw]).map((n) => ({ name: n, type: "dword" as const, value: raw.includes(n) ? raw.indexOf(n) + 1 : 0 }));
+        const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Data", children: kids, values }] });
+        const out = body<Answer>(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Data" }, env));
+        const names: string[] = out.subkeys.map((s: Answer) => s.name);
+        assert.equal(names.filter((n) => n.startsWith("<withheld")).length, 3, "the three random names are withheld");
+        assert.deepEqual(names.filter((n) => !n.startsWith("<withheld")), PLAIN, "the plain names are in order");
+        positions[tree].push(names.map((n, i) => (n.startsWith("<withheld") ? i : -1)).filter((i) => i >= 0));
+        orders.add(out.subkeys.filter((s: Answer) => s.name.startsWith("<withheld")).map((s: Answer) => s.subkeys).join(","));
+        const valueNames = Object.keys(out.values);
+        assert.deepEqual(valueNames.filter((n) => !n.startsWith("<withheld")), PLAIN, "the plain value names are in order");
+        assert.deepEqual(valueNames.map((n, i) => (n.startsWith("<withheld") ? i : -1)).filter((i) => i >= 0), positions[tree][run], "the values follow the same rule as the subkeys");
+      }
+    }
+    assert.deepEqual(positions.A, positions.B, "the places of the withheld names are the same whatever their first letters are");
+    assert.ok(new Set(positions.A.map((p) => p.join())).size === 1, "and do not depend on the names");
+    assert.ok(orders.size > 1, `the order of the withheld names among themselves changes from run to run: ${[...orders].join(" | ")}`);
+    assert.ok(![...orders].every((o) => o === "1,2,3"), "and is not always the order of the raw names");
+  });
+});
+
+test("regkv and shellbags: the names listed when a key is not found are in the order of the text shown, and a withheld one is not between its alphabetical neighbours", async () => {
+  await withCwd(async (cwd) => {
+    const rnd = prng(80);
+    for (const [tree, firsts] of [["A", ["d", "n", "t"]], ["B", ["b", "x", "z"]]] as const) {
+      const raw = firsts.map((f) => rnd24(rnd, f));
+      const kids = sortedNames([...PLAIN, ...raw]).map((name) => ({ name }));
+      const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: kids });
+      const a = failed(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Nope" }, env));
+      const there = a.subkeys_there as string[];
+      assert.deepEqual(there.map((n) => n.startsWith("<withheld")), [true, true, true, ...PLAIN.map(() => false)], `${tree}: regkv lists the placeholders together, before the plain names`);
+      assert.deepEqual(there.slice(3), PLAIN);
+      const env2 = await V.write(cwd, "work/UsrClass.dat", { name: "HIVE", children: kids });
+      const b = failed(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", key: "Nope" }, env2));
+      const tried = (b.tried as Answer[])[0].subkeys_there as string[];
+      assert.deepEqual(tried.map((n) => n.startsWith("<withheld")), [true, true, true, ...PLAIN.map(() => false)], `${tree}: shellbags too`);
+    }
+  });
+});
+
+test("amcache_apps: the rows are listed in the order of the text shown for each key, a withheld key's place says nothing of its first letter", async () => {
+  await withCwd(async (cwd) => {
+    const rnd = prng(81);
+    const seen: Record<string, number[]> = {};
+    const orders = new Set<string>();
+    for (const [tree, firsts] of [["A", ["d", "n", "t"]], ["B", ["b", "x", "z"]]] as const) {
+      const raw = firsts.map((f) => rnd24(rnd, f));
+      for (let run = 0; run < 6; run++) {
+        const rows: Node[] = sortedNames([...PLAIN, ...raw]).map((n) => ({ name: n, values: [{ name: "Name", type: "sz" as const, value: raw.includes(n) ? `withheld-${raw.indexOf(n) + 1}` : n }] }));
+        const env = await V.write(cwd, "work/Amcache.hve", { name: "HIVE", children: [{ name: "Root", children: [{ name: "InventoryApplicationFile", children: rows }] }] });
+        const out = body<Answer>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve", limit: 50 }, env));
+        const keys: string[] = out.entries.map((e: Answer) => e.key);
+        assert.equal(keys.filter((k) => k.startsWith("<withheld")).length, 3);
+        assert.deepEqual(keys.filter((k) => !k.startsWith("<withheld")), PLAIN);
+        seen[tree + run] = keys.map((k, i) => (k.startsWith("<withheld") ? i : -1)).filter((i) => i >= 0);
+        orders.add(out.entries.filter((e: Answer) => e.key.startsWith("<withheld")).map((e: Answer) => String(e.Name).replace("withheld-", "")).join(","));
+      }
+    }
+    assert.equal(new Set(Object.values(seen).map((p) => p.join())).size, 1, `the places of the withheld rows do not depend on the names: ${JSON.stringify(seen)}`);
+    assert.ok(orders.size > 1 && ![...orders].every((o) => o === "1,2,3"), `the order among them is new every run: ${[...orders].join(" | ")}`);
+  });
+});
+
+test("regkv: string values of 262,144 characters made of PEM markers with no end (one with a token the layers cut) are sealed in seconds, not the 37 seconds the quadratic window took", async () => {
+  await withCwd(async (cwd) => {
+    const token = "gh" + "p_" + Array.from({ length: 36 }, (_, i) => B64[(i * 11 + 5) % 62]).join("");
+    const rep = (atom: string, lead = ""): string => (lead + atom.repeat(Math.ceil(262144 / atom.length))).slice(0, 262144);
+    const values: Val[] = [rep("-----BEGIN PRIVATE KEY-----"), rep("-----BEGIN RSA PRIVATE KEY-----\n", token + " "), rep("-----BEGIN PRIVATE KEY-----", "x ")].map((value, i) => ({ name: `v${i}`, type: "sz" as const, value }));
+    const env = await V.write(cwd, "work/SOFTWARE", { name: "HIVE", children: [{ name: "Data", values }] });
+    const started = Date.now();
+    const run = await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Data", limit: 5 }, env);
+    const seconds = (Date.now() - started) / 1000;
+    const out = body<Answer>(run);
+    assert.ok(seconds < 15, `${seconds} s`);
+    assert.ok(![run.stdout, ...(await reachable(cwd))].some((t) => t.includes(token.slice(4, 20))), "the token is not printed");
+    assert.ok(["complete", "partial"].includes(out.status));
   });
 });
 
