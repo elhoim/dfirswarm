@@ -269,7 +269,11 @@ def resolve_output(out, what="output"):
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
 # Linux the kernel is also asked to kill it if the tool dies. A deadline kills the program and what it started by
-# walking the process tree, and SIGTERM, SIGINT and SIGHUP do the same and then give the tool a last word.
+# walking the process tree, and SIGTERM, SIGINT and SIGHUP do the same and then give the tool a last word. Only what is
+# below a program this tool started and has not yet waited for is ever signalled: the walk starts at that program's pid
+# and nowhere else, and a program that has been waited for (its pid may be another process's by now) is left alone. The
+# walk has no bound but the number of processes. Two cases leave the tree running: a ps that needs more than PS_WAIT
+# seconds, and a sandbox that denies both libproc and ps (macOS).
 try:
     import ctypes
 except ImportError:  # pragma: no cover
@@ -322,11 +326,12 @@ def _children_libproc(pid):
 PS_WAIT = 10    # seconds the ps fallback is given: ps is slow on a heavily loaded host, and a tree that is not found is a program left running
 
 
-def _below(kids, pid, limit=4096):
-    found, stack = [], [pid]
-    while stack and len(found) < limit:
+def _below(kids, pid):
+    found, seen, stack = [], {pid}, [pid]
+    while stack:
         for child in kids.get(stack.pop(), []):
-            if child not in found and child != pid:
+            if child not in seen:
+                seen.add(child)
                 found.append(child)
                 stack.append(child)
     return found
@@ -351,10 +356,11 @@ def descendants(pid):
         else:
             first = _children_libproc(pid)
             if first:
-                found, stack = list(first), list(first)
-                while stack and len(found) < 4096:
+                found, seen, stack = list(first), {pid, *first}, list(first)
+                while stack:
                     for child in _children_libproc(stack.pop()) or []:
-                        if child not in found and child != pid:
+                        if child not in seen:
+                            seen.add(child)
                             found.append(child)
                             stack.append(child)
                 return found
@@ -372,7 +378,10 @@ def descendants(pid):
 
 def kill_tree(proc):
     """Kill the program and everything it started. The children are listed first: once the parent is gone they are
-    adopted by init and can no longer be found below it."""
+    adopted by init and can no longer be found below it. A program already waited for is not touched: its pid is free to
+    be another process's, and the walk below it would be that process's children."""
+    if proc.poll() is not None:
+        return
     victims = descendants(proc.pid)
     try:
         proc.kill()

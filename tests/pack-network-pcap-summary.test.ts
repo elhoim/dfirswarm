@@ -624,12 +624,29 @@ test("the summary after the reading has its own end: the rows stop there, the an
     const cut = body(await tool(SUMMARY, cwd, { path, top: 5 }, { PCAP_SUMMARY_FINISH_SECONDS: "0" }));
     assert.equal(cut.status, "partial");
     assert.deepEqual(cut.listing_cut_by_its_own_clock.conversations, { written: 255, of: 1000 });
-    assert.match(cut.status_basis, /ordering and writing of the lists after the reading ran out of time \(conversations: 255 written of 1000/);
+    assert.match(cut.status_basis, /ordering and writing of the lists after the reading ran out of time \(conversations: 255 of 1000 written/);
     assert.equal(cut.packets, 1000, "the counts are whole");
     assert.equal(cut.tuple_conversation_count, 255);
     const whole = body(await tool(SUMMARY, cwd, { path, top: 5 }));
     assert.equal(whole.status, "complete");
     assert.equal(whole.tuple_conversation_count, 1000);
     assert.equal(whole.listing_cut_by_its_own_clock, null);
+  });
+});
+
+test("with group endpoint the summing of the tuples is under the same end: cut, no endpoint row is listed, and the answer says how many tuples were summed", async () => {
+  await withCwd(async (cwd) => {
+    const packets = Array.from({ length: 1000 }, (_, i) => ({ sec: 1_700_000_000 + i, frame: frameTcp4({ src: C, dst: S, sport: 40000 + i, dport: 443, flags: TCP.SYN, seq: i }) }));
+    const path = await drop(cwd, "work/flows.pcap", pcapClassic(packets));
+    const cut = body(await tool(SUMMARY, cwd, { path, top: 5, group: "endpoint" }, { PCAP_SUMMARY_FINISH_SECONDS: "0" }));
+    assert.equal(cut.status, "partial");
+    assert.equal(cut.listing_cut_by_its_own_clock.endpoint_aggregation.written, 255);
+    assert.equal(cut.listing_cut_by_its_own_clock.endpoint_aggregation.of, 1000);
+    assert.match(cut.status_basis, /endpoint_aggregation: 255 of 1000 tuples summed \(no endpoint row is listed\)/);
+    assert.equal(cut.endpoint_aggregate_count, 0);
+    assert.equal(cut.packets, 1000);
+    const whole = body(await tool(SUMMARY, cwd, { path, top: 5, group: "endpoint" }));
+    assert.equal(whole.status, "complete");
+    assert.ok(whole.endpoint_aggregate_count > 0);
   });
 });

@@ -99,3 +99,78 @@ test("when libproc has just listed the engine as the tool's own child, an empty 
     assert.equal(seen.decoy_alive, true);
   });
 });
+
+const REAPED = `
+import json, os, signal, subprocess, sys, time
+data = json.loads(sys.stdin.read())
+ns = {"os": os, "signal": signal, "subprocess": subprocess, "sys": sys}
+exec(data["block"], ns)
+# a program that was started and waited for, whose pid is now (as if reused) the pid of an unrelated process that has a child of its own
+done = subprocess.Popen(["true"])
+done.wait()
+unrelated = subprocess.Popen(["sh", "-c", "sleep 300 & echo $! > " + data["child"] + "; wait"])
+for _ in range(100):
+    if os.path.exists(data["child"]) and open(data["child"]).read().strip():
+        break
+    time.sleep(0.05)
+child = int(open(data["child"]).read())
+done.pid = unrelated.pid
+ns["ACTIVE"].append(done)
+ns["kill_tree"](done)
+time.sleep(0.3)
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+result = {"unrelated_alive": unrelated.poll() is None, "child_alive": alive(child), "walked": ns["descendants"](unrelated.pid) != []}
+for pid in (child, unrelated.pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+print(json.dumps(result))
+`;
+
+test("a program that was already waited for is not walked or signalled, even when its pid is another process's by now: that process and its child survive", async () => {
+  await withCwd(async (cwd, bin) => {
+    const out = spawnSync("python3", ["-c", REAPED], { cwd, input: JSON.stringify({ block: await processBlock(), child: join(cwd, "reaped.pid") }), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    assert.equal(out.status, 0, out.stderr);
+    const seen = JSON.parse(out.stdout);
+    assert.equal(seen.unrelated_alive, true, "a process that only has the reused pid was killed");
+    assert.equal(seen.child_alive, true, "the child of the process that has the reused pid was killed");
+    assert.equal(seen.walked, true, "the unrelated process does have a child to walk (the case is real)");
+  });
+});
+
+test("the walk below an engine has no bound of its own: 300 children and a 60-deep chain are all found and killed", async () => {
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "chain.sh"), 'if [ "$1" -gt 0 ]; then sh "$0" $(( $1 - 1 )) & wait; else sleep 300; fi\n');
+    const code = `
+import json, os, signal, subprocess, sys, time
+data = json.loads(sys.stdin.read())
+ns = {"os": os, "signal": signal, "subprocess": subprocess, "sys": sys}
+exec(data["block"], ns)
+engine = subprocess.Popen(["sh", "-c", "for i in $(seq 300); do sleep 300 & done; sh chain.sh 60 & wait"], cwd=data["cwd"])
+time.sleep(3)
+found = ns["descendants"](engine.pid)
+ns["kill_tree"](engine)
+engine.wait()
+time.sleep(0.5)
+alive = 0
+for p in found:
+    try:
+        os.kill(p, 0)
+        alive += 1
+    except OSError:
+        pass
+print(json.dumps({"found": len(found), "alive": alive}))
+`;
+    const out = spawnSync("python3", ["-c", code], { cwd, input: JSON.stringify({ block: await processBlock(), cwd }), encoding: "utf8", timeout: 60_000 });
+    assert.equal(out.status, 0, out.stderr);
+    const seen = JSON.parse(out.stdout);
+    assert.ok(seen.found >= 360, `found ${seen.found}`);
+    assert.equal(seen.alive, 0, "some of what was found survived");
+  });
+});

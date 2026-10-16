@@ -1325,10 +1325,16 @@ def main():
         try:
             if grouping == "endpoint":
                 endpoints = Table("endpoints", cap, spill, merge_record, lambda r: r[BO], encode_record, decode_record)
+                aggregated = 0
                 for key, rec in tuples.rows():
+                    if aggregated & 255 == 255 and time.monotonic() > finish_deadline:
+                        # a sum over some of the tuples is not an endpoint's sum: no endpoint row is listed, and the answer says so
+                        finish_cut["endpoint_aggregation"] = {"written": aggregated, "unit": "tuples summed (no endpoint row is listed)", "of": table_count(tuples)}
+                        break
                     ekey, erec = endpoint_of(key, rec)
                     merge_record(endpoints.get(ekey, new_record), erec)
-                source = (endpoint_row(k, r, digits, with_syn_times) for k, r in endpoints.rows())
+                    aggregated += 1
+                source = iter(()) if "endpoint_aggregation" in finish_cut else (endpoint_row(k, r, digits, with_syn_times) for k, r in endpoints.rows())
                 spilled_here = lambda: tuples.spilled or endpoints.spilled  # noqa: E731
             else:
                 source = (tuple_row(k, r, digits, with_syn_times) for k, r in tuples.rows())
@@ -1425,7 +1431,7 @@ def main():
         basis = "every packet record of the capture was read; the counts cover the whole file"
     if finish_cut:
         status = "partial"
-        cut_text = "; ".join("%s: %d written of %s" % (name, c["written"], c["of"] if c["of"] is not None else "an unknown number") for name, c in sorted(finish_cut.items()))
+        cut_text = "; ".join("%s: %d of %s %s" % (name, c["written"], c["of"] if c["of"] is not None else "an unknown number", c.get("unit", "written")) for name, c in sorted(finish_cut.items()))
         basis += ("; the ordering and writing of the lists after the reading ran out of time (%s): the lists stop there, the counts above them are whole" % cut_text
                   if not file_problem else "; and the lists after the reading were cut at the end of their own time (%s)" % cut_text)
         notes.append("The lists were cut at the end of the time the tool gives to ordering and writing them (%s). The rows are in order of bytes, so what is "
