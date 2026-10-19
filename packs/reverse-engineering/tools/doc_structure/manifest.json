@@ -94,7 +94,7 @@
     },
     "max_seconds": {
       "type": "integer",
-      "description": "The tool's own time limit for reading, in seconds, from 1 to 90 (default 70); a read that reaches it stops, reports what it read and says so. The rows of each table are withheld as they are read, under this limit; for a ZIP the lists (the check of the part names, the member rows, the repeated names) have 60% of it and the rest is kept for its content types, relationships and VBA project, which are read whether or not the lists were finished; the rest of the answer is built after it and has until about 90 s after the call began, at least 5 s after the reading: a string it has no time to check is given by its length and the answer says so (partial). A call that has not answered within 105 s ends with a partial answer of the problems, the limits and the first rows of each table it holds, before the manifest's 120 s limit"
+      "description": "The tool's own time limit for reading, in seconds, from 1 to 90 (default 70); a read that reaches it stops, reports what it read and says so. The rows of each table are withheld as they are read, under this limit; for a ZIP the lists (the check of the part names, the member rows, the repeated names) have 60% of it, the rows of [Content_Types].xml until 75% and what that table declares until 85% (each stop is a limit, said), and the rest is kept for the relationships and the VBA project, so that a project named vbaProject.bin, one a relationship names and one the content types declare are looked for however long the lists and the table are (a central directory of more than 4.6 MB or 100,000 members is refused whole, with its limit named, and the search of every member for a compound file signature shares the last 15%); the rest of the answer is built after it and has until about 90 s after the call began, at least 5 s after the reading: a string it has no time to check is given by its length and the answer says so (partial). A call that has not answered within 105 s ends with a partial answer of the problems, the limits and the first rows of each table it holds, before the manifest's 120 s limit"
     }
   },
   "runtime": "python3",
@@ -104,5 +104,5 @@
   "by": "maintainer",
   "at": "2026-10-14T09:00:00.000Z",
   "version": 1,
-  "sha256": "c850b6a23ec29c1ddd73e547663eaa7ba182a4160f26a34873100110c48cb255"
+  "sha256": "7f313ea8825635bc42fbbb6ba0ae43f795d4f6f629178e35c67aaea65d8dd862"
 }
