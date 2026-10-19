@@ -902,6 +902,7 @@ type EseOut = {
   tables_in_partial_export?: string[];
   warning?: string;
   table?: string;
+  all_results?: string;
   columns?: string[];
   duplicate_columns_renamed?: string[];
   rows?: Array<Record<string, string | number>>;
@@ -979,7 +980,7 @@ test("esedb_query exports a database once, keeps the export under its digest, an
   });
 });
 
-test("esedb_query numbers every row, keeps columns that share a name apart, and keeps a cell of any size whole", async () => {
+test("esedb_query numbers every row, keeps columns that share a name apart, and keeps a cell of any size whole in the file it names", async () => {
   await withCwd(async (cwd, bin) => {
     const big = "x".repeat(2_000_000);
     await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\tName\\tName\\n1\\ta\\tb\\n2\\tc\\t${big}\\n' > "$root.export/Dup.2"`));
@@ -989,22 +990,29 @@ test("esedb_query numbers every row, keeps columns that share a name apart, and 
     assert.deepEqual(out.duplicate_columns_renamed, ["Name_2"]);
     assert.deepEqual(out.rows?.map((r) => r._row), [1, 2]);
     assert.equal(out.rows?.[0].Name_2, "b");
-    assert.equal((out.rows?.[1].Name_2 as string).length, 2_000_000);
+    // What is printed inline is bounded (a cell is shown cut, and says so); the file the answer names holds every cell whole.
+    assert.equal((out.rows?.[1].Name_2 as string).length, 4096);
+    assert.deepEqual(out.rows?.[1]._cells_shortened, { Name_2: { chars: 2_000_000, shown: 4096 } });
+    const kept = (await readFile(join(cwd, out.all_results as string), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { Name_2: string });
+    assert.equal(kept[1].Name_2.length, 2_000_000);
   });
 });
 
 test("esedb_query keeps what a time-limited export wrote and says it was stopped", async () => {
   await withCwd(async (cwd, bin) => {
-    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\n1\\n' > "$root.export/Part.0"\nsleep 30`));
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\n1\\n' > "$root.export/Part.0"\nsleep 300`));
     await writeFile(join(cwd, "work", "x.edb"), "ESE stand-in");
+    // The stand-in must get to write Part.0 before the deadline for "what the export wrote is kept" to mean anything, so the
+    // deadline is long enough for a loaded machine to start it (a shell script) and not a short time of the test's own: what is
+    // asked is the tool's own answer (`timed_out`), and a wall bound far under the stand-in's 300 seconds.
     const started = Date.now();
-    const out = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 1 }, { COUNT_FILE: join(cwd, "count") }, bin));
-    assert.ok(Date.now() - started < 20_000);
+    const out = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 8 }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.ok(Date.now() - started < 120_000, "the tool ended at its own deadline, not when the stand-in did");
     assert.equal(out.status, "partial");
     assert.equal(out.timed_out, true);
     assert.deepEqual(out.tables_in_partial_export, ["Part"]);
     // A partial export is not reused as a complete one: the next call exports again.
-    const again = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 1 }, { COUNT_FILE: join(cwd, "count") }, bin));
+    const again = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 8 }, { COUNT_FILE: join(cwd, "count") }, bin));
     assert.equal(again.export_reused, false);
   });
 });
