@@ -1,7 +1,7 @@
 ---
 id: execution/prefetch-carved
-title: Prefetch records carved from a raw source
-when: No .pf file, but a memory image, pagefile or disk region may hold Prefetch records.
+title: Carved Prefetch
+when: No .pf; image or pagefile may hold records.
 needs: [execution/prefetch]
 tools: [mam_scan]
 requires_host: []

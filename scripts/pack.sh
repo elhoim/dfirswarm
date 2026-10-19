@@ -139,6 +139,32 @@ if os.path.isdir(tdir):
             errors.append("tools/%s: entry %s is missing" % (name, entry))
         if not tm.get("description", "").strip():
             errors.append("tools/%s has an empty description" % name)
+        # The harness reads one key of its own, secret_output (scripts/output-hygiene.ts parseSecretDeclaration): "required", or
+        # { "when_args": [names of this tool's params] }. A declaration it cannot read would be refused at every job of the tool.
+        if "secret_output" in tm:
+            decl, tparams = tm["secret_output"], tm.get("params")
+            if decl == "required":
+                pass
+            elif not (isinstance(decl, dict) and list(decl) == ["when_args"]):
+                errors.append('tools/%s/manifest.json: secret_output is "required" or { "when_args": [parameter names] }' % name)
+            else:
+                names = decl["when_args"]
+                if not isinstance(names, list) or not 1 <= len(names) <= 16 or not all(isinstance(n, str) and n for n in names):
+                    errors.append("tools/%s/manifest.json: secret_output.when_args is a list of one to sixteen parameter names" % name)
+                else:
+                    if len(set(names)) != len(names):
+                        errors.append("tools/%s/manifest.json: secret_output.when_args names a parameter twice" % name)
+                    for n in names:
+                        if not isinstance(tparams, dict):
+                            errors.append("tools/%s/manifest.json: secret_output.when_args needs the tool's params to be an object" % name)
+                            break
+                        if n not in tparams:
+                            errors.append("tools/%s/manifest.json: secret_output.when_args names %s, which is not a parameter of the tool" % (name, n))
+                        elif not isinstance(tparams[n], dict) or tparams[n].get("type") != "boolean":
+                            errors.append('tools/%s/manifest.json: secret_output.when_args names %s, which is not declared type "boolean"' % (name, n))
+                        elif tparams[n].get("default") is not None and tparams[n].get("default") is not False:
+                            # Absent, null and false only: the same rule as parseSecretDeclaration (0, "", [] and {} are refused too).
+                            errors.append("tools/%s/manifest.json: secret_output.when_args names %s, whose default is other than false (the harness applies no defaults)" % (name, n))
         tools[name] = tm
 
 # --- recipes ----------------------------------------------------------------
@@ -193,6 +219,8 @@ if os.path.isdir(rdir):
         mg = rm.get("magic")
         if "magic" in rm and (not isinstance(mg, list) or not all(isinstance(x, dict) and isinstance(x.get("offset"), int) and 0 <= x.get("offset") <= 1048576 and isinstance(x.get("hex"), str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,64}", x.get("hex")) for x in mg)):
             errors.append("recipes/%s: magic is a list of {offset, hex}: bytes (1 to 64, as hex) at an offset within the first MiB that a derived file must hold to be offered" % name)
+        if "secret_output" in rm:
+            errors.append("recipes/%s/recipe.json: secret_output is a tool manifest's key (job kind tool); a recipe job cannot honour it" % name)
         if "order" in rm and not isinstance(rm.get("order"), int):
             errors.append("recipes/%s: order is a whole number (recipes run in order, then by name)" % name)
         if "object" in rm and not str(rm.get("object", "")).strip():
@@ -888,8 +916,9 @@ PYEOF
 
 # A tool a run forged and `swarm.sh tools --save` kept, taken into a pack's
 # source: its script checked against the sha256 its manifest carries, its
-# manifest reduced to what a pack tool declares (the run's by/at/version and
-# any pack field stay behind), its provenance kept beside it. The author reads
+# manifest reduced to what a pack tool declares (name, description, params,
+# runtime, entry, timeout, example, use, requires and secret_output; the run's
+# by/at/version and any pack field stay behind), its provenance kept beside it. The author reads
 # it and seals the pack; nothing here seals for them.
 cmd_adopt() {
   local tool="${1:-}" pack="${2:-}" replace=0
@@ -924,7 +953,7 @@ for root, dirs, files in os.walk(tool):
             continue
         os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
         shutil.copyfile(src, os.path.join(dest, rel))
-keep = {k: m[k] for k in ("name", "description", "params", "runtime", "entry", "timeout_seconds", "example") if k in m}
+keep = {k: m[k] for k in ("name", "description", "params", "runtime", "entry", "timeout_seconds", "example", "use", "requires", "secret_output") if k in m}
 with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as fh:
     json.dump(keep, fh, ensure_ascii=False, indent=2)
     fh.write("\n")

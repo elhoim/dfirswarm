@@ -4,7 +4,7 @@ title: Layered storage and historical states
 when: A container, split set, volume manager, encryption layer or snapshot sits between you and the files.
 needs: []
 tools: [image_layout, file_type]
-requires_host: [mmls, fsstat, img_stat, img_cat, qemu-img, fsapfsinfo, target-query]
+requires_host: [mmls, fsstat, img_stat, img_cat, qemu-img]
 ---
 
 Use when the evidence is a virtual disk, a split set, a volume manager's member, an encrypted volume or has snapshots. Not for offset arithmetic once the volume is found (`evidence/imaging`) or telling encryption from damage (`filesystem/encrypted`).
@@ -24,9 +24,7 @@ Inventory every segment, descriptor, extent and backing file before parsing; rec
 
 **Virtual disks.** `qemu-img info --backing-chain` shows the chain and the snapshots (plain `info` only the immediate backing file). When `mmls` and `fsstat` open the container, their offsets are sectors of the virtual disk. Convert (`qemu-img convert -O raw`) only when the next tool cannot open it, to a separate output, and record the state chosen, the options and the output's size and digest. `img_stat` prints size and format as the Sleuth Kit reads it, the bound for any scan over all of it; `img_cat -s <first> -e <last>` writes a decoded range.
 
-**Mapping layers.** `mmls` names the slot but `fsstat` cannot read it: the file system starts inside a logical volume whose metadata is at the front of the member. Rebuild it from that metadata and all the members with a reader that supports the layer: `target-query` (dissect; it also opens E01, VMDK, QCOW and a collection behind one interface, with a plugin per artefact family) or the Linux pack's `filesystem/storage` when loaded; check the version the image carries. A signature inside a member is a candidate, not the extent mapping. Validate the geometry, the metadata's consistency and that files read before accepting the volume. A missing member is a limitation.
-
-**APFS.** `fsapfsinfo` reads a container's structure; snapshots, Fusion drives and T2-based encryption are not supported, so a failure there is the reader's limit. Whether the Sleuth Kit reads APFS is a fact of its build: try `fsstat`, record `mmls -V` (`filesystem/apfs`, macOS pack, when loaded).
+**Mapping layers and APFS.** Only if `mmls` names the slot but `fsstat` cannot read it (a logical volume, dynamic disk, Storage Space or RAID member), or the container is APFS: `filesystem/layers-mapping`.
 
 A snapshot, shadow copy or earlier backing layer is a separate source with its own time: say which state each result is.
 

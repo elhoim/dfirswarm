@@ -1,7 +1,7 @@
 ---
 id: antiforensics/controls
-title: Security-control changes and deleted VMs
-when: An exclusion, disabled protection or deleted VM disk suggests a changed control.
+title: Controls changed
+when: Exclusion, disabled protection, deleted VM disk.
 needs: [antiforensics/traces]
 tools: [regkv, evtx_query, evtx_carve]
 requires_host: []
@@ -17,4 +17,4 @@ Use when an antivirus exclusion, a disabled protection or a deleted virtual mach
 
 Shows: a recorded change to a control, or a candidate guest disk with the extents that survive. Does not show: who made the change, that it took effect, or that the guest can be rebuilt. Record: the policy and event records with their times, the requested, effective or blocked state, the extent map of a recovered guest.
 
-Sensitive output: `regkv`, `evtx_query` and `evtx_carve` can return command lines and script text; run them as jobs (`secret_output: true`); `regkv` withholds by name or place only.
+Sensitive output: `regkv`, `evtx_query` and `evtx_carve` can return command lines and script text; run them as jobs (`secret_output: true`); `regkv` withholds by name, place and shape; a plain password is printed.
