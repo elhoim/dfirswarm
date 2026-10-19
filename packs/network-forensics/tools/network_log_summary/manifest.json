@@ -46,7 +46,7 @@
   "by": "maintainer",
   "at": "2026-10-07T18:00:00.000Z",
   "version": 5,
-  "sha256": "eb3b9e2b26530addd9ff824bde4d4dc4a5577350e2be111c26b287050820ad81",
+  "sha256": "3ff9ad86548cc87ddb3a2d2276b09fed38beb5309448406dea8a9fa2f23db133",
   "use": {
     "extensions": [
       ".log",

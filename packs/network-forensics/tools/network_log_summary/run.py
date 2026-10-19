@@ -552,7 +552,37 @@ class Stopped(BaseException):
         self.signum = signum
 
 
+class Line:
+    """One line's bookkeeping as a unit a stop signal cannot cut. While it is held, the handler only notes the signal; on
+    leaving it the signal is raised, so the line is in a table and in the counts, or in neither. Without it a signal that
+    arrived between "lines += 1" and the write left a line counted but in no table, and one that arrived between the write
+    and "parsed += 1" left a row in the table that no count held. A plain flag, not a signal mask: the handler runs in the
+    main thread between two bytecodes, so the flag is never half set, and no system call is paid per line."""
+
+    def __init__(self):
+        self.held = False
+        self.pending = None
+
+    def __enter__(self):
+        self.held = True
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        self.held = False
+        if exc_type is None and self.pending is not None:
+            signum, self.pending = self.pending, None
+            raise Stopped(signum)
+        return False
+
+
+LINE = Line()
+
+
 def _stop(signum, _frame):
+    if LINE.held:
+        if LINE.pending is None:
+            LINE.pending = signum
+        return
     raise Stopped(signum)
 
 
@@ -665,79 +695,82 @@ def main():
                         break
                     if stats["lines"] % 256 == 0 and time.monotonic() > deadline:
                         raise TimeLimit()
-                    stats["lines"] += 1
-                    number, start = stats["lines"], offset
-                    if len(raw) > max_line and not raw.endswith(b"\n"):
-                        length = len(raw)
-                        in_long_line = True
-                        while True:
-                            more = source.readline(max_line)
-                            length += len(more)
-                            if not more or more.endswith(b"\n"):
-                                break
-                        offset += length
-                        in_long_line = False
-                        stats["over_limit"] += 1
-                        bad.write("\t".join(cell(v) for v in (number, start, length, "line_over_limit", "longer than max_line_bytes (%d): located, not read" % max_line, "not read")) + "\n")
-                        continue
-                    offset += len(raw)
-                    terminated = raw.endswith(b"\n")
-                    unterminated = not terminated
-                    body = raw[:-1] if terminated else raw
-                    if number == 1 and body.startswith(b"\xef\xbb\xbf"):
-                        body = body[3:]
-                        stats["bom_stripped"] += 1
-                    if body.endswith(b"\r"):
-                        body = body[:-1]
-                        stats["crlf_lines"] += 1
-                    try:
-                        line = body.decode("utf-8")
-                        decoding = "exact"
-                    except UnicodeDecodeError:
-                        line = body.decode("utf-8", "replace")
-                        decoding = "substituted"
-                        stats["decoding_substituted"] += 1
-                    if not line.strip():
-                        stats["blank"] += 1
-                        bad.write("\t".join(cell(v) for v in (number, start, len(raw), "blank", "an empty line", decoding)) + "\n")
-                        continue
-                    row = parse(line, wanted)
-                    if row is None:
-                        stats["unparsed_nonblank"] += 1
-                        bad.write("\t".join(cell(v) for v in (number, start, len(raw), "unparsed", "no grammar of the requested format matched", decoding)) + "\n")
-                        values.add("L%06d" % number, {"line": number, "byte_offset": start, "byte_length": len(raw), "status": "unparsed"},
-                                   body.decode("utf-8", "surrogateescape"))
-                        continue
-                    original, original_referer = row.get("target", ""), row.get("referer", "")
-                    changed = False
-                    for column in COLUMNS:
-                        if row.get(column):
-                            printed = shown(column, str(row[column]))
-                            changed = changed or printed != row[column]
-                            row[column] = printed
-                    status_of_row = "partial" if row.get("unparsed_tail") else "parsed"
-                    if changed:
-                        values.add("L%06d" % number, {"line": number, "byte_offset": start, "byte_length": len(raw), "status": status_of_row,
-                                                       "target": original, "referer": original_referer}, body.decode("utf-8", "surrogateescape"))
-                    if row.get("timestamp_utc"):
-                        stats["timestamps_derived"] += 1
-                    else:
-                        stats["timestamps_not_derived"] += 1
-                    zones[row.get("timezone_source", "")] += 1
-                    row.update(line=number, byte_offset=start, byte_length=len(raw), parse_status=status_of_row, decoding=decoding)
-                    normal.write("\t".join(cell(row.get(column, "")) for column in COLUMNS) + "\n")
-                    stats["parsed"] += 1
-                    stats["partial"] += status_of_row == "partial"
-                    for name in categories:
-                        if row.get(name):
-                            key = str(row[name])
-                            if len(key) > MAX_KEY:
-                                key = key[:MAX_KEY] + "...(+%d characters)" % (len(key) - MAX_KEY)
-                                stats["keys_cut"] += 1
-                            if key in counts[name] or len(counts[name]) < max_distinct:
-                                counts[name][key] += 1
-                            else:
-                                over_cap[name] += 1
+                    with LINE:
+                        stats["lines"] += 1
+                        number, start = stats["lines"], offset
+                        if len(raw) > max_line and not raw.endswith(b"\n"):
+                            length = len(raw)
+                            in_long_line = True
+                            LINE.held = False  # reading the rest of a long line can take long: a stop signal ends it at once
+                            while True:
+                                more = source.readline(max_line)
+                                length += len(more)
+                                if not more or more.endswith(b"\n"):
+                                    break
+                            LINE.held = True
+                            offset += length
+                            in_long_line = False
+                            stats["over_limit"] += 1
+                            bad.write("\t".join(cell(v) for v in (number, start, length, "line_over_limit", "longer than max_line_bytes (%d): located, not read" % max_line, "not read")) + "\n")
+                            continue
+                        offset += len(raw)
+                        terminated = raw.endswith(b"\n")
+                        unterminated = not terminated
+                        body = raw[:-1] if terminated else raw
+                        if number == 1 and body.startswith(b"\xef\xbb\xbf"):
+                            body = body[3:]
+                            stats["bom_stripped"] += 1
+                        if body.endswith(b"\r"):
+                            body = body[:-1]
+                            stats["crlf_lines"] += 1
+                        try:
+                            line = body.decode("utf-8")
+                            decoding = "exact"
+                        except UnicodeDecodeError:
+                            line = body.decode("utf-8", "replace")
+                            decoding = "substituted"
+                            stats["decoding_substituted"] += 1
+                        if not line.strip():
+                            stats["blank"] += 1
+                            bad.write("\t".join(cell(v) for v in (number, start, len(raw), "blank", "an empty line", decoding)) + "\n")
+                            continue
+                        row = parse(line, wanted)
+                        if row is None:
+                            stats["unparsed_nonblank"] += 1
+                            bad.write("\t".join(cell(v) for v in (number, start, len(raw), "unparsed", "no grammar of the requested format matched", decoding)) + "\n")
+                            values.add("L%06d" % number, {"line": number, "byte_offset": start, "byte_length": len(raw), "status": "unparsed"},
+                                       body.decode("utf-8", "surrogateescape"))
+                            continue
+                        original, original_referer = row.get("target", ""), row.get("referer", "")
+                        changed = False
+                        for column in COLUMNS:
+                            if row.get(column):
+                                printed = shown(column, str(row[column]))
+                                changed = changed or printed != row[column]
+                                row[column] = printed
+                        status_of_row = "partial" if row.get("unparsed_tail") else "parsed"
+                        if changed:
+                            values.add("L%06d" % number, {"line": number, "byte_offset": start, "byte_length": len(raw), "status": status_of_row,
+                                                           "target": original, "referer": original_referer}, body.decode("utf-8", "surrogateescape"))
+                        if row.get("timestamp_utc"):
+                            stats["timestamps_derived"] += 1
+                        else:
+                            stats["timestamps_not_derived"] += 1
+                        zones[row.get("timezone_source", "")] += 1
+                        row.update(line=number, byte_offset=start, byte_length=len(raw), parse_status=status_of_row, decoding=decoding)
+                        normal.write("\t".join(cell(row.get(column, "")) for column in COLUMNS) + "\n")
+                        stats["parsed"] += 1
+                        stats["partial"] += status_of_row == "partial"
+                        for name in categories:
+                            if row.get(name):
+                                key = str(row[name])
+                                if len(key) > MAX_KEY:
+                                    key = key[:MAX_KEY] + "...(+%d characters)" % (len(key) - MAX_KEY)
+                                    stats["keys_cut"] += 1
+                                if key in counts[name] or len(counts[name]) < max_distinct:
+                                    counts[name][key] += 1
+                                else:
+                                    over_cap[name] += 1
             except Stopped as stop:
                 stopped = stop.signum
                 read_error = {"error": "interrupted", "message": "the tool was stopped by signal %d: the tables hold the lines read before it" % stop.signum,
@@ -751,6 +784,9 @@ def main():
             except (OSError, EOFError, zlib.error) as exc:
                 read_error = {"error": type(exc).__name__, "message": describe(exc),
                               "last_complete_line": stats["lines"] - (1 if in_long_line else 0), "stream_offset": offset}
+            if in_long_line:
+                stats["lines"] -= 1  # a long line cut by the stop is in no table, so it is not a line read
+                in_long_line = False
             normal.flush()
             os.fsync(normal.fileno())
             bad.flush()
