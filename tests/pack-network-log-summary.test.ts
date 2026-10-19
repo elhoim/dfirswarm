@@ -467,7 +467,8 @@ test("the tool keeps its own clock: max_seconds ends the read, the answer is par
 
 test("a stop signal leaves the tables as far as they got and prints partial JSON on stdout (exit 128 + signal)", async () => {
   await withCwd(async (cwd) => {
-    await put(cwd, "inputs/big.log", Array.from({ length: 600_000 }, (_, i) => `192.0.2.${i % 250} - - [14/Nov/2023:23:13:20 +0100] "GET /p${i} HTTP/1.1" 200 12 "-" "ua"`).join("\n") + "\n");
+    // Every seventh line matches no grammar, so both tables fill and the invariant is checked on both.
+    await put(cwd, "inputs/big.log", Array.from({ length: 600_000 }, (_, i) => (i % 7 === 3 ? "not a log line" : `192.0.2.${i % 250} - - [14/Nov/2023:23:13:20 +0100] "GET /p${i} HTTP/1.1" 200 12 "-" "ua"`)).join("\n") + "\n");
     for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]] as const) {
       const run = startDetached(LOGS, cwd, { path: "inputs/big.log", out_dir: `work/${sig}` });
       for (let i = 0; i < 200 && !(await exists(join(cwd, `work/${sig}/normalized.tsv`))); i++) await new Promise((r) => setTimeout(r, 50));
@@ -479,10 +480,44 @@ test("a stop signal leaves the tables as far as they got and prints partial JSON
       assert.equal(last.status, "partial");
       assert.equal(last.read_error.error, "interrupted");
       assert.equal(last.interrupted_by_signal, code - 128);
-      assert.equal((await table(cwd, `work/${sig}`)).length, last.parsed, "every row read is in the table");
+      // The signal can arrive at any point of a line's handling: the line is wholly in a table and in the counts, or in neither.
+      const normal = (await table(cwd, `work/${sig}`)).length;
+      const unparsed = (await table(cwd, `work/${sig}`, "unparsed.tsv")).length;
+      assert.equal(normal, last.parsed, "every row read is in the table");
+      assert.equal(unparsed, last.unparsed, "every unparsed line read is in unparsed.tsv");
+      assert.equal(normal + unparsed, last.lines, "no line is counted that is in neither table");
+      assert.equal(last.read_error.last_complete_line, last.lines);
       assert.ok(last.status_basis.length > 10);
     }
   });
+});
+
+test("a stop signal that arrives while a line is being handled is held until the line is wholly in the tables and the counts", async () => {
+  const code = `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("nls", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+out = {}
+try:
+    with m.LINE:
+        m._stop(15, None)  # inside a line: noted, not raised
+        m._stop(2, None)
+        out["held_pending"] = m.LINE.pending
+    out["leaving_raised"] = False
+except m.Stopped as stop:
+    out["leaving_raised"] = stop.signum  # raised on leaving the line, the first signal
+out["pending_after"] = m.LINE.pending
+out["held_after"] = m.LINE.held
+try:
+    m._stop(1, None)  # between lines: raised at once
+    out["outside_raised"] = False
+except m.Stopped as stop:
+    out["outside_raised"] = stop.signum
+print(json.dumps(out))
+`;
+  const r = await runPySnippet(code, [LOGS], {});
+  assert.deepEqual(JSON.parse(r.stdout), { held_pending: 15, leaving_raised: 15, pending_after: null, held_after: false, outside_raised: 1 });
 });
 
 test("the column rules cover every column of the table: none is added without a rule", async () => {
