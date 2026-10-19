@@ -19,11 +19,14 @@ import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  AUDIT, CHAIN, INVENTORY, asJob, body, filesUnder, json, put, qcow2, startDetached, tool, vhdDynamic, vhdx, vmdkDescriptor, vmx, withCwd,
+  AUDIT, CHAIN, INVENTORY, asJob, body, filesUnder, json, prng, put, qcow2, startDetached, tool, vhdDynamic, vhdx, vmdkDescriptor, vmx, withCwd,
 } from "./pack-virtualization-harness.ts";
+import { made } from "./pack-virtualization-canary-lib.ts";
 import type { Json } from "./pack-virtualization-harness.ts";
 
 const N = Number(process.env.VIRT_RATE_N ?? 400);
+// the number of forms of each family in the Python host above
+const FLAG_FORMS = 15, BARE_FORMS = 11, PH_FORMS = 7, PH_SPACE_FORMS = 3;
 
 const HOST = String.raw`
 import importlib.util, json, random, sys, time, unicodedata, zlib, string, base64
@@ -69,6 +72,20 @@ SPLIT = {"lri": "\u2066", "rli": "\u2067", "fsi": "\u2068", "pdi": "\u2069", "al
          "nul": "\x00", "ls": "\u2028", "mvs": "\u180e", "esc": "\\u2066", "escx": "\\x00"}
 NAMES = ["vncPassword", "rootPassword", "adminPassword", "accessToken", "apiToken", "appSecret", "SecretAccessKey", "awsSecretKey", "masterKey", "PWD", "pass", "pw", "credential",
          "auth", "PGPASSWORD", "MYSQL_PWD", "sig", "cipassword", "api_key", "client_secret", "Password", "passwd", "secret", "token", "dbPass", "AccountKey", "oauth"]
+
+
+# a flag with its value, a secret's name and a word that is not one, a placeholder and a value after it: values of 8, 14 and 24 characters of every class
+FORMS = {
+    "flag": ["-password %s", "--password %s", "set password %s", "enable secret %s", "-pwd %s", "-token %s", "--token %s", "-secret %s", "-pass %s", "--api-key %s", "-auth %s",
+             "-bearer %s", "-psk %s", "d--pwd %s", "d---pass %s"],
+    "bare": ["password %s", "password-%s", "password_%s", "token %s", "secret %s", "pwd %s", "password%s", "Credentials %s", "-pwd%s", "-token%s", "x-password%s"],
+    "ph": ["password=<redacted>%s", "--password <redacted>%s", "token: <secret>%s", "set password <hidden>%s", "pwd=<***>%s", "password=<>%s", "api_key=<value>%s"],
+    "phs": ["password: <password> %s", "password=<redacted> %s", "-token <masked> %s"],
+}
+VALUE_CLASSES = [ALNUM, string.ascii_lowercase, string.ascii_uppercase, string.digits, string.ascii_lowercase + string.digits, string.ascii_uppercase + string.digits, "0123456789abcdef"]
+MIXED_CLASSES = [ALNUM, string.ascii_lowercase + string.digits, string.ascii_uppercase + string.digits]
+SERIAL_CLASSES = {"hex": "0123456789abcdef", "HEX": "0123456789ABCDEF", "updig": string.ascii_uppercase + string.digits, "lowdig": string.ascii_lowercase + string.digits,
+                  "lower": string.ascii_lowercase, "upper": string.ascii_uppercase, "base62": ALNUM}
 
 
 def make(shape, r):
@@ -127,6 +144,15 @@ def make(shape, r):
         d = r.choice(["=", ": ", "=\"", ": \"", " = ", ":"])
         v = rs(r, r.randrange(10, 25))
         return "%s%s%s%s%s" % (glue, nm, d, v, '"' if d.endswith('"') else ""), [v]
+    if shape.split("_")[0] in FORMS:
+        kind, i = shape.split("_")
+        forms = FORMS[kind]
+        v = rs(r, r.choice([8, 14, 24]), r.choice(MIXED_CLASSES if kind == "phs" else VALUE_CLASSES))
+        return forms[int(i) % len(forms)] % v, [v]
+    if shape.startswith("t10serial_"):
+        _, cls, n = shape.split("_")
+        v = rs(r, int(n), SERIAL_CLASSES[cls])
+        return "t10.ATA_____Model_X_____" + v, [v]
     if shape.startswith("split_"):
         _, sp, fam = shape.split("_")
         if fam == "akia":
@@ -142,7 +168,8 @@ def make(shape, r):
     raise KeyError(shape)
 
 
-CTX = {"name": ("name", "%s"), "path": ("file", "vm/%s/disk.vmdk"), "text": (None, "note %s end")}
+CTX = {"name": ("name", "%s"), "path": ("file", "vm/%s/disk.vmdk"), "text": (None, "note %s end"), "state": ("state", "%s"),
+       "paren": ("file", "snap (%s)"), "braces": ("file", "{%s}"), "squote": ("file", "'%s'"), "pve": ("volume", "local:%s.qcow2")}
 
 
 def rates():
@@ -158,7 +185,7 @@ def rates():
                 plant, cores = make(shape, r)
                 text = fmt % plant
                 final = tool.seal_text(text, "boundary", field)
-                flagged = tool._suspect(final) is not None
+                flagged = False if req.get("seal_only") else tool._suspect(final) is not None
                 ns = norm(final)
                 if not flagged and all(c in ns for c in cores):
                     whole += 1
@@ -257,13 +284,21 @@ test("an identifier field shows a plain name, a path, a device id and a content 
     ["path", "/dev/disk/by-id/wwn-0x5000c500a1b2c3d4"], ["path", "pvc-24aa1734-4d10-79ab-5e32-0f4a02e50777.qcow2"],
     ["id", "56 4d 4f 9a 8b 7c 6d 5e-12 34 56 78 9a bc de f0"], ["id", "56e64dc3cd6089065c3146e80a9c2226"], ["id", "naa.6818b904ce6087413e3b266f850f1578"], ["id", "5f3d1a2b-9c8d7e6f-1a2b-0123456789ab"],
     ["id", "{236EBA1F-5CB5-8B8E-1799-E72821AF214A}"], ["id", "00:50:56:e7:a4:26"], ["id", "d4ea65d0"], ["id", "12"],
+    ["name", "password-vault-backup"], ["name", "Token Ring VM"], ["name", "pwd-server01"], ["name", "Passwords DB snapshot"], ["name", "Secret Server 2019 (prod)"], ["name", "Credential Guard W10 template"],
+    ["name", "AWS Secret Key Rotation"], ["name", "Hashicorp Vault Token Broker"], ["name", "SecretsManager-clone"], ["simple", "token ring 4"],
+    ["path", "/vmfs/volumes/vsan:52f3b0b5a8c6e1d2-9a8b7c6d5e4f3a2b/c1b3a65e-1f2a-3b4c-5d6e-7f8091a2b3c4/web01.vmdk"], ["path", "/vmfs/devices/disks/t10.ATA_____WDC_WD40EFRX2D68N32N0_____WD2DWCC7K1234567"],
+    ["path", "/vmfs/devices/disks/t10.ATA_____INTEL_SSDSC2BB480G4_____BTWL123456AB480BGN"], ["path", "/vmfs/devices/disks/t10.ATA_____KINGSTON_SA400S37240G_____50026B7783D6A1C8"],
+    ["path", "/vmfs/devices/disks/t10.ATA_____Samsung_SSD_870_EVO_1TB_____S5Y2NX0T571161"], ["path", "/vmfs/devices/disks/t10.ATA_____ST4000DM0042D2CV104_____ZDH1ABCD"],
     ["simple", "windows9Server64Guest"], ["simple", "pve-manager/7.3-12"], ["simple", "2024-05-09T03:47:47+03:00"], ["simple", "vmx-19"], ["simple", "monolithicSparse"],
   ];
   const FIELD: Record<string, string> = { name: "name", path: "file", id: "uid", simple: "version" };
   const withheld: [string, string][] = [
     ["name", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"], ["name", "AKIAIOSFODNN7EXAMPLE"], ["name", "web01 vncPassword=Q7fZxLmRkTvbnwcy"], ["name", "svc:Pa55w0rd@nas01"], ["name", "a".repeat(161)],
     ["name", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["path", "/var/lib/libvirt/images/web01.qcow2?rootPassword=hJaXeuQzWpLmNbVc/x"], ["path", "https://svc:Pa55w0rdQ7fZ@nas01/share"], ["path", "pass:OfmHIEuiuW9NBS1"], ["path", "vm-Snapshot99130122398bae6eecece52413628fd183c188c7.vmsn"], ["path", "auth:abc"],
-    ["id", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"], ["id", "d41d8cd98f00b204e9800998ecf8427e5ca9d41d8cd98f00b204e9800998ecf8"], ["simple", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["simple", "x=1"],
+    ["name", "-password Zq7kP2mR"], ["name", "--password Zq7kP2mR"], ["name", "set password Zq7kP2mR"], ["name", "-pwd Zq7kP2mR"], ["name", "-token Zq7kP2mR"], ["name", "-secret Zq7kP2mR"],
+    ["name", "d--pwd Zq7kP2mR"], ["name", "pwd-Zq7kP2mR"], ["name", "Token Zq7kP2mR"], ["name", "-pwdZq7kP2mR"], ["name", "-password abcdef"], ["path", "vm/-password Zq7kP2mR/a.vmdk"], ["simple", "-token Zq7kP2mR"],
+    ["path", "/vmfs/volumes/vsan:" + "0123456789abcdef" + "0123456789abcdef" + "01234567/a/b.vmdk"], ["path", "/vmfs/devices/disks/t10.ATA_____Model_X_____" + "q7fz" + "x9lm" + "r2kt" + "4vb8nwc1"],
+    ["id", "pwd-Zq7kP2mR"], ["id", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"], ["id", "d41d8cd98f00b204e9800998ecf8427e5ca9d41d8cd98f00b204e9800998ecf8"], ["simple", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"], ["simple", "x=1"],
   ];
   for (const [label, script] of TOOLS) {
     const got = await host(script, { op: "judge", items: [...shown, ...withheld].map(([k, t]) => [FIELD[k], t]) });
@@ -307,6 +342,114 @@ test("random canaries: the value after a secret's name is not shown, glued to a 
   for (const [label, script] of TOOLS) {
     const got = await host(script, { op: "rates", n: N, seed: 5, shapes, contexts: ["name", "path", "text"] });
     for (const [key, v] of Object.entries(got as Record<string, { whole: number }>)) assert.ok(v.whole <= Math.ceil(N * 0.005), `${label} ${key}: ${v.whole} of ${N} shown whole`);
+  }
+});
+
+const idx = (n: number, prefix: string): string[] => Array.from({ length: n }, (_, i) => `${prefix}_${i}`);
+
+test("random canaries: a flag with its value (-password x, --password x, set password x, -pwd x, -token x and the others, also glued to a word or to the name) is not shown in a name, a path component, a state field or, at the start of a word, free text, for values of 8, 14 and 24 characters of every class: the seal alone, without the second check", async () => {
+  for (const [label, script] of TOOLS) {
+    const shown: string[] = [];
+    // forms 0 to 12 start a word (free text judges them too); the rest are glued behind a letter or a dash, which only the identifier fields judge
+    for (const [shapes, contexts] of [[idx(13, "flag"), ["name", "path", "state", "text"]], [idx(FLAG_FORMS, "flag").slice(13), ["name", "path", "state"]]] as const) {
+      const got = await host(script, { op: "rates", n: N, seed: 21, shapes, contexts, seal_only: true });
+      for (const [key, v] of Object.entries(got as Record<string, { whole: number }>)) if (v.whole > 0) shown.push(`${key}: ${v.whole}`);
+    }
+    assert.deepEqual(shown, [], `${label}: values shown whole by the seal, of ${N} plants a cell`);
+  }
+});
+
+test("random canaries: a secret's name, a separator and a value that is not a word (password-x, token x, secret_x, pwd x, glued or not) is not shown in a name, a path component or a state field, for values of 8, 14 and 24 characters (the seal alone; a word after the name, Token Ring or Password Vault, is a name)", async () => {
+  for (const [label, script] of TOOLS) {
+    const got = await host(script, { op: "rates", n: N, seed: 22, shapes: idx(BARE_FORMS, "bare"), contexts: ["name", "path", "state"], seal_only: true });
+    const bad = Object.entries(got as Record<string, { whole: number }>).filter(([, v]) => v.whole > Math.ceil(N * 0.02)).map(([k, v]) => `${k}: ${v.whole}`);
+    assert.deepEqual(bad, [], `${label}: more than 2% of ${N} shown whole by the seal`);
+  }
+});
+
+test("random canaries: a placeholder with a value glued behind it (password=<redacted>x, --password <redacted>x, token: <secret>x, set password <hidden>x, pwd=<***>x, password=<>x) hides the value in the seal and in the second check alone; after a space the value is hidden unless it reads as a word or has no digit before a letter and no small letter before a capital", async () => {
+  for (const [label, script] of TOOLS) {
+    const glued = await host(script, { op: "rates", n: N, seed: 23, shapes: idx(PH_FORMS, "ph"), contexts: ["text"], seal_only: true });
+    for (const [key, v] of Object.entries(glued as Record<string, { whole: number; backstop_alone_misses: number }>)) {
+      assert.equal(v.whole, 0, `${label} ${key}: ${v.whole} of ${N} shown by the seal`);
+      assert.equal(v.backstop_alone_misses, 0, `${label} ${key}: the second check alone missed ${v.backstop_alone_misses} of ${N}`);
+    }
+    const spaced = await host(script, { op: "rates", n: N, seed: 24, shapes: idx(PH_SPACE_FORMS, "phs"), contexts: ["text"], seal_only: true });
+    for (const [key, v] of Object.entries(spaced as Record<string, { whole: number; backstop_alone_misses: number }>)) {
+      assert.ok(v.whole <= Math.ceil(N * 0.04), `${label} ${key}: ${v.whole} of ${N} shown by the seal`);
+      assert.ok(v.backstop_alone_misses <= Math.ceil(N * 0.04), `${label} ${key}: the second check alone missed ${v.backstop_alone_misses} of ${N}`);
+    }
+  }
+});
+
+test("random canaries: a padded 16- or 20-byte base64 key with a / that has a short padding piece and glue after it (snap (KEY), {KEY}, 'KEY', local:KEY.qcow2) leaves no piece of 12 characters, no whole key", async () => {
+  for (const [label, script] of TOOLS) {
+    const got = await host(script, { op: "rates", n: Math.max(N, 1000), seed: 25, shapes: ["b64_16", "b64_20"], contexts: ["paren", "braces", "squote", "pve"], seal_only: true });
+    for (const [key, v] of Object.entries(got as Record<string, { whole: number; frag: number }>)) {
+      assert.equal(v.whole, 0, `${label} ${key}: ${v.whole} of 1000 shown whole`);
+      assert.ok(v.frag <= 3, `${label} ${key}: a piece of 12 characters in ${v.frag} of 1000`);
+    }
+  }
+});
+
+test("random canaries: a random serial in a t10. device id is judged as it is without the id around it: hexadecimal of 20 to 24 characters (16 digits are a 64-bit id and shown), and 24 characters of capitals and digits, small letters and digits, one case of letters or letters and digits in both cases, are shown in at most one in ten", async () => {
+  const shapes = ["hex_20", "hex_24", "HEX_20", "HEX_24", "updig_24", "lowdig_24", "lower_24", "upper_24", "base62_24", "base62_20"].map((k) => `t10serial_${k}`);
+  for (const [label, script] of TOOLS) {
+    const got = await host(script, { op: "rates", n: N, seed: 26, shapes, contexts: ["name", "path"], seal_only: true });
+    for (const [key, v] of Object.entries(got as Record<string, { whole: number }>)) {
+      const bound = /hex_|HEX_/.test(key) ? Math.ceil(N * 0.03) : Math.ceil(N * 0.1);
+      assert.ok(v.whole <= bound, `${label} ${key}: ${v.whole} of ${N} shown whole (bound ${bound})`);
+    }
+  }
+});
+
+test("end to end: a flag with its value or a placeholder with a value behind it, planted in the names, paths and free-text fields of the three tools, reaches no answer, no paging file and no file name, in and out of a job", async () => {
+  const r = prng(20261016);
+  const UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", LO = "abcdefghijklmnopqrstuvwxyz", DG = "0123456789";
+  const classes = [UP + LO + DG, LO, UP, DG, LO + DG, UP + DG];
+  const pick = (alphabet: string, n: number): string => Array.from({ length: n }, () => alphabet[Math.floor(r() * alphabet.length)]).join("");
+  const flags = ["-password %", "--password %", "set password %", "-pwd %", "-token %", "--token %", "-secret %", "-pass %", "--api-key %", "d--pwd %", "-pwd%", "-token%", "x-password%"];
+  const holders = ["password=<redacted>%", "--password <redacted>%", "token: <secret>%", "set password <hidden>%", "pwd=<***>%", "password=<>%"];
+  const plants: { text: string; value: string; flag: boolean }[] = [];
+  for (const [forms, flag] of [[flags, true], [holders, false]] as const) {
+    for (const form of forms) for (const n of [8, 14, 24]) {
+      const value = pick(classes[plants.length % classes.length], n);
+      plants.push({ text: form.replace("%", value), value, flag });
+    }
+  }
+  const cell = (t: string): string => t.replace(/"/g, "'");
+  const inventory: Record<string, string> = {}, chain: Record<string, string> = {};
+  plants.forEach((p, i) => {
+    inventory[`vm/p${i}.vmx`] = vmx([["displayName", cell(p.text)], ["annotation", cell(p.text)], ["guestOS", cell(p.text)], ["scsi0:0.fileName", `${cell(p.text)}.vmdk`]]);
+    inventory[`lv/pool${i}.xml`] = `<pool type='dir'><name>${p.text.replace(/[<>&]/g, "_")}</name><uuid>5c1bb0ef-6bd0-4f1d-9f3e-0123456789${String(10 + (i % 90))}</uuid><target><path>/var/lib/libvirt/images</path></target></pool>`;
+    chain[`vm/p${i}.vmdk`] = vmdkDescriptor({ cid: i.toString(16).padStart(8, "0"), parentCid: "ffffffff", parentHint: cell(p.text), extents: [{ sectors: 8, type: "FLAT", name: `${cell(p.text)}-flat.vmdk` }] });
+    if (p.flag) {
+      inventory[`vm/d-${p.text}/a.vmx`] = vmx([["displayName", "x"]]);
+      chain[`vm/d-${p.text}/a.vmdk`] = vmdkDescriptor({ cid: (i + 4096).toString(16).padStart(8, "0"), parentCid: "ffffffff", extents: [{ sectors: 8, type: "FLAT", name: "a-flat.vmdk" }] });
+    }
+  });
+  const csv = ["t,a,o,m", ...plants.map((p) => `2024-01-05T02:00:00Z,Backup,${cell(p.text).replace(/,/g, ";")},note ${cell(p.text).replace(/,/g, ";")} end`)].join("\n") + "\n";
+  for (const job of [false, true]) {
+    for (const [label, script, files, args] of [
+      ["inventory", INVENTORY, inventory, { root: "inputs", limit: 200 }],
+      ["chain", CHAIN, chain, { root: "inputs", limit: 200 }],
+      ["audit", AUDIT, { "x.csv": csv }, { path: "inputs/x.csv", format: "declared_csv", mapping: { time: "t", action: "a", object: "o", message: "m" }, limit: 200 }],
+    ] as const) {
+      await withCwd(async (cwd) => {
+        for (const [rel, data] of Object.entries(files)) await put(cwd, `inputs/${rel}`, data);
+        const run = job ? await asJob(script, cwd, { ...args, write_text: true }) : await tool(script, cwd, args);
+        assert.doesNotMatch(run.stderr, /Traceback/, run.stderr.slice(-300));
+        const doc = JSON.parse(run.stdout);
+        assert.ok(["complete", "partial"].includes(doc.status), `${label}: ${doc.status} ${doc.error ?? ""}`);
+        const texts: [string, string][] = [["answer", run.stdout]];
+        for (const [rel, bytes] of await made(cwd)) {
+          texts.push([`name of ${rel}`, rel]);
+          if (!/-values\.jsonl$/.test(rel)) texts.push([rel, bytes]);
+        }
+        const leaks = plants.flatMap((p) => texts.filter(([, t]) => t.includes(p.value)).map(([where]) => `${p.text} in ${where}`));
+        assert.deepEqual(leaks, [], `${label} job=${job}: a value reached the answer or a file`);
+      });
+    }
   }
 });
 
