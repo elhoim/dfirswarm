@@ -114,7 +114,7 @@ for (const name of names) {
     assert.ok(r.counted >= r.late_marks, "they are counted under their own reason");
     assert.equal(r.clock_stopped, true);
     assert.equal(r.after, true, "the next seal is not late");
-    assert.equal(r.stop_late, true, "a seal that starts past the tool's hard stop withholds what is not short and plain");
+    assert.equal(r.stop_late, true, "a seal that starts past the tool's seal stop withholds what is not short and plain");
     assert.equal(r.stop_cleared, true);
     assert.ok(r.seconds < 8, `${r.seconds} s of CPU`);
     assert.match(r.basis, /^\d+ string\(s\) still held/);
@@ -222,6 +222,37 @@ for (const name of names) {
     assert.deepEqual(r.contains_in_withheld, [false, true], "not found in the text shown, and text is withheld: blind");
     assert.deepEqual(r.contains_nothing_withheld, [false, false], "not found and nothing withheld: a real absence");
     assert.equal(r.blind_does_not_depend_on_needle, true, "the blind spot says nothing of what the hidden text is");
+  });
+
+  test(`${name}: past the judging time only the tool's own names and short plain strings are printed unjudged: the 15-character Slack minimum, the value after a flag and a prefix with 12 characters are not`, async () => {
+    const r = await drive(name, "late_short");
+    for (const [family, count] of Object.entries(r.printed as Record<string, number>)) assert.equal(count, 0, `${family}: ${count} of 100 printed whole`);
+    assert.equal(r.plain_kept, true, "a short plain string is kept, as a value and as a key");
+    assert.equal(r.own_key_kept, true);
+    assert.equal(r.own_value_kept, true, "a name the tool made itself is kept at any length");
+    assert.equal(r.other_value_replaced, true, "and only that exact string");
+  });
+
+  for (const mode of ["contains", "order"]) {
+    test(`${name}: a string judged for ${mode === "contains" ? "a contains filter" : "the order of a list"} is counted and written to the values file when the answer prints it, once`, async () => {
+      const plain = await drive(name, "memo_count", "plain");
+      const r = await drive(name, "memo_count", mode);
+      assert.equal(r.withheld_before_the_answer, 0, "judging for the filter or the order counts nothing");
+      assert.ok(plain.withheld >= 1 && plain.values_lines >= 1, "the answer withholds the value and writes it down");
+      assert.equal(r.withheld, plain.withheld, "the same count with or without the probe");
+      assert.deepEqual(r.by, plain.by);
+      assert.equal(r.values_lines, plain.values_lines, "the same values file");
+      assert.equal(r.secret_printed, false);
+    });
+  }
+
+  test(`${name}: binary data written as hexadecimal that holds a secret-shaped text as UTF-16BE is read like UTF-16LE`, async () => {
+    const r = await drive(name, "hex_be");
+    assert.equal(r.printed, 0, "no hexadecimal string with a UTF-16BE secret is printed");
+    assert.equal(r.flagged_by_the_backstop, 60, "the backstop reads it on its own too");
+    assert.equal(r.views_hold_the_whole_text, 60, "the first layer's views hold the text whole");
+    assert.equal(r.backstop_views_hold_the_whole_text, 60, "and so do the backstop's");
+    assert.equal(r.benign_printed, 2, "UTF-16BE text that is no secret is printed");
   });
 
   test(`${name}: the status basis of a backstop-partial answer does not begin with a separator`, async () => {

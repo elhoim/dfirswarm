@@ -254,7 +254,7 @@ def chain_problem(raw):
 #
 # ONE WAY OUT: emit() writes an answer, row_text() a row of a paging file, and both seal every key and value first (a value that is not
 # a string, a number or a container is sealed as the text str() makes of it). Binary data written as hex (a REG_BINARY value, an ESE
-# binary column) is decoded and its printable views (Latin-1 and UTF-16LE, and runs holding full-width characters read as UTF-8 and UTF-16LE with
+# binary column) is decoded and its printable views (Latin-1, UTF-16LE and UTF-16BE, and runs holding full-width characters read as UTF-8 and UTF-16LE with
 # the width folded) are judged by the free-text rules, by both layers and the
 # backstop; hex that holds a secret-shaped text is withheld, and any other hex is shown (random bytes with no text in them are printed).
 # What is withheld is a placeholder with its length and the reason; its original goes to the values file only when write_values was
@@ -263,8 +263,10 @@ def chain_problem(raw):
 # string after the layers and the backstop, sealed_text), never to what is withheld or replaced, and contains_check says when the needle
 # could have been in what is hidden. Every string is judged in linear time (a string is read to 256 KiB, the pieces the backstop compares
 # are at most 64, a PEM body at most 20,000 characters), and an answer or a row that takes longer than SEAL_BUDGET seconds to seal, or that is
-# still being sealed at the tool's hard stop (seal_stop_after), has the rest of its strings replaced whole (<withheld N bytes: backstop: the
-# judging time ran out>) and is partial.
+# still being sealed at the seal stop of the tool (seal_stop_after: a point in time after which nothing is judged, not a stop of the tool's own
+# work, which has its own clock), has the rest of its strings replaced whole (<withheld N bytes: backstop: the judging time ran out>) and is
+# partial; what stays readable past that point is the names the tool made itself (OWN_NAMES) and strings of 15 characters or fewer of letters,
+# digits, `_` and `.` that do not start like a vendor token.
 # NOT RECOGNISED, by design: a secret that does not look like one (a plain password, a pronounceable passphrase, a UUID-shaped key,
 # anything under 16 characters in a name, a secret hidden in words or in an encoding this block does not read).
 import collections
@@ -356,8 +358,15 @@ def values_summary():
             "format": "JSON Lines, mode 0600: id, field, label, length, value (the original text that was withheld)" if _VALUES["shown"] else None}
 
 
+_EVENTS = [None]               # while a string is judged only to see what the answer would print (sealed_text): its withholdings, counted when the answer prints it
+_QUIET = [False]
+
+
 def _withheld(original, label, field=""):
     n = len(original)
+    if _EVENTS[0] is not None:
+        _EVENTS[0].append((original, label, field))
+        return _mark(n, label)
     BOUNDARY["withheld"] += 1
     BOUNDARY["by"][label] += 1
     fh = _VALUES["fh"]
@@ -404,7 +413,7 @@ def _unescape_invisible(m):
 
 def _flat(text):
     """The text with invisible characters (and the escapes of such characters) taken out, and past ASCII in NFKC form."""
-    if "\\" in text:
+    if "\\u" in text or "\\U" in text or "\\x" in text:          # (the escape pattern needs a backslash and one of these)
         text = _ESCAPED.sub(_unescape_invisible, text)
     if text.isascii():
         return text if text.isprintable() else text.translate(_STRIP)
@@ -427,6 +436,14 @@ _PCT = re.compile(r"%[0-9A-Fa-f]{2}")
 _PCT_UNRESERVED = re.compile(r"%((?:4[1-9A-Fa-f]|5[0-9Aa]|6[1-9A-Fa-f]|7[0-9Aa]|3[0-9]|2[DdEe]|5[Ff]|7[Ee]))")
 _JOIN_NAME, _JOIN_PATH = "-_+", "-_+/\\"
 _CTRL = "\x01\x02\x03\x04\x05\x06\x07\x08\x09"
+
+
+def _has(words, text):
+    """Whether one of `words` is in `text` (a loop: a generator inside any() costs twice as much for the thousands of strings of a hive)."""
+    for w in words:
+        if w in text:
+            return True
+    return False
 
 
 def _pronounceable(piece):
@@ -491,21 +508,40 @@ def _prepare(s, typed=True):
         if unicodedata.normalize("NFKC", s) != s:
             return None
         s = "".join(ch if ch.isascii() else "e" for ch in s)
-    t = _GUID.sub(lambda m: "~" * len(m.group()), s)
+    t = _GUID.sub(lambda m: "~" * len(m.group()), s) if s.count("-") >= 3 else s    # (each pattern is tried only when the text holds what it cannot match without: a GUID has three hyphens or more)
     if typed:
-        t = _SID.sub(lambda m: "~" * len(m.group()), t)
-        t = _IPV4.sub(lambda m: "~" * len(m.group()), t)
-        t = _KNOWN_ID.sub(lambda m: "~" * len(m.group()), t)
-    return _PCT.sub("   ", t)
+        if "S-1-" in t:
+            t = _SID.sub(lambda m: "~" * len(m.group()), t)
+        if "." in t:
+            t = _IPV4.sub(lambda m: "~" * len(m.group()), t)
+        if _has(_KNOWN_ID_WORDS, t):
+            t = _KNOWN_ID.sub(lambda m: "~" * len(m.group()), t)
+    return _PCT.sub("   ", t) if "%" in t else t
 
 
 def _unpercent(s):
+    if "%" not in s:
+        return None
     out = _PCT_UNRESERVED.sub(lambda m: chr(int(m.group(1), 16)), s)
     return out if out != s else None
 
 
 _CHAINS = {}
 _SEGMENT = re.compile(r"[A-Za-z0-9]+")
+
+
+_SEGMENT_PLAIN = {}
+
+
+def _is_plain_segment(seg):
+    """_plain_segment(seg, 0), remembered for the plain ones only (a dict that is asked a hundred thousand times for the same words)."""
+    if not _plain_segment(seg, 0):
+        return False
+    if len(seg) <= 64:
+        if len(_SEGMENT_PLAIN) >= 100000:
+            _SEGMENT_PLAIN.clear()
+        _SEGMENT_PLAIN[seg] = True
+    return True
 
 
 def _bad_runs(t, join):
@@ -515,6 +551,9 @@ def _bad_runs(t, join):
     pattern = _CHAINS.get(join)
     if pattern is None:
         pattern = _CHAINS[join] = re.compile(r"[A-Za-z0-9]+(?:[%s]+[A-Za-z0-9]+)*" % "".join(re.escape(c) for c in join))
+    plain = _SEGMENT_PLAIN
+    if all(plain.get(seg) or _is_plain_segment(seg) for seg in _SEGMENT.findall(t)):
+        return []                                       # no chain holds a random-looking segment, so none is bad (the same answer as the loop below, without building the chains)
     bad = []
     for found in pattern.finditer(t):
         if found.end() - found.start() < LMIN:
@@ -542,7 +581,15 @@ def _bad_runs(t, join):
     return bad
 
 
+_CHARS = {}
+
+
 def _chars_ok(comp, extra_ok):
+    if comp.isascii():
+        pattern = _CHARS.get(extra_ok)
+        if pattern is None:
+            pattern = _CHARS[extra_ok] = re.compile("[A-Za-z0-9%s]*" % re.escape(_NAME_SEPS + extra_ok))
+        return pattern.fullmatch(comp) is not None
     return all(ch.isalnum() or ch in _NAME_SEPS or ch in extra_ok for ch in comp)
 
 
@@ -574,16 +621,24 @@ def _merge(spans):
     return merged
 
 
+_SPLIT = re.compile(r"([\\/])")
+_DRIVE = re.compile(r"[A-Za-z]:|\?|\.")
+
+
 def _path_spans(s, extra_ok=_PATH_EXTRA):
     t = _prepare(s)
     if t is None:
         return [(0, len(s))]
     bad, pos = [], 0
-    for part in re.split(r"([\\/])", t):
+    if len(t) <= 255 and "@" not in t and t.isascii() and _chars_ok(t, extra_ok + "\\/"):
+        parts = ()                       # (every character is allowed, no part is long and none can hold a user-info shape: no part is bad)
+    else:
+        parts = _SPLIT.split(t)
+    for part in parts:
         a, b = pos, pos + len(part)
         pos = b
         judged = part.lstrip(_CTRL)
-        if part in ("\\", "/") or part == "" or re.fullmatch(r"[A-Za-z]:|\?|\.", part):
+        if part in ("\\", "/") or part == "" or _DRIVE.fullmatch(part):
             continue
         if len(part) - len(judged) > 1 or len(part) > 255 or not _chars_ok(judged, extra_ok) or _userinfo_shape(judged):
             bad.append((a, b))
@@ -710,13 +765,13 @@ def _layer2_once(s, field):
         s = _outside(s, _MARK, lambda p: _URL_USERINFO.sub(lambda m: _withheld(m.group(), "user-info", field), p))
         s = _outside(s, _MARK, lambda p: _USERINFO.sub(lambda m: _withheld(m.group(), "user-info", field), p))
     low = s.lower()
-    if any(w in low for w in _NAMED_WORDS):
+    if _has(_NAMED_WORDS, low):
         s = _outside(s, _MARK, lambda p: _NAMED.sub(lambda m: m.group()[:m.start("value") - m.start()] + _withheld(m.group("value"), "secret value", field), p))
     if "=" in s:
         s = _outside(s, _MARK, lambda p: _BASE64_PADDED.sub(lambda m: _withheld(m.group(), "token-shaped text", field) if _b64_shape(m.group()) else m.group(), p))
     s = _outside(s, _MARK, lambda p: _LONG_DIGITS.sub(lambda m: _withheld(m.group(), "long number", field), p))
     low = s.lower()
-    if any(h in low for h in _PREFIX_HINTS):
+    if _has(_PREFIX_HINTS, low):
         s = _outside(s, _MARK, lambda p: _PREFIX.sub(lambda m: _withheld(m.group(), "token-shaped text", field), p))
     return s
 
@@ -762,7 +817,7 @@ def _mask_typed(s):
     if "." in s:
         t = _IPV4.sub(lambda m: "~" * len(m.group()), t)
     low = s.lower()
-    if any(w in low for w in _KNOWN_ID_WORDS):
+    if _has(_KNOWN_ID_WORDS, low):
         t = _KNOWN_ID.sub(lambda m: "~" * len(m.group()), t)
     if "ash" in low or "md5" in low or "sha" in low:
         t = _LABELLED_DIGEST.sub(lambda m: m.group().replace(m.group(1), "~" * len(m.group(1))), t)
@@ -797,7 +852,7 @@ def _wide_views(raw):
 
 
 def _hex_views(s):
-    """The printable views of binary data written as hex: Latin-1 runs of 6 or more and UTF-16LE runs of 4 or more, and the runs that hold
+    """The printable views of binary data written as hex: Latin-1 runs of 6 or more, UTF-16LE and UTF-16BE runs of 4 or more, and the runs that hold
     full-width characters (UTF-8 and UTF-16LE), width folded."""
     try:
         raw = bytes.fromhex(s[: MAX_HEX_JUDGED])
@@ -805,6 +860,7 @@ def _hex_views(s):
         return None
     views = [m.group().decode("latin-1") for m in re.finditer(rb"[\x20-\x7e]{6,}", raw)]
     views += [m.group().decode("utf-16-le", "replace") for m in re.finditer(rb"(?:[\x20-\x7e]\x00){4,}", raw)]
+    views += [m.group().decode("utf-16-be", "replace") for m in re.finditer(rb"(?:\x00[\x20-\x7e]){4,}", raw)]
     return views + _wide_views(raw)
 
 
@@ -864,16 +920,27 @@ def show(s, kind="text", field=""):
     if not isinstance(s, str) or not s:
         return s
     kind = getattr(s, "kind", kind)
-    memo = (kind, field, s) if len(s) <= 512 else None
+    memo = (kind, field, s) if len(s) <= 512 and kind not in _TYPED else None            # (a typed id is judged by one match: it is not worth a place in the memo)
+    quiet = _QUIET[0]
     if memo is not None:
         hit = _MEMO.get(memo)
         if hit is not None:
-            return hit
-    out = _show(str(s), kind, field)
+            out, pending = hit
+            if pending and not quiet:
+                # judged earlier only to see what would be printed: it is withheld, counted and written to the values file now that it is printed (once)
+                for original, label, where in pending:
+                    _withheld(original, label, where)
+                _MEMO[memo] = (out, None)
+            return out
+    events = _EVENTS[0] = [] if quiet and memo is not None else None
+    try:
+        out = _show(str(s), kind, field)
+    finally:
+        _EVENTS[0] = None
     if memo is not None:
         if len(_MEMO) > 40000:
             _MEMO.clear()
-        _MEMO[memo] = out
+        _MEMO[memo] = (out, events or None)
     return out
 
 
@@ -884,9 +951,11 @@ def _quietly(fn):
     """`fn()` with nothing counted, listed or written: judging a string to see what an answer would show of it is not withholding it."""
     saved = (BOUNDARY["withheld"], BOUNDARY["by"].copy(), BOUNDARY["replaced"], BOUNDARY["replaced_by"].copy(), BOUNDARY["where"][:], BOUNDARY["not_listed"], _VALUES["fh"])
     _VALUES["fh"] = None
+    was, _QUIET[0] = _QUIET[0], True
     try:
         return fn()
     finally:
+        _QUIET[0] = was
         (BOUNDARY["withheld"], BOUNDARY["by"], BOUNDARY["replaced"], BOUNDARY["replaced_by"], BOUNDARY["where"], BOUNDARY["not_listed"], _VALUES["fh"]) = saved
 
 
@@ -947,7 +1016,7 @@ def _s_unesc(m):
 
 
 def _s_normal(text):
-    if "\\" in text:
+    if "\\u" in text or "\\U" in text or "\\x" in text:
         text = _S_ESC.sub(_s_unesc, text)
     if text.isascii() and text.isprintable():
         return text
@@ -998,9 +1067,12 @@ _S_TYPED = {
     "number": re.compile(r"-?[0-9.]{1,64}|0[xX][0-9A-Fa-f]{1,16}|true|false|null"), "version": re.compile(r"(?=.{1,64}\Z)[vV]?[0-9]+(?:\.[0-9A-Za-z]{1,16}){0,6}(?:[-+][0-9A-Za-z.]{1,32}){0,3}"),
     "digest": re.compile(r"(?:sha256:|sha1:|md5:)?[0-9A-Fa-f]{16,128}|T1[0-9A-Fa-f]{16,80}|[0-9]{1,6}:[A-Za-z0-9+/]+:[A-Za-z0-9+/]+"),
 }
+_S_LONG = re.compile(r"[A-Za-z0-9+/_-]{19}")           # the shortest run any check below needs (19 digits); the hexadecimal run needs 40, the others 20
+_S_PLAIN_NUM = re.compile(r"[0-9TZ:.+ -]+")
 _S_HEXONLY = re.compile(r"(?:[0-9A-Fa-f]{2})+")
 _S_PRINT_L1 = re.compile(rb"[\x20-\x7e]{6,}")
 _S_PRINT_U16 = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
+_S_PRINT_U16BE = re.compile(rb"(?:\x00[\x20-\x7e]){4,}")
 
 
 def _class(c):
@@ -1061,14 +1133,15 @@ def _s_named(flat, values=None):
 
 
 def _s_hex_views(text):
-    """The printable text inside data written as hexadecimal (Latin-1 runs of 6 or more, UTF-16LE runs of 4 or more), or None when `text` is not such data."""
+    """The printable text inside data written as hexadecimal (Latin-1 runs of 6 or more, UTF-16LE and UTF-16BE runs of 4 or more), or None when `text` is not such data."""
     if len(text) < 2 or not _S_HEXONLY.fullmatch(text[:MAX_HEX_JUDGED]):
         return None
     try:
         raw = bytes.fromhex(text[:MAX_HEX_JUDGED])
     except ValueError:
         return None
-    return [m.group().decode("latin-1") for m in _S_PRINT_L1.finditer(raw)] + [m.group().decode("utf-16-le", "replace") for m in _S_PRINT_U16.finditer(raw)] + _wide_views(raw)
+    return ([m.group().decode("latin-1") for m in _S_PRINT_L1.finditer(raw)] + [m.group().decode("utf-16-le", "replace") for m in _S_PRINT_U16.finditer(raw)]
+            + [m.group().decode("utf-16-be", "replace") for m in _S_PRINT_U16BE.finditer(raw)] + _wide_views(raw))
 
 
 def _suspect(text, kind="text"):
@@ -1087,17 +1160,20 @@ def _suspect(text, kind="text"):
                     return "in binary data: " + hit
             return None
         kind = "text"
+    if kind in _S_TYPED and len(text) <= 64 and _S_PLAIN_NUM.fullmatch(text):
+        # digits, `. : + -`, a space, T and Z: no rule above the typed grammar can fire on these (no name, no prefix, no `@`), so the grammar alone decides
+        return None if len(text) <= 3 or _S_TYPED[kind].fullmatch(text) else "not the typed grammar"
     flat = _s_normal(text)
     if "withheld" in flat:
         flat = _S_MARK.sub("<>", flat)
     low = flat.lower()
     if "private key" in low and _S_PEM.search(flat):
         return "a PEM marker"
-    bare = _S_IDS.sub(" ", flat)
-    named_words = any(w in low for w in _S_NAME_WORDS)
-    if (named_words and _s_named(bare)) or ("-" in flat and named_words and _S_ARGNAME.search(flat)):
+    bare = _S_IDS.sub(" ", flat) if "-" in flat else flat            # (all three kinds of id hold a `-`)
+    named_words = _has(_S_NAME_WORDS, low)
+    if (named_words and ("=" in bare or ":" in bare) and _s_named(bare)) or ("-" in flat and named_words and _S_ARGNAME.search(flat)):
         return "a named secret"
-    if any(w in low for w in _S_PREFIX_WORDS) and _S_PREFIX.search(flat):
+    if _has(_S_PREFIX_WORDS, low) and _S_PREFIX.search(flat):
         return "a token prefix"
     if "@" in flat:
         flat_user = re.sub("(?i)mailto:", "mailto ", flat)
@@ -1106,6 +1182,8 @@ def _suspect(text, kind="text"):
     if kind in _TYPED_KINDS:
         grammar = _S_TYPED.get(kind)
         return "not the typed grammar" if grammar is not None and len(text) > 3 and not grammar.fullmatch(text) else None
+    if "=" not in bare and not _S_LONG.search(bare):
+        return None                       # no run of 19 characters of these, and no `=` for a padded run: none of the checks below can find anything
     if _S_DIGITS.search(bare):
         return "a long digit run"
     labelled = _S_DIGEST_LABEL.sub(" ", bare) if "ash" in low or "sha" in low or "md5" in low else bare
@@ -1144,7 +1222,14 @@ def _replace(value, where, check, positions=False):
 
 
 _CHECKED = {}
-_SHORT_PLAIN = re.compile(r"[A-Za-z0-9_ .-]{0,15}")      # what a string of 15 characters or fewer made of these may be (nothing the block claims is that short)
+_SHORT_PLAIN = re.compile(r"[A-Za-z0-9_.]{0,15}")      # what the late path may print unjudged: 15 characters or fewer of letters, digits, `_` and `.` (no space, no `-`, so no
+                                                          # argument after a flag and no `xox?-` token), and not starting like a vendor token (_unjudged)
+
+
+def _unjudged(text):
+    """Whether a string may be printed past the judging time: a name this run made itself (OWN_NAMES: its schema keys, its file names), or a short plain
+    string that does not start like one of the vendor tokens the block knows (a prefix and 12 characters are 15)."""
+    return text in OWN_NAMES or (_SHORT_PLAIN.fullmatch(text) is not None and not text.lower().startswith(_S_PREFIX_WORDS))
 
 
 def _late():
@@ -1153,12 +1238,13 @@ def _late():
 
 
 def seal_stop_after(seconds):
-    """The hard stop of a tool: no seal runs on past `seconds` from now (its manifest's time limit less a margin); what is left is withheld whole."""
+    """The seal stop of a tool: no seal runs on past `seconds` from now (its manifest's time limit less a margin); what is left is withheld whole,
+    except what _unjudged lets through. It stops the judging only, not the tool's own work: that has its own clock, which must run out first."""
     _CLOCK["stop"] = time.monotonic() + seconds
 
 
 def _timed(fn):
-    """`fn()` with the clock of the seal running: SEAL_BUDGET seconds from the outermost call, and never past the tool's hard stop."""
+    """`fn()` with the clock of the seal running: SEAL_BUDGET seconds from the outermost call, and never past the seal stop of the tool."""
     first = _CLOCK["deadline"] is None
     if first:
         _CLOCK["deadline"] = time.monotonic() + SEAL_BUDGET
@@ -1188,7 +1274,7 @@ def _without_components(text, kind):
 
 
 def _verdict(text, kind):
-    memo = (kind, text) if len(text) <= 512 else None
+    memo = (kind, text) if len(text) <= 512 and kind not in _S_TYPED else None
     hit = _CHECKED.get(memo, False) if memo else False
     if hit is False:
         hit = None if _MARK.fullmatch(text) else _suspect(_without_components(text, kind), kind)
@@ -1299,6 +1385,10 @@ def _residue(original, shown, kind):
 
 # ---- the walker ----------------------------------------------------------------------------------------------------------------------------
 _SCALARS = (bool, int, float)
+_SCALAR_TYPES = frozenset(_SCALARS)
+
+
+_KEYS = {}
 
 
 def _seal(value, kind, field, where, guard, fname=""):
@@ -1307,8 +1397,8 @@ def _seal(value, kind, field, where, guard, fname=""):
     `where` is the tuple of (sealed key or position, position) on the way down."""
     if isinstance(value, str):
         if _late():
-            # past the budget the rest is withheld whole, fail closed (a string of 15 characters or fewer of plain characters is no secret this block claims)
-            return value if _SHORT_PLAIN.fullmatch(value) else _replace(value, where, "the judging time ran out", True)
+            # past the budget the rest is withheld whole, fail closed; what is let through is only a name of this run's own and a short plain string (_unjudged)
+            return value if _unjudged(value) else _replace(value, where, "the judging time ran out", True)
         k = getattr(value, "kind", kind)
         out = show(value, k, field)
         if guard:
@@ -1323,18 +1413,25 @@ def _seal(value, kind, field, where, guard, fname=""):
     if isinstance(value, dict):
         hook = FIELDS.get(fname)
         hook = hook if callable(hook) else None
+        kk = KEY_KINDS.get(fname, "name")
         out, dupes = {}, {}
         for idx, (key, v) in enumerate(value.items()):
             if isinstance(key, str):
-                kk = KEY_KINDS.get(fname, "name")
                 if _late():
-                    sk = key if _SHORT_PLAIN.fullmatch(key) else _replace(key, where + (("(key)", idx),), "the judging time ran out", True)
+                    sk = key if _unjudged(key) else _replace(key, where + (("(key)", idx),), "the judging time ran out", True)
                 else:
-                    sk = show(key, kk, field)
-                    if guard:
-                        check = _verdict(sk, kk)
-                        if check:
-                            sk = _replace(sk, where + (("(key)", idx),), check)
+                    sk = _KEYS.get((kk, field, key, guard))
+                    if sk is None:
+                        sk = show(key, kk, field)
+                        if guard:
+                            check = _verdict(sk, kk)
+                            if check:
+                                sk = _replace(sk, where + (("(key)", idx),), check)
+                        if sk == key and len(key) <= 128:
+                            # a key that comes out as it went in changed nothing (no count, no list): its judging is not repeated for the next row
+                            if len(_KEYS) >= 20000:
+                                _KEYS.clear()
+                            _KEYS[(kk, field, key, guard)] = sk
             elif key is None or isinstance(key, _SCALARS):
                 sk = key
             else:
@@ -1350,6 +1447,9 @@ def _seal(value, kind, field, where, guard, fname=""):
                         break
                 dupes[sk] = n
                 sk = renamed
+            if v is None or type(v) in _SCALAR_TYPES:
+                out[sk] = v                               # (a number, a truth value or nothing: there is no string to seal)
+                continue
             fk = key if isinstance(key, str) else ""
             sub_kind = (hook(key) if hook else None) or _kind_of(fk, kind)
             label = sk if isinstance(sk, str) else str(sk)
@@ -1369,9 +1469,27 @@ def seal(value, kind="text", field=""):
     return _timed(lambda: _seal(value, kind, field, (), True))
 
 
+_ROW_TYPES = frozenset((str, int, float, bool))
+_ROW = [None, None]             # the last row of plain scalars that was sealed without anything being replaced, and what it came out as
+
+
 def row_object(row):
-    """A row of a paging file, sealed and read back: what the file may hold."""
-    return _timed(lambda: _seal(row, "text", "", (), True))
+    """A row of a paging file, sealed and read back: what the file may hold. A tool that writes the same row to two files (every key listed, and
+    the nodes of a walk) has it judged once: the second is the first's result, the same judging with nothing to count or list."""
+    key = None
+    if isinstance(row, dict):
+        for k, v in row.items():
+            if type(k) is not str or (v is not None and type(v) not in _ROW_TYPES):
+                break
+        else:
+            key = tuple(row.items())
+    if key is not None and _ROW[0] == key:
+        return dict(_ROW[1])
+    replaced = BOUNDARY["replaced"]
+    out = _timed(lambda: _seal(row, "text", "", (), True))
+    if key is not None and BOUNDARY["replaced"] == replaced:
+        _ROW[0], _ROW[1] = key, dict(out)
+    return out
 
 
 def boundary_summary():
@@ -1423,6 +1541,22 @@ def emit(doc, **dumps_kwargs):
         pass
     print(text, flush=True)
 # END SHARED BOUNDARY
+
+
+# The keys the answers and the result files of this tool are made of: names the tool wrote itself (regenerate from the literal keys of the answer when a key is added).
+# They are shown as they are even past the judging time, so that an answer stays readable; a name from the evidence that is one of them holds no secret.
+OWN_NAMES.update((
+    "all_channels", "all_problems", "all_results", "begins_with", "beyond_declared_note", "beyond_read", "beyond_rejected", "bytes_expected", "channel",
+    "channels", "chunk_beyond_declared", "chunk_offset", "chunk_slots_beyond_declared_empty", "chunks_beyond_declared_rejected", "chunks_declared",
+    "chunks_in_file", "chunks_not_read", "chunks_not_read_count", "chunks_read", "chunks_read_beyond_declared", "computer", "contains", "contains_blind",
+    "contains_blind_records", "count", "data", "declared_unreadable", "e", "end_record", "end_time", "enumeration_failed", "error", "errors", "event_id",
+    "event_ids", "events", "events_matched", "events_without_time_excluded", "examined", "file_bytes", "flags", "from", "header_dirty", "header_flags",
+    "highest_record_id_read", "hint", "in_library", "matched", "next_record_number", "next_record_number_declared", "not_attempted", "note", "out_file",
+    "parse_error", "parse_errors", "parser", "partial_result_file", "path", "problems", "provider", "reason", "record_filetime", "record_id",
+    "record_offset", "record_time_utc", "records_examined", "result_file", "result_file_requested", "result_file_requested_note", "returned", "signal",
+    "slots_empty_beyond", "start_record", "start_time", "status", "status_basis", "tables_refused", "time", "time_created", "time_range_utc", "timed_out",
+    "timestamp", "truncated", "until_exclusive", "user_data", "walk_stopped_by_time_limit", "without_time", "xml"
+))
 
 IP_FIELDS = frozenset(("ipaddress", "sourceip", "destinationip", "sourceaddress", "destaddress", "destinationaddress", "clientaddress", "sourcenetworkaddress", "workstationip"))
 PATH_FIELDS = frozenset(("image", "parentimage", "targetfilename", "imageloaded", "processname", "newprocessname", "parentprocessname", "currentdirectory", "destination",
@@ -1679,8 +1813,11 @@ def main():
         store/jobs/<id>/out/, the path to cite; otherwise the run-relative path."""
         out = os.environ.get('OUT')
         if os.environ.get('JOB_ID') and out and Path(out).resolve() in p.parents:
-            return 'store/jobs/%s/out/%s' % (re.sub(r'[^A-Za-z0-9_.-]', '_', os.environ['JOB_ID']), p.relative_to(Path(out).resolve()))
-        return os.path.relpath(p, root_dir)
+            shown = 'store/jobs/%s/out/%s' % (re.sub(r'[^A-Za-z0-9_.-]', '_', os.environ['JOB_ID']), p.relative_to(Path(out).resolve()))
+        else:
+            shown = os.path.relpath(p, root_dir)
+        OWN_NAMES.add(shown)                                 # the name of a result file is this tool's own: the answer keeps it readable past the judging time
+        return shown
 
     # What the file header says the log holds, to set against what the file holds and what the reader gave.
     problems = []
@@ -2047,6 +2184,7 @@ def main():
         answer['result_file_requested'] = shown_result(result_path)
         answer['result_file_requested_note'] = ('that name was already taken by an earlier, different result, which is kept as it was; this run '
                                                 'wrote %s' % shown_result(made_path))
+    OWN_NAMES.add(answer['status_basis'])                    # made of counts and the tool's own words
     emit(answer)
     close_values()
 
