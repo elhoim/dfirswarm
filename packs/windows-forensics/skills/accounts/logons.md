@@ -1,7 +1,7 @@
 ---
 id: accounts/logons
-title: Accounts, SIDs, RIDs and groups on a machine
-when: You build the account map, or must read a SID, a RID or a group membership.
+title: Accounts, SIDs, groups
+when: Account map; read a SID, RID or group.
 needs: []
 tools: [regkv]
 requires_host: [regripper, RECmd]

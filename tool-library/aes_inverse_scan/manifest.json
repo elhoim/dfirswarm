@@ -1,6 +1,6 @@
 {
   "name": "aes_inverse_scan",
-  "description": "Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle rounds, either round order, word bytes kept or reversed) in a file or memory image, at every byte alignment. A key goes to a private file in out_dir, never to the answer: it gives offset, layout, the key's sha256. A hit is a lead. Not AES-192 or the plain layout (aes_schedule_scan).",
+  "description": "Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle rounds, either round order, word bytes kept or reversed) in a file or memory image, at every byte alignment. A key goes to a private file in out_dir, never to the answer: it gives offset, layout, key file name. A hit is a lead. Not AES-192 or the plain layout (aes_schedule_scan).",
   "use": {
     "extensions": [
       ".mem",
@@ -45,6 +45,6 @@
   ],
   "by": "s3472f0",
   "at": "2026-10-01T09:26:51.132Z",
-  "version": 1,
-  "sha256": "11916d3745945117a2e0be04064fec44d6724105c264c39c0b549199f3fb0be9"
+  "version": 2,
+  "sha256": "33b4798f30b5d601ba739b1f917b93f08f04800081671e7bb1059af4180636e1"
 }

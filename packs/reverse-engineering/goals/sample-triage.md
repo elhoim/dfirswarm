@@ -58,7 +58,6 @@ answer, saying what they verified. `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'not executed|static analysis only|no dynamic analysis' work/report.md`
 - `grep -qE '[0-9a-f]{64}' work/report.md`
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 3`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

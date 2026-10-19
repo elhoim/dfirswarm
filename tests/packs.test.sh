@@ -264,6 +264,19 @@ printf 'print("changed")\n' >> "$WORK/saved/carve_it/run.py"
 "$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" --replace >/dev/null 2>&1 && fail "adopt took a tool whose script no longer matches its sha256"
 pass "adopt takes a sealed saved tool into a pack without the run's fields, and refuses a changed one"
 
+# What a pack tool declares beyond the basics comes along: use, requires and the harness-read secret_output.
+mkdir -p "$WORK/saved/keep_it"
+printf 'print("kept")\n' > "$WORK/saved/keep_it/run.py"
+ksha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/saved/keep_it/run.py")"
+printf '{"name": "keep_it", "description": "Keep it.", "params": {"write_values": {"type": "boolean"}}, "runtime": "python3", "entry": "run.py", "timeout_seconds": 30, "use": {"suffixes": [".db"]}, "requires": ["sqlite3"], "secret_output": {"when_args": ["write_values"]}, "by": "s1", "at": "t", "version": 2, "sha256": "%s", "pack": "other-pack"}\n' "$ksha" > "$WORK/saved/keep_it/manifest.json"
+"$PACK" adopt "$WORK/saved/keep_it" "$WORK/src/adopt-pack" >/dev/null || fail "adopt refused a tool that declares secret_output"
+am="$WORK/src/adopt-pack/tools/keep_it/manifest.json"
+jq -e '.secret_output == {"when_args": ["write_values"]} and .use == {"suffixes": [".db"]} and .requires == ["sqlite3"]' "$am" >/dev/null \
+  || fail "adopt dropped secret_output, use or requires: $(cat "$am")"
+jq -e '(has("by") or has("pack") or has("sha256") or has("version")) | not' "$am" >/dev/null || fail "the adopted manifest kept the run's fields: $(cat "$am")"
+"$PACK" seal "$WORK/src/adopt-pack" >/dev/null 2>&1 || fail "a pack with an adopted secret_output tool does not seal"
+pass "adopt keeps a tool's use, requires and secret_output"
+
 # Every shipped pack must be sealed, must install and must verify. Install in
 # dependency order rather than alphabetically: a pack whose dependency is not
 # installed yet is refused, which is the behaviour the tests above assert.

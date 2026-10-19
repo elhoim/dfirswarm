@@ -1,7 +1,7 @@
 ---
 id: antiforensics/log-clearing
-title: Cleared logs and missing snapshots
-when: A log is empty or absent, shows a clearing record, or shadow copies are missing.
+title: Cleared logs
+when: Empty or cleared log; missing snapshots.
 needs: [antiforensics/traces]
 tools: [evtx_query, evtx_carve, regkv, vss_stores]
 requires_host: []
@@ -18,4 +18,4 @@ Use when a log is empty, absent or carries a clearing record, or shadow copies a
 
 Shows: that a clearing, or a missing store, was recorded or found at this volume and offset. Does not show: what was lost, who did it, or that nothing else was altered. Record: the clearing record's subject and time, file times and counts, the interval the file covers, the vss_stores status and exit code.
 
-Sensitive output: run `evtx_query` and `evtx_carve` as jobs (`secret_output: true`); `regkv` withholds by name or place only.
+Sensitive output: run `evtx_query` and `evtx_carve` as jobs (`secret_output: true`); `regkv` withholds by name, place and shape; a plain password is printed.

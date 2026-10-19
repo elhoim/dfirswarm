@@ -2,6 +2,8 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `linux/router`
+
 - `accounts/sessions-histories` Sessions and shell histories: Reading wtmp, btmp, lastlog and shell histories as leads.
 - `accounts/users` Accounts, identities and authorization: Which identities and configured privileges could apply, without equating them with use.
 - `containers/docker` Docker evidence locations and scope: Mapping supplied Docker metadata, logs, layers, volumes and host relationships.
@@ -12,6 +14,7 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `filesystem/storage` Linux storage layers and parser coverage: Identifying volume dependencies and parser coverage before examining a filesystem.
 - `filesystem/storage-lvm-luks` LVM and LUKS on evidence copies: Mapping logical volumes and inspecting LUKS headers without activating or unlocking.
 - `filesystem/storage-xfs-btrfs-virtual` XFS, Btrfs and virtual disk images: A volume is XFS or Btrfs, or the disk is a VDI, VMDK, QCOW2 or VHD file.
+- `linux/router` Linux notes by question: Pick one when none is listed, or you cannot choose.
 - `logs/auth` Authentication and privilege-use records: Reading retained auth logs, their timestamp assumptions and attribution limits.
 - `logs/auth-lines` What each auth log line shows: Interpreting ssh, sudo, su, PAM and account lines, and names typed at a prompt.
 - `logs/auth-time` Auth log years, rollovers and parse status: Dating, ordering or counting auth log lines whose stamps have no year or zone.

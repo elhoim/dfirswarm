@@ -1,7 +1,7 @@
 ---
 id: logs/events
-title: Event ids and logon types
-when: You are about to say what an event id or a logon type means.
+title: Event ids, logon types
+when: What an id or logon type means.
 needs: [logs/security]
 tools: [evtx_query]
 requires_host: []

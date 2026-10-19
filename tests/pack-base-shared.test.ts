@@ -25,10 +25,10 @@ async function block(path: string, name: string): Promise<string> {
   return text.slice(start, stop + end.length);
 }
 
-test("archive_extract and sqlite_snapshot withhold what the network pack's tools withhold: the block is the same text", async () => {
+test("archive_extract, sqlite_snapshot and sqlite_query withhold what the network pack's tools withhold: the block is the same text", async () => {
   const network = await block(NETWORK, "WITHHOLDING");
   assert.ok(network.length > 5000);
-  for (const tool of ["archive_extract", "sqlite_snapshot"]) assert.equal(await block(BASE(tool), "WITHHOLDING"), network, `${tool} carries the network pack's withholding block`);
+  for (const tool of ["archive_extract", "sqlite_snapshot", "sqlite_query"]) assert.equal(await block(BASE(tool), "WITHHOLDING"), network, `${tool} carries the network pack's withholding block`);
 });
 
 test("archive_extract ends a program the way the network pack's engine tools do: the process block is the same text and nothing starts a session", async () => {
