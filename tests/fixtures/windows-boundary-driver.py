@@ -135,7 +135,7 @@ elif case == "budget":
     blk.SEAL_BUDGET = 10.0
     again = blk.seal({"v": "plain words"})
     out["after"] = again == {"v": "plain words"}
-    # the hard stop of a tool: a seal that starts past it withholds all but the short plain strings
+    # the seal stop of a tool: a seal that starts past it withholds all but the short plain strings
     blk.seal_stop_after(-1)
     late = blk.seal({"long": "a longer text than fifteen characters", "short": "short"})
     out["stop_late"] = late["long"].startswith("<withheld") and "the judging time ran out" in late["long"] and late["short"] == "short"
@@ -489,6 +489,80 @@ elif case == "basis":
     finally:
         blk._verdict = saved
     print(json.dumps({"status": out["status"], "basis": out["status_basis"]}))
+
+elif case == "late_short":
+    # past the judging time a string is printed unjudged only when it is a name of the tool's own or 15 characters or fewer of letters, digits, `_` and `.` that do not start like a
+    # vendor token: the families that are 15 characters or fewer and are secrets (the layer-2 Slack minimum, the value after a flag, a prefix and 12 characters) are replaced
+    blk.SEAL_BUDGET = -1.0
+    n = 100
+    families = {
+        "slack_minimum": lambda: "xo" + "xb-" + rs(10),
+        "slack_user": lambda: "xo" + "xp-" + rs(10),
+        "flag_pwd": lambda: "-pwd " + rs(10),
+        "flag_pass": lambda: "--pass " + rs(8),
+        "flag_secret": lambda: "-secret " + rs(7),
+        "flag_token": lambda: "-token " + rs(8),
+        "sendgrid_window": lambda: "SG" + "." + rs(12, A + "_-"),
+        "jwt_window": lambda: "ey" + "J" + rs(12),
+        "openai_window": lambda: "sk" + "-" + rs(12),
+        "aws_short": lambda: "AK" + "IA" + rs(11, string.ascii_uppercase + string.digits),
+        "github_short": lambda: "gh" + "p_" + rs(11),
+    }
+    printed = {}
+    for name, make in families.items():
+        plants = [make() for _ in range(n)]
+        out = blk.seal({"values": plants, "named": {p: 1 for p in plants}})
+        text = json.dumps(out)
+        printed[name] = sum(p in text for p in plants)
+    plain = ["notepad.exe", "Run_Key.1", "ProductName", "a" * 15, "v1.2.3.4", "HKLM", "Setup_x64.exe", "7z.exe"]
+    out = blk.seal({"values": plain, "named": {p: 1 for p in plain}})
+    kept = out["values"] == plain and list(out["named"]) == plain
+    # a name of the tool's own is kept at any length, and only that exact string
+    blk.OWN_NAMES.update(["a_key_the_tool_wrote_itself", "work/s1/tool-output/some-result-0123456789abcdef.jsonl"])
+    own = blk.seal({"a_key_the_tool_wrote_itself": ["work/s1/tool-output/some-result-0123456789abcdef.jsonl", "work/s1/tool-output/some-result-0123456789abcdee.jsonl"]})
+    print(json.dumps({"printed": printed, "plain_kept": kept, "own_key_kept": "a_key_the_tool_wrote_itself" in own,
+                      "own_value_kept": own.get("a_key_the_tool_wrote_itself", ["", ""])[0] == "work/s1/tool-output/some-result-0123456789abcdef.jsonl",
+                      "other_value_replaced": "the judging time ran out" in own.get("a_key_the_tool_wrote_itself", ["", ""])[1]}))
+
+elif case == "memo_count":
+    # a string judged to see what an answer would print (a contains filter, the order of a list) is counted and written to the values file when the answer prints it, once
+    import tempfile
+    mode = sys.argv[3]
+    d = tempfile.mkdtemp()
+    os.environ.update({"JOB_ID": "j1", "OUT": d, "SECRET_OUTPUT": "1"})
+    blk.bind_values(True, "drv")
+    secret = "pass" + "word=" + rs(12)
+    text = "run tool.exe " + secret
+    probes = []
+    if mode == "contains":
+        probes.append(blk.contains_check("tool.exe", text, "text", "xml"))
+        probes.append(blk.contains_check("zzz", text, "text", "xml"))
+        blk.print_order([text, "b", "a"], "text")
+    if mode == "order":
+        blk.print_order([text, "b", "a"], "text")
+    before = blk.BOUNDARY["withheld"]
+    out = blk.seal({"xml": blk.T("text", text), "data": {"CommandLine": blk.T("text", text)}})
+    blk.close_values()
+    lines = open(os.path.join(d, "drv-values.jsonl")).read().splitlines()
+    print(json.dumps({"mode": mode, "withheld_before_the_answer": before, "withheld": blk.BOUNDARY["withheld"], "by": dict(blk.BOUNDARY["by"]), "values_lines": len(lines),
+                      "secret_printed": secret[-12:] in json.dumps(out), "probes": probes}))
+
+elif case == "hex_be":
+    # binary data written as hexadecimal that holds a secret-shaped text as UTF-16BE (a 00 before each character) is read like UTF-16LE, the whole text, last character included
+    shapes = [lambda: "gh" + "p_" + rs(36), lambda: "pass" + "word=" + rs(14), lambda: "AK" + "IA" + rs(16, string.ascii_uppercase + string.digits), lambda: "ey" + "J" + rs(40)]
+    printed = flagged = whole_views = whole_backstop_views = 0
+    for i in range(60):
+        token = shapes[i % len(shapes)]()
+        h = (bytes(rnd.randrange(1, 255) for _ in range(rnd.randrange(0, 5))) + token.encode("utf-16-be")).hex()      # (the text ends the data)
+        printed += h in json.dumps(answer("hex", h))
+        flagged += bool(blk._verdict(h, "hex"))
+        whole_views += any(token in v for v in blk._hex_views(h))
+        whole_backstop_views += any(token in v for v in blk._s_hex_views(h))
+    benign_printed = 0
+    for text in ("Hello World from the registry", "C:\\Windows\\System32\\notepad.exe"):
+        h = text.encode("utf-16-be").hex()
+        benign_printed += h in json.dumps(answer("hex", h))
+    print(json.dumps({"printed": printed, "flagged_by_the_backstop": flagged, "views_hold_the_whole_text": whole_views, "backstop_views_hold_the_whole_text": whole_backstop_views, "benign_printed": benign_printed}))
 
 else:
     raise SystemExit("unknown case " + case)
