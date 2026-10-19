@@ -131,7 +131,7 @@ test("P2-1 the repeated-name loop reads the clock itself: a clock that moves 20 
   });
 });
 
-test("P2-1 in real time: 150 or more pairs of 1,900-character case-variant names (sized from the wall-clock cost of one name on this machine now) end inside max_seconds plus two, with the content types read and the list of repeated names capped at 100 (the code before listed every one of them, 8 sanitisings of a name each, outside the clock)", async () => {
+test("P2-1 in real time: 150 or more pairs of 1,900-character case-variant names (sized from the wall-clock cost of one name on this machine now) end inside max_seconds plus two, with the content types read and the list of repeated names capped at 100 (the code before listed every one of them, 8 sanitisings of a name each, outside the clock)", async (t) => {
   await withCwd(async (cwd) => {
     const calibrate = py(DOC_STRUCTURE, [
       "name = 'word/' + ('0' + 'a:b@' * 475)[:1900] + '.xml'",
@@ -146,7 +146,9 @@ test("P2-1 in real time: 150 or more pairs of 1,900-character case-variant names
     // 0.35 s of one name's cost per pair-count: the listing takes two sanitisings of a name per pair, the code before took thirteen
     const count = Math.min(600, Math.max(150, Math.round(0.35 / cost)));
     // the lists have 60% of the clock: at least three times what they take here
-    const maxSeconds = Math.max(5, Math.ceil((count * cost * 2 * 3) / 0.6));
+    // (never over the tool's own maximum of 90: a host so slow that the lists would still take more than half their share of 90 s skips the test)
+    const maxSeconds = Math.min(90, Math.max(5, Math.ceil((count * cost * 2 * 3) / 0.6)));
+    if (count * cost * 2 > 0.5 * 0.6 * maxSeconds) return t.skip(`one name costs ${cost} s here: ${count} pairs would use more than half of the lists' share of ${maxSeconds} s`);
     const file = await put(cwd, "work/real.docx", buildZip([{ name: "[Content_Types].xml", data: EMPTY_TYPES }, ...pairs(count, 1900)]));
     const started = Date.now();
     const r = await tool(DOC_STRUCTURE, cwd, { path: file, max_seconds: maxSeconds });
@@ -172,6 +174,86 @@ test("P2-1 the repeated names are capped and said: 150 repeated names list 100, 
     assert.ok(a.problems.some((p: string) => /^150 part names appear more than once in all/.test(p)), JSON.stringify(a.problems));
     assert.ok(a.problems.some((p: string) => /declares word\/gone\.bin its VBA project/.test(p)), "a problem after the repeated names is still said");
     assert.equal(a.problems_not_listed, undefined);
+  });
+});
+
+// ---- P2-A: a hostile [Content_Types].xml does not use up the clock the relationships and the VBA project are read in -----------------------------------
+
+/** A [Content_Types].xml of `count` Overrides of 190-character hostile part names, then `last`. */
+const hostileTypes = (count: number, last: string): Buffer =>
+  Buffer.from(`<?xml version="1.0"?><Types xmlns="${CT_NS}"><Default Extension="xml" ContentType="application/xml"/>${Array.from({ length: count }, (_v, i) => `<Override PartName="/word/${hostileBase(i, 190)}.xml" ContentType="application/xml"/>`).join("")}${last}</Types>`);
+const vbaOf = (): Buffer => buildVbaProject([{ name: "Module1", source: "Sub A()\r\nEnd Sub\r\n" }]);
+const partsBy = (a: Record<string, any>): Record<string, string[]> => Object.fromEntries((a.vbaproject_parts ?? []).map((p: any) => [p.part, p.selected_by]));
+
+test("P2-A on a slowed clock the rows of a hostile [Content_Types].xml stop at 75% of max_seconds and say so, a project the table declares after them (under a name of its own) and one named vbaProject.bin are still found, and the call ends inside max_seconds", async () => {
+  await withCwd(async (cwd) => {
+    const types = hostileTypes(1500, `<Override PartName="/word/macros.bin" ContentType="${VBA_CT}"/>`);
+    const file = await put(cwd, "work/ct.docm", buildZip([{ name: "[Content_Types].xml", data: types }, { name: "word/document.xml", data: Buffer.from("<w:document xmlns:w='x'/>") },
+      { name: "word/macros.bin", data: vbaOf() }, { name: "word/vbaProject.bin", data: vbaOf() }]));
+    const r = py(DOC_STRUCTURE, RUN_FAKE, [file], cwd, 300_000);
+    assert.equal(r.status, 0, r.stderr);
+    const { answer, elapsed } = fakeFinish(r);
+    assert.ok(elapsed <= 71, `the call ended ${elapsed} s after it began`);
+    assert.ok(answer.limits_hit.some((l: string) => /the rows of \[Content_Types\]\.xml stopped at max_seconds \(70\) less the 17\.5 s kept for the relationships and the VBA project/.test(l)), JSON.stringify(answer.limits_hit));
+    assert.equal(answer.content_types.rows_complete, false);
+    assert.equal(answer.content_types.read, true, "what the table declares was read to its end");
+    assert.ok(answer.tables.content_types.matched < 1500, `${answer.tables.content_types.matched} rows`);
+    assert.deepEqual(partsBy(answer), { "word/macros.bin": ["content_type"], "word/vbaProject.bin": ["name"] }, JSON.stringify(answer.problems));
+  });
+});
+
+test("P2-A a table whose declarations are not read to the end either (the clock passes 85% of max_seconds in it) stops with a limit of its own, and the project a relationship names and the one named vbaProject.bin are still found", async () => {
+  await withCwd(async (cwd) => {
+    const rels = Buffer.from(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="rel.bin"/></Relationships>`);
+    const types = Buffer.from(`<?xml version="1.0"?><Types xmlns="${CT_NS}">${Array.from({ length: 4000 }, (_v, i) => `<Default Extension="e${i}" ContentType="a/b"/>`).join("")}</Types>`);
+    const file = await put(cwd, "work/late.docm", buildZip([{ name: "[Content_Types].xml", data: types }, { name: "word/_rels/document.xml.rels", data: rels },
+      { name: "word/rel.bin", data: vbaOf() }, { name: "word/vbaProject.bin", data: vbaOf() }]));
+    const r = py(DOC_STRUCTURE, [
+      "now = [1000.0]",
+      "def clock():",
+      "    if sys._getframe(1).f_code.co_name == 'element':",
+      "        now[0] += 5",           // each reading of the clock by the table moves it 5 s
+      "    return now[0]",
+      "time.monotonic = clock",
+      "m.START = now[0]",
+      "sys.stdin = io.StringIO(json.dumps({'path': sys.argv[2]}))",
+      "m.main()",
+      "print('FAKE %.1f' % (now[0] - m.START))",
+    ].join("\n"), [file], cwd, 300_000);
+    assert.equal(r.status, 0, r.stderr);
+    const { answer, elapsed } = fakeFinish(r);
+    assert.ok(elapsed <= 71, `${elapsed} s`);
+    assert.ok(answer.limits_hit.some((l: string) => /the rows of \[Content_Types\]\.xml stopped at max_seconds \(70\)/.test(l)), JSON.stringify(answer.limits_hit));
+    assert.ok(answer.limits_hit.some((l: string) => /^time: \[Content_Types\]\.xml stopped at max_seconds \(70\) less the 10\.5 s kept for the relationships and the VBA project; what it declares after that point is not read/.test(l)), JSON.stringify(answer.limits_hit));
+    assert.equal(answer.content_types.read, false);
+    assert.deepEqual(partsBy(answer), { "word/rel.bin": ["relationship"], "word/vbaProject.bin": ["name"] }, JSON.stringify(answer.problems));
+  });
+});
+
+test("P2-A in real time: a [Content_Types].xml of Overrides of 190-character hostile names (sized from the cost of one name on this machine now) ends inside max_seconds plus two, says its rows stopped, and the macros are found", async (t) => {
+  await withCwd(async (cwd) => {
+    const calibrate = py(DOC_STRUCTURE, [
+      "name = '/word/' + ('0' + 'a:b@' * 60)[:190] + '.xml'",
+      "m.shown_name(name)",
+      "start = time.monotonic()",
+      "for i in range(40):",
+      "    m.shown_name(name + str(i))",
+      "print((time.monotonic() - start) / 40)",
+    ].join("\n"));
+    assert.equal(calibrate.status, 0, calibrate.stderr);
+    const cost = Number(calibrate.stdout);
+    // max_seconds 2 gives the rows 1.5 s: the table is sized to take four times that here (a name costs more in the table than in this loop)
+    const count = Math.min(40_000, Math.max(300, Math.ceil(6 / cost)));
+    const maxSeconds = 2;
+    if (count * cost < 3) return t.skip(`${count} rows take ${count * cost} s here: not enough to pass the rows' share of ${maxSeconds} s`);
+    const file = await put(cwd, "work/real.docm", buildZip([{ name: "[Content_Types].xml", data: hostileTypes(count, "") }, { name: "word/document.xml", data: Buffer.from("<w:document xmlns:w='x'/>") },
+      { name: "word/vbaProject.bin", data: vbaOf() }]));
+    const started = Date.now();
+    const a = body(await tool(DOC_STRUCTURE, cwd, { path: file, max_seconds: maxSeconds }));
+    const seconds = (Date.now() - started) / 1000;
+    assert.ok(seconds < maxSeconds + 2, `${count} Overrides took ${seconds} s at max_seconds ${maxSeconds} (one name costs ${cost} s)`);
+    assert.ok(a.limits_hit.some((l: string) => /the rows of \[Content_Types\]\.xml stopped at max_seconds \(2\)/.test(l)), JSON.stringify(a.limits_hit));
+    assert.deepEqual(partsBy(a), { "word/vbaProject.bin": ["name"] }, JSON.stringify(a.problems));
   });
 });
 

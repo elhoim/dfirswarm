@@ -2973,6 +2973,8 @@ SECRETISH = re.compile(r"hash|salt|password|digest|verifier", re.I)
 VBA_CONTENT_TYPE = "application/vnd.ms-office.vbaproject"
 VBA_RELS = re.compile(r"(?:^|/)_rels/[^/]*\.rels$", re.I)
 LISTING_SHARE = 0.6                 # of max_seconds: the lists of a ZIP (names check, member rows, repeated names); the rest is for its content types, relationships and VBA project
+CONTENT_TYPE_ROWS_SHARE = 0.75      # of max_seconds: the rows of [Content_Types].xml, which cost a sanitising of every name, stop here
+CONTENT_TYPE_DECLARATIONS_SHARE = 0.85  # of max_seconds: what [Content_Types].xml declares (cheap to read) stops here; the last 15% is for the relationships and the VBA project
 DUPLICATES_LISTED = 100             # repeated part names listed in the answer (all are counted)
 DUPLICATES_NAMED = 10               # repeated part names named in the problems
 SPELLINGS_LISTED = 20               # spellings of one repeated part name listed
@@ -3253,27 +3255,47 @@ def _probe_zip(path, size, ctx, extractor, out):
             overridden = set()               # every part an Override names: its own content type wins over the Default of its extension
             if ct is not None:
                 overrides, defaults, notable = ctx.page("content_types"), 0, []
+                # The rows of the table cost a sanitising of every name; what the table declares (the parts that have a content type of their
+                # own, the VBA project) costs nothing. So the rows have until CONTENT_TYPE_ROWS_SHARE of max_seconds and the declarations until
+                # CONTENT_TYPE_DECLARATIONS_SHARE, each stopped with a limit that says so, and the rest is kept for the relationships and the VBA
+                # project whatever the table holds: a table of 60,000 long names cannot use the clock up before they are looked for.
+                rows_deadline = ctx.deadline - (1 - CONTENT_TYPE_ROWS_SHARE) * ctx.seconds
+                declarations_deadline = ctx.deadline - (1 - CONTENT_TYPE_DECLARATIONS_SHARE) * ctx.seconds
+                seen, rows_stopped = 0, False
 
                 def element(local, _ns, attrs):
-                    nonlocal defaults
+                    nonlocal defaults, seen, rows_stopped
+                    if local not in ("Default", "Override"):
+                        return
+                    seen += 1
+                    kind = attrs.get("ContentType", "")
                     if local == "Default":
                         defaults += 1
-                        kind = attrs.get("ContentType", "")
-                        row = {"extension": text_of(attrs.get("Extension", ""), None, "names"), "content_type": text_of(kind, None, "names")}
-                    elif local == "Override":
-                        kind = attrs.get("ContentType", "")
-                        part = attrs.get("PartName", "")
-                        row = {"part": zname(part[1:], False) if part.startswith("/") and part[1:].lower() in withheld_names else shown_name(part),
-                               "content_type": text_of(kind, None, "names")}
                     else:
-                        return
-                    if local == "Override":
                         overridden.add(attrs.get("PartName", "").lstrip("/").lower())
                     if kind.strip().lower() == VBA_CONTENT_TYPE:
                         if local == "Default":
                             vba_extensions.add(attrs.get("Extension", "").lower())
                         else:
                             vba_declared.setdefault(attrs.get("PartName", "").lstrip("/").lower(), set()).add("content_type")
+                    # the clock: every 16 elements for the rows (a row of a long name costs a millisecond), every 256 for the declarations
+                    if not rows_stopped and not seen & 15 and time.monotonic() > rows_deadline:
+                        rows_stopped = True
+                        ctx.limit_hit("time: the rows of [Content_Types].xml stopped at max_seconds (%d) less the %g s kept for the relationships and the VBA project; "
+                                      "the rows listed are the ones before that point, and what the table declares (a part's own content type, the VBA project) is "
+                                      "still read" % (ctx.seconds, (1 - CONTENT_TYPE_ROWS_SHARE) * ctx.seconds))
+                    if not seen & 255 and time.monotonic() > declarations_deadline:
+                        raise Over("time: [Content_Types].xml stopped at max_seconds (%d) less the %g s kept for the relationships and the VBA project; what it "
+                                   "declares after that point is not read (a VBA project named vbaProject.bin, one a relationship names and one that begins with the "
+                                   "compound file signature are still looked for)" % (ctx.seconds, (1 - CONTENT_TYPE_DECLARATIONS_SHARE) * ctx.seconds))
+                    if rows_stopped:
+                        return
+                    if local == "Default":
+                        row = {"extension": text_of(attrs.get("Extension", ""), None, "names"), "content_type": text_of(kind, None, "names")}
+                    else:
+                        part = attrs.get("PartName", "")
+                        row = {"part": zname(part[1:], False) if part.startswith("/") and part[1:].lower() in withheld_names else shown_name(part),
+                               "content_type": text_of(kind, None, "names")}
                     overrides.add(row)
                     if any(k in kind for k in NOTABLE_CONTENT_TYPES) and len(notable) < 50 and row not in notable:
                         notable.append(row)
@@ -3281,7 +3303,11 @@ def _probe_zip(path, size, ctx, extractor, out):
                 try:
                     xml_elements(stream_member(archive, ct, ctx.budget), element)
                     members["read"] += 1
-                    out["content_types"] = {"read": True, "notable": notable, "table": "content_types"}
+                    out["content_types"] = {"read": True, "notable": notable, "table": "content_types", **({"rows_complete": False} if rows_stopped else {})}
+                except Over as exc:
+                    # the clock ended the table: what was read stays, the table is not whole, and the relationships and the VBA project are still looked for
+                    ctx.limit_hit(str(exc))
+                    out["content_types"] = {"read": False, "notable": notable, "table": "content_types", "rows_complete": False}
                 except Unreadable as exc:
                     zip_unreadable(ctx, members, "[Content_Types].xml", exc)
                 except DoctypeRefused:
