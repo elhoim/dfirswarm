@@ -192,6 +192,18 @@ class ChunkNeedles(Case):
         self.assertEqual(r.code, 0, r.stdout + r.stderr)
         self.assertEqual(r.json["source"]["image"], "inputs/ext/disk.bin")
 
+    def test_an_image_that_cannot_be_chosen_is_a_json_answer_on_stdout_not_a_message_on_stderr(self):
+        r = run_tool("chunk_needles", {"needles": "needle", "inode": 12}, self.dir)
+        self.assertEqual(r.code, 1)
+        self.assertIsNotNone(r.json, "stdout: %r stderr: %r" % (r.stdout, r.stderr))
+        self.assertIn("no disk image", r.json["error"])
+        self.write("inputs/a.dd", b"x")
+        self.write("inputs/b.dd", b"y")
+        r = run_tool("chunk_needles", {"needles": "needle", "inode": 12}, self.dir)
+        self.assertEqual(r.code, 1)
+        self.assertIn("several images", r.json["error"])
+        self.assertEqual(sorted(r.json["candidates"]), ["inputs/a.dd", "inputs/b.dd"])
+
 
 if __name__ == "__main__":
     unittest.main()

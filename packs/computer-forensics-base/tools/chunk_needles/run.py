@@ -15,7 +15,7 @@ volume offset, the inode, and any sector size given. The stream is read once and
 """
 import json, re, shutil, sys, subprocess, os
 
-TOOL = {"name": "chunk_needles", "version": 6}
+TOOL = {"name": "chunk_needles", "version": 7}
 CHUNK_DEFAULT = 8 * 1024 * 1024
 CHUNK_MIN, CHUNK_MAX = 16, 256 * 1024 * 1024
 CONTEXT_MAX = 65536
@@ -23,9 +23,68 @@ HITS_MAX = 1_000_000
 NEEDLES_MAX = 1000
 NEEDLE_BYTES_MAX = 4096
 ROW_CAP = 20_000_000
-SLICE = 256 * 1024                 # positions searched, sorted and emitted together: hits come out in offset order, whatever chunk is
 SECTOR_MAX = 65536
 INODE = re.compile(r"^\d+(-\d+(-\d+)?)?$")
+
+# BEGIN SHARED SCAN
+# The same text is in ioc_scan, chunk_needles and sig_carve (tests/test_scan_core.py holds the copies equal and holds the
+# engine to a brute-force search over every way of cutting a stream into reads). One engine finds literal byte strings in a
+# stream read in blocks: every occurrence once, at its true offset, overlapping ones included, in (offset, needle) order,
+# whatever the block size. A match is held back until `after` bytes of context follow it (or the stream has ended), and
+# `before` bytes of context are kept behind the searched position, so a match, or its context, cut by a read boundary is
+# neither lost nor counted twice. Each tool keeps its own answer: what it reports for a match, its pages and its budgets.
+SCAN_SLICE = 256 * 1024            # positions searched, sorted and handed out together
+
+
+class StreamScan:
+    """feed() each block as it is read; every call returns (offset, needle index, buffer, buffer's offset) for the matches that can
+    be decided now, in order. The buffer holds the match and its context. Exhaust the generator before the next feed: the
+    buffer is trimmed when it ends.
+
+    needles   the byte strings (a needle's index is its position in this list)
+    before    bytes of context behind a match that stay in the buffer
+    after     bytes of context after a match a match waits for
+    start     the stream offset of the first byte fed
+    prefix    the bytes that precede `start` in the stream, when a match may begin in them and end after `start` (a resumed scan)
+    final     the last block (it may be empty): everything fully inside the buffer is handed out. Also what a scan stopped before its end
+              calls: the matches that end inside what was read are all reported, and one that crosses the end is the next scan's.
+    """
+
+    def __init__(self, needles, before=0, after=0, start=0, prefix=b""):
+        self.needles = list(needles)
+        self.longest = max(len(n) for n in self.needles)
+        self.before, self.after = before, after
+        self.buf = prefix
+        self.base = start - len(prefix)
+        self.done = self.base
+        # a match is this scan's when it ends after `start`: the first start position of a needle is start - len + 1
+        self.first = [start - len(n) + 1 if prefix else start for n in self.needles]
+
+    def feed(self, data, final=False):
+        self.buf += data
+        have = self.base + len(self.buf)
+        process_end = have if final else have - (self.longest + self.after)
+        if process_end > self.done:
+            lo, hi = self.done - self.base, process_end - self.base
+            a = lo
+            while a < hi:
+                b = min(hi, a + SCAN_SLICE)
+                found = []
+                for vi, nb in enumerate(self.needles):
+                    stop = min(len(self.buf), b + len(nb) - 1)
+                    j = self.buf.find(nb, max(a, self.first[vi] - self.base), stop)
+                    while j >= 0:
+                        found.append((j, vi))
+                        j = self.buf.find(nb, j + 1, stop)
+                found.sort()                      # by offset, then by needle order: the same list for any block size
+                for j, vi in found:
+                    yield self.base + j, vi, self.buf, self.base
+                a = b
+            self.done = process_end
+        if not final:
+            keep_from = max(0, (self.done - self.before) - self.base)
+            self.buf, self.base = self.buf[keep_from:], self.base + keep_from
+# END SHARED SCAN
 
 def _catalogue_slug(path):
     """The directory name the kickoff's catalogue gives an input: its path under
@@ -343,6 +402,17 @@ def fail(message, **extra):
     sys.exit(1)
 
 
+def on_stdout(resolve, *given):
+    """The image and offset resolvers end with SystemExit(<JSON text>), which Python prints on stderr: the answer belongs on stdout."""
+    try:
+        return resolve(*given)
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            print(exc.code)
+            sys.exit(1)
+        raise
+
+
 def whole(args, key, default, low, high):
     value = args.get(key)
     if value is None:
@@ -417,39 +487,19 @@ def scan_fh(fh, source):
             secret.add(fid, {"source": source["label"], "offset": at, "needle": name, "encoding": enc},
                        "".join(chr(c) if 32 <= c < 127 else "." for c in raw))
 
-    # buf holds the stream's bytes [base, base + len(buf)); positions below `done` are searched. A
-    # position is searched once its context is in buf (or the stream has ended), so no match is cut.
+    # The shared engine finds every occurrence once, in offset order, whatever chunk is (see StreamScan above).
+    scanner = StreamScan([v[2] for v in variants], before=context, after=context)
     try:
-        buf, base, done, scanned = b"", 0, 0, 0
+        scanned = 0
         while True:
             data = fh.read(chunk)
             at_end = not data
-            buf += data
             scanned += len(data)
-            have = base + len(buf)
-            process_end = have if at_end else have - (longest + context)
-            if process_end > done:
-                lo, hi = done - base, process_end - base
-                a = lo
-                while a < hi:
-                    b = min(hi, a + SLICE)
-                    found = []
-                    for vi, (name, enc, nb) in enumerate(variants):
-                        stop = min(len(buf), b + len(nb) - 1)
-                        j = buf.find(nb, a, stop)
-                        while j >= 0:
-                            found.append((j, vi))
-                            j = buf.find(nb, j + 1, stop)
-                    found.sort()                          # by offset, then by needle order: the same list for any chunk
-                    for j, vi in found:
-                        name, enc, nb = variants[vi]
-                        emit(base + j, name, enc, nb, buf, base)
-                    a = b
-                done = process_end
+            for at, vi, buf, base in scanner.feed(data, final=at_end):
+                name, enc, nb = variants[vi]
+                emit(at, name, enc, nb, buf, base)
             if at_end:
                 break
-            keep_from = max(0, (done - context) - base)
-            buf, base = buf[keep_from:], base + keep_from
         hits = {}
         for n in need_list:
             page = pages[n].finish()
@@ -474,7 +524,7 @@ else:
         sys.exit(1)
     if isinstance(inode, bool) or not (isinstance(inode, int) and inode >= 0 or isinstance(inode, str) and INODE.match(inode)):
         fail("inode is a Sleuth Kit address: a number, or number-type-id for an NTFS stream (168-128-4)", inode=inode)
-    image = _resolve_image(args.get("image"))
+    image = on_stdout(_resolve_image, args.get("image"))
     if not os.path.isfile(image):
         print(json.dumps({"error": f"image not found: {image}"}))
         sys.exit(1)
@@ -483,7 +533,7 @@ else:
         fail("offset is a volume offset in sectors, a whole number", offset=given_offset)
     if not shutil.which("icat"):
         fail("icat is not on PATH", install="brew install sleuthkit, or apt-get install -y sleuthkit")
-    offset = _resolve_offset(image, given_offset)
+    offset = on_stdout(_resolve_offset, image, given_offset)
     inode = "-".join(str(int(p)) for p in str(inode).split("-"))      # 084284 is address 84284
     cmd = ["icat"] + (["-b", str(sector_size)] if sector_size else []) + ["-o", str(offset), image, str(inode)]
     source = {"kind": "icat", "image": image, "volume_offset_sectors": offset, "inode": str(inode),

@@ -1,32 +1,22 @@
 ---
 id: timeline/linux
-title: A Linux timeline is several clocks, not one sorted CSV
-when: Building or checking the chronology of a Linux compromise.
-needs: [triage/system-profile, logs/auth, logs/journal, filesystem/storage]
-tools: [linux_triage, timeline_super, timestamp_decode]
+title: Linux chronology across clocks and families
+when: Building a reproducible timeline from independent evidence layers.
+needs: []
+tools: [auth_log, linux_triage, timeline_super]
 requires_host: [log2timeline, psort]
 ---
 
+Use when you merge Linux evidence into a timeline. Not for normalising stamps and correlating events (`timeline/linux-normalise`, only if the layers are built).
+
 Build independent layers before merging them:
 
-1. File-system MACB times from the disk catalogue. On ext, `ctime` is inode
-   change, not creation; `crtime` is creation where present. XFS and Btrfs have
-   different metadata and snapshot semantics.
-2. Syslog/auth text. Traditional syslog timestamps have no year or offset, so
-   keep the source text and state the year and timezone you applied.
-3. The journal. Keep `_BOOT_ID` and the realtime timestamp; boot grouping is
-   what survives a clock correction.
-4. Package-manager, cron/systemd, shell-history, wtmp/btmp/lastlog, web and
-   container records from `linux_triage`. A shell command without a recorded
-   timestamp has sequence only.
-5. A Plaso storage file from `timeline_super` when its parser coverage adds
-   value. Keep the storage file and export; a sample returned inline is not the
-   timeline.
+1. Filesystem MACB times from the disk catalogue. On ext, `ctime` is the inode change time, not creation; `crtime` is creation where the inode holds it. XFS and Btrfs have different metadata and snapshot semantics (`filesystem/storage`).
+2. Text logs (auth, syslog), each with its timestamp format. A traditional stamp has no year and no zone: keep the source text and state the year basis and zone you applied (`auth_log` records both).
+3. The journal: `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP` and `_BOOT_ID` side by side. Within a boot use monotonic time to look for wall-clock discontinuities; across boots and hosts establish independent anchors and carry the uncertainty (`logs/journal`).
+4. Audit, package-manager, scheduler, session, application, cloud and container records, and the families `linux_triage` produces. Record its selected function list, the dissect.target version, each function's status and stderr: its sessions family is classic wtmp, btmp and lastlog, its package family is the Debian-family status file and package-manager logs, it has no audit family, and a clean run is no evidence of RPM, newer accounting or full container coverage. A shell command with no recorded time has sequence only, and the sequence can reflect when a session flushed or merged its file, not when the command ran.
+5. A Plaso storage file from `timeline_super` where its parser coverage adds value. Run `log2timeline` and `psort` through that wrapper or directly, record the parser names actually available in that version, the timezone, the filters, the errors, the storage file and the complete export. A parser succeeding is not an evidence family being complete, and a sample returned inline is not the timeline.
 
-Normalise to UTC only after preserving the original value and source timezone.
-Sort equal timestamps deterministically but do not invent an order within their
-resolution: syslog may have seconds, ext may have nanoseconds, and a date-only
-package record may describe a whole day. Correlate important events across two
-independent sources and state disagreements rather than choosing the cleaner
-one. An empty parser result supports an absence only when its paths, time range,
-allocated/deleted scope and parser errors are all recorded.
+Shows: what each layer recorded, side by side. Does not show: that an event happened because a record names it, or that two records a second apart are causally linked. Record: per layer the source, format, clock, year and zone basis, parser or function statuses and the stored export.
+
+Sensitive output: `auth_log` and `linux_triage` outputs hold sudo command lines, names typed at a prompt, shell histories and log messages that can contain a password or a token. Run them as jobs with `secret_output: true`, cite the file and line, and carry no text or hash of a value into the timeline: a timeline row says what happened and where it is recorded.

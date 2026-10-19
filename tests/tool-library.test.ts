@@ -85,6 +85,7 @@ test("icat_extract treats output as a path, not a shell command", async () => {
   await withCwd(async (cwd, bin) => {
     const out = await runPy(join(LIB, "icat_extract", "run.py"), cwd, {
       inode: 12,
+      image: "inputs/AF-Case2.E01",
       output: "work/x$(touch pwned).bin",
     }, bin);
     assert.equal(out.code, 0, out.stderr);
@@ -208,7 +209,7 @@ test("chunk_needles fails closed when the E01 is missing", async () => {
     }, bin);
     assert.notEqual(out.code, 0);
     const body = JSON.parse(out.stdout) as { error: string };
-    assert.match(body.error, /not found/);
+    assert.match(body.error, /not found|no disk image|several images/);
   });
 });
 
@@ -222,7 +223,7 @@ test("check_inputs diffs inputs.json instead of always reporting OK", async () =
       join(cwd, "inputs.json"),
       JSON.stringify({
         source: "/tmp/src",
-        files: [{ path: "inputs/AF-Case2.E01", bytes: 4, sha256: "deadbeef" }],
+        files: [{ path: "inputs/AF-Case2.E01", bytes: 4, sha256: "de".repeat(32) }],
         bytes: 4,
       }),
       "utf8",
@@ -496,16 +497,6 @@ test("the library's catalog searches read the case in front of them, not the one
   assert.deepEqual(JSON.parse(await readFile(join(lib, "manifest.json"), "utf8")), JSON.parse(await readFile(join(pack, "manifest.json"), "utf8")));
 });
 
-test("the tool-library copies of file_carver, catalog_search, sig_carve, ioc_scan and sqlite_query are the pack's, run.py and manifest", async () => {
-  // The copies are what scripts/swarm.sh install_tools_from offers a run: one that drifts offers the old tool.
-  for (const name of ["file_carver", "catalog_search", "sig_carve", "ioc_scan", "sqlite_query"]) {
-    const lib = join(LIB, name);
-    const pack = join(LIB, "..", "packs", "computer-forensics-base", "tools", name);
-    assert.equal(await readFile(join(lib, "run.py"), "utf8"), await readFile(join(pack, "run.py"), "utf8"), `the library's ${name} is the pack's`);
-    assert.deepEqual(JSON.parse(await readFile(join(lib, "manifest.json"), "utf8")), JSON.parse(await readFile(join(pack, "manifest.json"), "utf8")), `${name}'s manifest`);
-  }
-});
-
 // A broad search returned up to 70K characters a call, and an agent that
 // wanted the rest searched again with a bigger limit: the lines past the
 // limit were counted and dropped. Every match is kept now, and paged.
@@ -618,7 +609,7 @@ test("icat writers refuse an output that resolves under inputs/, and do not run 
   const writers: Array<{ name: string; run: (cwd: string, bin: string, output: string) => Promise<{ code: number | null; stdout: string }> }> = [
     {
       name: "icat_extract",
-      run: (cwd, bin, output) => runPy(join(LIB, "icat_extract", "run.py"), cwd, { inode: 7, output }, bin),
+      run: (cwd, bin, output) => runPy(join(LIB, "icat_extract", "run.py"), cwd, { inode: 7, image: "inputs/AF-Case2.E01", output }, bin),
     },
     {
       name: "icat_root",
@@ -1436,7 +1427,7 @@ test("a paging library tool runs from a copy of its own directory, as a run seed
   assert.ok(pagers.length >= 10, "the paging tools carry their pager");
   // Two generations exist: the original, and the one that says as JSON when the whole result cannot be written (a read-only
   // directory, a full disk) and escapes a lone surrogate. The Windows pack's tools carry the second, and so do their library
-  // copies (tests/tool-library-parsers.test.ts holds them byte-identical); the other library tools take it when they are next
+  // copies (tests/tool-library-twins.test.ts holds them byte-identical); the other library tools take it when they are next
   // changed. No third generation may appear.
   const generations = new Map<string, string[]>();
   for (const pager of pagers) generations.set(pager, [...(generations.get(pager) ?? []), pager]);

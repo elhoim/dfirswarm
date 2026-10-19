@@ -1,7 +1,7 @@
 ---
 id: filesystem/shadowcopies-open
-title: Reading files from a shadow copy
-when: A store is listed and you must read an earlier hive, log or file from it.
+title: Reading a shadow copy
+when: An earlier hive, log or file.
 needs: [filesystem/shadowcopies]
 tools: [vss_stores, extract_stream, mft_records, regkv, evtx_query]
 requires_host: [vshadowmount, fls]

@@ -8,16 +8,18 @@ Depends on the Computer Forensics Base Pack.
 
 ## What it carries
 
-**Eight skills**, in six families.
+**Eighteen skills**, in six families: a decision-rule leaf for each question,
+second-level leaves a leaf points to ("only if") for the reference material, and the router
+`macos/router` (at most 400 tokens; the prompt shows this one line for the pack when the run's index is over its budget, and it names every leaf).
 
 | Family | Skills |
 | --- | --- |
-| Triage | `triage/system-profile` |
-| Artefacts | `artifacts/plists`, `artifacts/fsevents`, `artifacts/knowledgec` |
-| Logs | `logs/unified` |
-| Persistence | `persistence/mechanisms` |
-| Accounts | `accounts/users` |
-| File system | `filesystem/apfs` |
+| Triage | `triage/system-profile`; `triage/clocks-hardware` (zone, epochs, hardware generation) |
+| Artefacts | `artifacts/plists`, `artifacts/plists-archives-dates`; `artifacts/fsevents`, `artifacts/fsevents-dating`; `artifacts/knowledgec`, `artifacts/knowledgec-fields-time` |
+| Logs | `logs/unified`; `logs/unified-readers` (readers, staging, retention levels) |
+| Persistence | `persistence/mechanisms`; `persistence/login-items-quieter` |
+| Accounts | `accounts/users`; `accounts/attribution-remote` |
+| File system | `filesystem/apfs`; `filesystem/apfs-recovery`; `filesystem/apfs-encryption` |
 
 **Four tools.** Each says what it read and what it did not, and none turns a failure
 into an empty result.

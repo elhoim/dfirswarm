@@ -1,7 +1,7 @@
 ---
 id: google/workspace-access
 title: Workspace grants, delegation, sharing and forwarding
-when: You must reconstruct delegated access, Drive sharing or mailbox forwarding from Workspace evidence.
+when: Reconstruct delegated access, Drive sharing or mail forwarding from Workspace evidence.
 needs: [logs/what-exists]
 tools: []
 requires_host: []

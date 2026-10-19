@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { routerChecks } from "./pack-router-checks.ts";
 import { ROOT } from "./tool-library-harness.ts";
 
 const SKILLS = join(ROOT, "packs", "cloud-forensics", "skills");
@@ -23,6 +24,10 @@ const IDS = [
   "m365/unified-audit-log",
 ];
 
+// The pack's one router: shown alone when a run's index is over budget, and names every other skill once (routerChecks below).
+// IDS holds the nine leaves; the router reads no artefact, so the per-leaf checks of this file do not apply to it.
+const ROUTER = "cloud/router";
+
 const read = (id: string): { front: Record<string, string>; text: string; body: string } => {
   const text = readFileSync(join(SKILLS, `${id}.md`), "utf8");
   const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
@@ -37,7 +42,7 @@ const read = (id: string): { front: Record<string, string>; text: string; body: 
 
 const list = (v: string): string[] => v.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
 
-test("the pack carries these nine skills and no others", () => {
+test("the pack carries these nine skills and its router, and no others", () => {
   const found: string[] = [];
   const walk = (dir: string, prefix: string): void => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -46,7 +51,7 @@ test("the pack carries these nine skills and no others", () => {
     }
   };
   walk(SKILLS, "");
-  assert.deepEqual(found.sort(), [...IDS].sort());
+  assert.deepEqual(found.sort(), [...IDS, ROUTER].sort());
 });
 
 test("every skill is a leaf: at most 800 tokens (bytes / 4.245) and 300 lines (the program's bound; these files are under 30), and its first line says when to use it and when not to", () => {
@@ -209,5 +214,29 @@ test("pwsh and aws are said to be an operator's acquisition tools, in requires a
   }
   const pack = JSON.parse(readFileSync(join(ROOT, "packs", "cloud-forensics", "pack.json"), "utf8"));
   assert.ok(pack.unreferenced_ok.some((e: { name: string; why: string }) => e.name === "pwsh" && /never connects to a tenant/.test(e.why)));
-  assert.equal(pack.skills, 9);
+  assert.equal(pack.skills, 10);
 });
+
+test("the split pass: the pack's needs chains stay within the 1,900-token budget without the base pack, and every index entry is within 40 tokens", () => {
+  const tokens = (s: string): number => Buffer.byteLength(s) / 4.245;
+  const needs = (id: string): string[] => list(read(id).front.needs ?? "[]");
+  for (const id of IDS) {
+    const members = new Set<string>([id]);
+    const walk = (x: string): void => needs(x).forEach((n) => { if (!members.has(n)) { members.add(n); walk(n); } });
+    walk(id);
+    assert.ok(![...members].some((m) => !IDS.includes(m)), `${id}: no needs edge reaches the base pack, which a pointer in the body replaces`);
+    const total = [...members].reduce((n, m) => n + tokens(read(m).text), 0);
+    assert.ok(total <= 1900, `${id}: chain is ${Math.round(total)} tokens`);
+    const { front } = read(id);
+    assert.ok(tokens(`- \`${id}\` ${front.title}: ${front.when}`) <= 40, `${id}: index entry`);
+  }
+  // The base pack's evidence/verify is a pointer in the body, opened only when a digest must be checked, not a dependency.
+  const exists = read("logs/what-exists");
+  assert.deepEqual(list(exists.front.needs ?? "[]"), []);
+  assert.match(exists.body, /base pack `evidence\/verify`, only if you must check a digest against a manifest/);
+  assert.match(exists.body, /A file hash shows the bytes are those recorded when it was taken\. It does not show the provider made them/);
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+routerChecks({ pack: "cloud-forensics", router: ROUTER, before: IDS, profiles: ["full"] });

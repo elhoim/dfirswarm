@@ -1,0 +1,12 @@
+# The findings of scripts/skill-budgets.py that the shipped packs already have,
+# one per line: pack, kind, the skill's id, the ceiling. The kinds are leaf (a
+# skill over 1,000 tokens), router, lines, entry (the index line, over 40 tokens),
+# depth (`needs` reaching past 2) and chain (a skill and every skill its `needs`
+# reach, over 1,900 tokens), and the ceiling is the most that value may be: the
+# line is there so that the skill cannot get worse, not to say it is acceptable.
+# A finding not listed here fails the run, and so does a listed skill that grows
+# past its ceiling. A listed one that no longer happens fails too: delete its line
+# when the skill is split or shortened. The list is sorted as `LC_ALL=C sort`
+# sorts it and holds no (pack, kind, skill) twice. Rewrite it for what the packs
+# have now with `python3 scripts/skill-budgets.py golden` and read the diff: it
+# should only ever lose lines or lower a ceiling.

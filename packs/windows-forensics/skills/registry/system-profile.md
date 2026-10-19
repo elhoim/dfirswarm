@@ -1,7 +1,7 @@
 ---
 id: registry/system-profile
-title: Windows build, names, profiles, volume identity
-when: You need the machine's build, names and profile map before reading other artefacts.
+title: Build, names, profiles
+when: Machine profile first.
 needs: []
 tools: [regkv, timestamp_decode, image_layout, lnk_parse]
 requires_host: [fsstat]

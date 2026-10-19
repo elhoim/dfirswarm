@@ -256,6 +256,12 @@ matter, optional and at most one a pack:
 
     router: true
 
+The base pack is not the only one: `encrypted-containers`, `triage-collection`,
+`mobile-forensics`, `network-forensics` and `cloud-forensics` each name one too
+(`encrypted/router`, `triage/router`, `mobile/router`, `network/router` and
+`cloud/router`), and a router names no program, tool or rule, only which note
+answers which question.
+
 `pack.sh seal` refuses a value that is not `true` or `false`, and a second
 router. When there is one, the generated `skills/INDEX.md` carries a line
 ``Router: `<id>` `` above the entries; a pack with no router has no such line and
@@ -263,7 +269,12 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`, and
+so do `windows-forensics`, `linux-forensics`, `memory-forensics`,
+`macos-forensics` and `ransomware-response` (`<platform>/router`): a run of the
+base pack with windows-forensics and linux-forensics has 2,860 tokens of index
+entries whole, over the run's 2,500; the base router alone brings it to 1,898,
+and with the other two routers as well the prompt carries three router lines.
 
 ### Tool help stays out of the context window
 
@@ -324,6 +335,9 @@ directory named for the pack id is refused.
       "unreferenced_ok": [
         { "name": "olefile", "why": "imported by a tool of the pack; no skill runs it" }
       ],
+      "method_only": [
+        { "path": "skills/execution/overview.md", "why": "weighs the execution sources against each other; names no tool" }
+      ],
       "secrets": [
         { "name": "VT_API_KEY", "title": "VirusTotal API key", "required": false,
           "why": "Reputation lookups on hashes the case finds.",
@@ -335,7 +349,8 @@ directory named for the pack id is refused.
 `depends` is resolved at install. A pack whose dependency is missing is refused,
 named, with the version it wanted. `unreferenced_ok` is optional: a program or
 Python package the pack requires and no skill names, with the reason (section 8,
-"Requires and images").
+"Requires and images"). `method_only` is optional too: a skill that names nothing
+of its own pack on purpose, with the reason (section 8, "Links").
 
 ### Versions
 
@@ -524,23 +539,23 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-107 skills, 70 tools and 14 goal templates. Every one of them is sealed,
+199 skills, 72 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
-| `computer-forensics-base` | 11 | 14 | — | the method true of any platform; everything else depends on it |
-| `windows-forensics` | 24 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
+| `computer-forensics-base` | 29 | 16 | — | the method true of any platform; everything else depends on it |
+| `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
-| `mobile-forensics` | 7 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
-| `memory-forensics` | 9 | 3 | 1 | containers, what works with no framework, injection, credentials |
-| `network-forensics` | 8 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
-| `reverse-engineering` | 12 | 4 | 1 | static triage of a binary or a document, under quarantine |
-| `encrypted-containers` | 5 | 3 | 1 | which scheme, which protectors, and where the key already is |
+| `mobile-forensics` | 10 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
+| `memory-forensics` | 19 | 3 | 1 | containers, what works with no framework, injection, credentials |
+| `network-forensics` | 12 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
+| `reverse-engineering` | 12 | 6 | 1 | static triage of a binary or a document, under quarantine |
+| `encrypted-containers` | 11 | 3 | 1 | which scheme, which protectors, and where the key already is |
 | `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
-| `ransomware-response` | 7 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
-| `triage-collection` | 5 | 2 | 1 | a collector's output, which is how most cases arrive |
+| `ransomware-response` | 17 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
+| `triage-collection` | 14 | 2 | 1 | a collector's output, which is how most cases arrive |
 
     scripts/pack.sh install packs/computer-forensics-base
     scripts/pack.sh install packs/windows-forensics
@@ -623,8 +638,9 @@ A pack is read by an agent in the middle of a case, with nothing to go on but
 what a skill says and what a tool prints. What follows is what every skill,
 tool and requirements file in a pack is held to, so that a result built on a
 pack's word is one a reader can check. `tests/pack-tools.test.sh`,
-`tests/pack-links.test.sh`, `tests/packs.test.sh` and `tests/recipe.test.sh`
-hold the parts a test can hold; the rest is for the author.
+`tests/pack-links.test.sh`, `tests/skill-budgets.test.sh`, `tests/packs.test.sh`
+and `tests/recipe.test.sh` hold the parts a test can hold; the rest is for the
+author.
 
 ### Voice and method in skills
 
@@ -695,13 +711,16 @@ import each other), and holds to this:
   digest.
 - *A value is produced only on an explicit flag, in a job, in a file.* The flag
   is `write_values: true` (default false). The tool honours it only when it
-  runs as a job (`JOB_ID` and `OUT` are set) and writes only under `$OUT`:
+  runs as a job (`JOB_ID` and `OUT` are set) that was run as secret output
+  (`SECRET_OUTPUT=1`, below) and writes only under `$OUT`:
   JSON Lines, mode 0600, each row carrying the answer's `finding_id`, file and
   offset beside the `value`. The file is created exclusively at the start of
   the run, before anything is scanned: a file or link already at that name is
   refused by name, and with nothing found it stays an empty file and the answer
   says `written: 0`. Outside a job the request is refused, with exit 1 and
-  nothing written, because a file in `work/` is not a sealed output.
+  nothing written, because a file in `work/` is not a sealed output; in a job
+  without `SECRET_OUTPUT=1` it is refused the same way, because the file would
+  be sealed as ordinary output.
 - *A name shaped like the secret is withheld.* A path component that matches the
   secret's own pattern (a file named after the key) is replaced in every printed
   path, in the files the answer names and in the digest that names a paging file;
@@ -711,10 +730,70 @@ import each other), and holds to this:
   that names the tool has its "Sensitive output" line say the job runs with
   `secret_output: true`, and that the ledger cites the finding's file and
   offset, never the value.
-- *The manifest says SENSITIVE* and names the flag. The harness reads no
-  manifest-level flag yet, and a tool cannot see whether its job was run with
-  `secret_output`, so what keeps a value out of an ordinary run is the refusal
-  above and the skill's line; a flag the harness enforces is a follow-up.
+- *No filter over a withheld value.* A tool that takes a query or an expression
+  (a SQL statement, a regular expression, a name filter) must not offer it
+  while the values are withheld: with text you cannot see, each call is one bit
+  of every row, and a few hundred calls confirm a guess. The values-to-file
+  mode takes the table, not the query (`sqlite_query` with `write_values`), or
+  lets the expression narrow only what goes into the sealed file and never what
+  the answer counts (`sqlite_freespace`'s `contains`). A position is not free of
+  the values by itself, either. A range over a key is a filter over that key
+  when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
+  KEY` column, so `sqlite_query` refuses a rowid range on such a table, never
+  prints its rowid and locates its rows by their position. The order rows are
+  read in can rank values: an index's order is the indexed column's, so the
+  tool reads the table itself, and a WITHOUT ROWID table (whatever its columns
+  are named) or an INTEGER PRIMARY KEY table comes in the order of its key,
+  which the answer names (`n_ranks`); SQLite reads a WITHOUT ROWID table
+  through a covering index unless the ORDER BY is its whole key. A locator
+  query a skill gives for use outside the mode reads the table the same way
+  (`SELECT rowid, length(col), typeof(col) FROM t NOT INDEXED ORDER BY rowid`):
+  without the clause an index on the column returns the rowids in its values'
+  order. Where a size cap stops an export is decided on what the answer prints
+  of each cell (its type and length), never on the bytes its value took, which
+  follow how the value escapes; the run's time still follows them. And an error
+  message can quote a value (a generated column's `json_extract` does), and so
+  can what Python makes of one (a message that quotes bytes that are not UTF-8
+  is a `UnicodeDecodeError`): the answer says the row and what the error's code
+  decides (the time budget, the authorizer, a value over the length limit),
+  never the message or the class, and no decision reads the message.
+- *The manifest declares it, and the harness enforces it.* The description
+  says SENSITIVE and names the flag, and the manifest carries the key the job
+  service reads, `"secret_output"`: `"required"` (every job of the tool) or
+  `{ "when_args": ["write_values"] }` (a job that sets one of the named
+  parameters, each one of the tool's own `params`, declared `type: "boolean"`
+  with no default other than false: the harness applies no defaults, and anything but
+  an absent, null or false value counts as set). It applies to `kind: tool` jobs
+  only: a recipe (a pack's `recipe.json`, or a forged tool that declares the
+  recipe protocol) that carries the key is refused, not run, and the seal
+  refuses the key in `recipe.json`. A refused recipe is left out of the lists
+  that start recipes by themselves (the kickoff, the derived pass, a detect
+  pass), so it is not offered and not run; the reason is given only when an
+  agent asks for it by name, and the seal is what keeps it out of a pack in the
+  first place (it shows only in an installed pack edited by hand). Where the key applies
+  the job is run as if the agent had said `secret_output: true`, whether it did
+  or not (an agent's `false` does not turn it off): its outputs are sealed
+  sensitive, a job reading them is derived, an entry citing them is recorded
+  sensitive and a redacted package withholds them. The job's spec says so
+  (`secret_output_by: "tool_manifest"`) and so does its answer to the agent
+  (the same field). A key the
+  service cannot read refuses the job, naming the rule (a declaration is never
+  guessed at: ignoring one would drop the protection its author asked for), and
+  `pack.sh seal` checks the same. The service also puts `SECRET_OUTPUT=1` in the
+  environment of the process of a job run as secret output, however it came to
+  be one (the manifest, the agent's flag, a command job given the flag), and
+  unsets it for every other job. The tool honours its values mode only when
+  `SECRET_OUTPUT` is `1`: otherwise it refuses as JSON, before it opens or
+  creates anything, and says that nothing was written. That is what holds when
+  the manifest is not in the way, a command job that runs the tool's script by
+  hand. The variable is a signal to a tool that behaves, not a boundary: a
+  command job is code the harness does not read, and can set `SECRET_OUTPUT=1`
+  for itself.
+  A tool an agent forges (`make_tool`) has no declaration: the agent's flag
+  decides. Today `sqlite_query` and `recovery_key_scan` declare
+  `{ "when_args": ["write_values"] }` and check the variable; a tool that writes
+  values and does not yet is held by the agent's flag and the skill's line,
+  until it adds the same key and the same check.
 - *The tests assert absence:* no group of the value, no run of its digits, no
   64-hex string and no masked shape in the answer or in any file it names, with
   the value planted in every encoding the tool reads.
@@ -800,10 +879,102 @@ header says how it matches a name and where that is wrong.
    `tools:` or `requires_host:`. A mention is no use: it is exempt from the rules
    above, and it satisfies none of the next.
 3. **Everything a pack ships is reached.** Every bundled tool is named by at
-   least one skill of its pack, or of a pack that depends on it. Every skill
-   that depends on a capability names the tool that provides it. A capability
-   a skill needs and no tool provides is either added as a tool or taken out
-   of the skill.
-4. **The pack that owns a tool ships it.** Another pack names the tool and
+   least one skill of its pack, or of a pack that depends on it. Every program
+   and Python package in `requires` is named by such a skill, or is listed in
+   `unreferenced_ok` with the reason no skill names it. Every skill that depends
+   on a capability names the tool that provides it. A capability a skill needs
+   and no tool provides is either added as a tool or taken out of the skill.
+   What counts as a naming is the skill's text, front matter included, without
+   `mentions:`, `id:` and `needs:`: an id is a path (`id: aws/cloudtrail`) and
+   does not name the program `aws`; nor does a skill of the same pack cited by
+   its id (a router cites every leaf), but only a whole id with a `/` that is
+   set off by white space, quotes, brackets or punctuation: `aws/cloudtrail.py`,
+   `--src=aws/cloudtrail` and another pack's id still name the program.
+4. **A skill names something of its own pack, or says why it does not.** Every
+   skill names at least one tool, program or package of the pack that ships it.
+   A skill that legitimately names none (a method leaf about citing a claim,
+   weighing sources or notifying a regulator, whose acts are the harness's or
+   whose readers are in other leaves) is listed in `pack.json`'s `method_only`:
+
+       "method_only": [
+         { "path": "skills/reporting/for-regulators.md", "why": "a reporting method leaf; it names no tool or program" }
+       ]
+
+   The field is optional and written by hand; `path` is a skill of the pack as
+   `skills/<id>.md`, and `why` says why the skill names nothing. It is the
+   counterpart of `unreferenced_ok`: a skill that names a tool or program of its
+   own pack after all is a finding (the exemption is stale, take it out). A
+   skill that names only a tool of a pack it depends on is still a method leaf of
+   its own pack, and is listed. Do not add a reference to a tool the skill does
+   not use to quiet the check; list the skill. Sealing keeps the field, and
+   changing it raises the pack's version like any other change.
+5. **The pack that owns a tool ships it.** Another pack names the tool and
    lists the owner in `depends`; it does not carry a copy (see "Two rules the
    set holds to").
+
+The suite fails on every rule above, the "reached" ones (3 and 4) included.
+`PACK_LINKS_STRICT=0 bash tests/pack-links.test.sh` prints those two as reports and
+does not fail on them, for trying something locally; CI runs the default.
+
+### Skill size
+
+A skill is read whole, in the middle of a case, and stays in the agent's context
+until it is released or compacted away; a pack whose skills grow makes every
+seat that loads it slower and dearer. So the size is held, in one program,
+`scripts/skill-budgets.py`, which `pack.sh seal` runs before it writes anything
+and `tests/skill-budgets.test.sh` runs over every pack. A token is estimated as
+bytes over 4.245 of the whole file, front matter included (the program has no
+tokenizer; the estimate is the one the harness's index budget uses).
+
+| Budget | Limit | What happens past it |
+|---|---|---|
+| a leaf (a skill) | 800 tokens | a warning from 800; **seal refuses** above 1,000 |
+| a router (`router: true`) | 400 tokens | a finding |
+| a skill file | 300 lines | a finding |
+| an index entry (its line in `skills/INDEX.md`) | 40 tokens | a finding: shorten `title` or `when` |
+| `needs` depth | 2 | a finding (a loop in `needs` is one too) |
+| the needs chain | 1,900 tokens | a finding; a warning within 150 of it |
+
+At the seal only a skill over 1,000 tokens (or a router over 400) is refused;
+every other finding and warning is printed as a `budget:` line, and it is
+`tests/skill-budgets.test.sh` that fails on a finding.
+
+The chain of a skill is the skill and every skill its `needs` reach, counted once
+each, across the pack's `depends` (a `needs` id is looked up in the pack, then in
+the packs it depends on; `pack:id` names one). It is 100 under the 2,000 the
+pack tests allowed, so that a base skill can grow a little. A chain within 150
+tokens of 1,900 is a warning that lists the skills it is made of and says by how
+much growing any of them pushes it over; and for a skill of another pack in the
+chain (a base skill) it says which dependants that growth would push over, so
+whoever edits the base pack sees them when sealing it. Packs have broken that
+way before: a base skill grew, and the chain tests of other packs failed.
+
+How to write to the budget: one decision-rule leaf per artefact question; the
+reference material (field tables, version notes, long examples) goes to a
+second-level leaf the first one points to ("only if X"), not into it. A leaf
+starts with "Use when ... Not for ..." (the index line is derived from it), then
+the decision rules, then what it shows, what it does not show, what to record
+and what is sensitive, in the shortest form that keeps the content. The content
+survives; it is spread over leaves, not cut. A router is the one note of a pack
+that says which other note answers which question; it is what a run shows in the
+prompt when the pack's index is over budget.
+
+**The base pack's index is near its budget.** `computer-forensics-base` has 986
+of the 1,000 tokens a pack's index entries may have (the harness's count: each
+entry line of `skills/INDEX.md` is its bytes over 4.245, rounded up; the file's
+header lines are not counted), and `tests/pack-base-skills.test.ts` fails past
+1,000. Past it the harness shows the base pack by its router alone in every
+run, the base pack alone included. A new base entry (a dozen tokens at least)
+therefore needs a shorter `title` or `when:` elsewhere in the same change.
+
+**Findings that already exist.** Some shipped skills are over a budget. They are
+listed in `tests/skill-budgets.golden`, one line per finding: `pack kind skill
+ceiling`, the kinds `leaf`, `router`, `lines`, `entry`, `depth` and `chain`. The
+ceiling is the most that value may be, so a listed skill cannot get worse: past
+its ceiling it fails, and a skill that is brought within the budget no longer
+happens, so its line has to go (the check fails a stale line). The list only
+shrinks. `python3 scripts/skill-budgets.py golden` prints it for the packs as
+they are. `pack.sh seal` reads it by pack id and refuses a listed leaf only once it has
+grown past its ceiling; a pack of another id has no listed findings, and a leaf
+over 1,000 tokens in it is refused. New and changed skills
+are written to the budget; a finding is not added to the list to get a change in.

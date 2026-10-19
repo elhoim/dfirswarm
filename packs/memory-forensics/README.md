@@ -7,18 +7,19 @@ Depends on the Computer Forensics Base Pack.
 
 ## What it carries
 
-**Nine skills.**
+**Twenty skills**, nine decision leaves, ten second-level leaves they point to
+("only if X") and the router `memory/router` (at most 400 tokens; the prompt shows this one line for the pack when the run's index is over its budget, and it names every leaf); every leaf is at most 800 tokens.
 
 | Family | Skills |
 | --- | --- |
-| Triage | `triage/what-you-have`, `triage/no-framework` |
-| Frameworks | `triage/volatility` |
-| Processes | `processes/injection` |
-| Network | `network/state` |
-| Credentials | `credentials/material` |
+| Triage | `triage/what-you-have` (second level: `triage/container-details`), `triage/no-framework` (`triage/carve-signatures`, `triage/paging-files`) |
+| Frameworks | `triage/volatility` (`triage/volatility-symbols`, `triage/volatility-plugins`, `triage/volatility-catalogue`) |
+| Processes | `processes/injection` (`processes/preserve-regions`) |
+| Network | `network/state` (`network/timestamps-dns`) |
+| Credentials | `credentials/material` (`credentials/key-schedules`) |
 | Strings | `strings/discipline` |
 | Pattern matching | `patterns/yara` |
-| Acquisition | `acquire/images` |
+| Acquisition | `acquire/images` (`acquire/avml-and-preserve`) |
 
 **Three tools.** `mem_profile` says what a memory file's header shows before
 anything is run against it (a crash dump's physical-memory runs with their file

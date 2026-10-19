@@ -1,7 +1,7 @@
 ---
 id: execution/userassist
-title: UserAssist, BAM and DAM activity records
-when: You need program activity tied to a profile or SID from NTUSER.DAT or the SYSTEM hive.
+title: UserAssist, BAM, DAM
+when: Program activity by profile.
 needs: []
 tools: [regkv]
 requires_host: []

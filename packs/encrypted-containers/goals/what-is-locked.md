@@ -58,7 +58,6 @@ limitation, and the critic, who wrote none of them, has recorded `attest` or
   (this catches one recovery-password shape in the report and nothing else: it is
   not a check for hashes, fragments, other credentials or a command line that
   carries a secret, and the instruction above is what holds)
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 3`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

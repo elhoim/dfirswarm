@@ -1,13 +1,13 @@
 ---
 id: strings/discipline
-title: A string in memory is an observation, with its provenance
+title: A string in memory is an observation
 when: Any claim built on text found in a memory image.
-needs: [triage/no-framework, credentials/material]
+needs: []
 tools: [ioc_scan, chunk_needles]
 requires_host: [strings]
 ---
 
-This is the most common way a memory finding fails review.
+Use when a claim rests on text found in memory. Not for process lists (`processes/injection`).
 
 The same bytes arrive in memory from at least five places that have nothing to do
 with a process doing anything:

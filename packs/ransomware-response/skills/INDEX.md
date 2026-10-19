@@ -2,10 +2,23 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
-- `encryptor/destroyed-backups` Establishing recovery impairment and surviving recovery paths: Backups, snapshots, catalogues or recovery services may have been altered.
-- `encryptor/traces` Reconstructing encryptor execution, deployment and affected files: Establishing what executed, under which security context and on which assets.
-- `exfil/before-encryption` Establishing whether data left, by which route and within what limits: Ransomware or data extortion raises a question about unauthorised disclosure.
+Router: `ransomware/router`
+
+- `encryptor/backup-infrastructure` Backup servers, immutable storage and hypervisors: A backup server, immutable store, hypervisor or recovery setting was affected.
+- `encryptor/destroyed-backups` Recovery impairment and surviving recovery paths: Backups, snapshots, catalogues or recovery services may have been altered.
+- `encryptor/samples-and-notes` Recovered samples, tails and note placement: You hold a recovered binary or script, repeated tails, or note placement.
+- `encryptor/traces` Encryptor execution, deployment and affected files: Establishing what executed, under which security context and on which assets.
+- `encryptor/windows-evidence` NTFS records and Windows events: The chain rests on MFT or USN records, or on service, task or log-clear events.
+- `exfil/before-encryption` Whether data left, by which route and within what limits: Ransomware or data extortion raises a question about unauthorised disclosure.
+- `exfil/measure-and-claims` What a transfer measure means, and adversary claims: You quote a byte count, tie content to a transfer, or weigh a leak-site listing.
 - `identify/family` Identifying a ransomware family without overstating attribution: Artefacts may support a family classification or a public recovery option.
+- `identify/samples-and-decryptors` Samples, behaviour and public decryptors: A sample survives, behaviour is attributed, or public decryptors are checked.
+- `ransomware/router` Ransomware notes by question: Pick one when none is listed, or you cannot choose.
+- `recovery/routes-and-decryptors` Partial damage, deleted originals, decryptors: Files are partly encrypted, originals may be deleted, or a decryptor is to be tested.
 - `recovery/what-is-possible` Assessing and validating recovery without destroying evidence: The organisation needs a defensible recovery position and restoration plan.
+- `reporting/conclusions-and-controls` Conclusions by phase, and control findings: Writing conclusions by phase, a negative exfiltration finding or insurance findings.
 - `reporting/for-regulators` Evidence-led reporting and notification assessment: Preparing incident findings for legal, regulatory, insurance or executive review.
-- `scope/first-hour` First-hour scope, containment and evidence preservation: Suspected ransomware, destructive encryption or data extortion is reported.
+- `reporting/notification-register` Notification clocks and the register of duties: Deciding which notification duties may apply, and what starts each clock.
+- `scope/first-hour` First-hour scope, containment and preservation: Suspected ransomware, destructive encryption or data extortion has just been reported.
+- `scope/phase-timeline` Keeping a phase timeline of the incident: You order the incident's phases, or must say when it began and ended.
+- `scope/triage-tools` What the survey and the note scan show: You run encrypted_survey or ransom_note_scan over an extracted tree and will quote a count.

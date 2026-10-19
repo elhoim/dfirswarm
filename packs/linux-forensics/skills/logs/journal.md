@@ -1,42 +1,22 @@
 ---
 id: logs/journal
-title: The systemd journal
-when: The host runs systemd and you need what the text logs do not carry.
-needs: [logs/auth]
+title: Journal coverage and record identity
+when: Examining supplied systemd journals without losing fields or boot coverage.
+needs: []
 tools: [journal_export]
 requires_host: [journalctl]
 ---
 
-    /var/log/journal/<machine-id>/*.journal    persistent, survives a reboot
-    /run/log/journal/...                       volatile, gone at shutdown
+Use when you read a systemd journal from the evidence. Not for clock order and `--verify` (`logs/journal-clocks-verify`, only if you order entries or judge integrity) or for auth lines (`logs/auth`).
 
-If `/var/log/journal` does not exist, the journal was never persistent on this
-machine and everything before the last boot is gone. That is a configuration
-fact worth one line in the report, not a gap in your work.
+    /var/log/journal/<machine-id>/*.journal    persistent storage
+    /run/log/journal/...                       volatile storage; in the evidence only if /run was captured
+    rotated and archived files (*.journal, *.journal~), a namespace's directories, a remote copy
 
-`journal_export` shells out to `journalctl --file`/`--directory` and returns
-every record as JSON. Keep the evidence mount read-only and retain all stderr;
-never let a repair or vacuum command near the evidence. Use `journalctl
---verify` separately and preserve its complete result.
+Inventory what was supplied: each location, each file, the machine id, the namespaces and any forwarded copy; then read the journald configuration and its drop-ins (storage, retention, forwarding) from the evidence. A missing `/var/log/journal` shows only that this path was not found in what was examined. It does not show the historical storage policy, and it does not exclude journals that were deleted, mounted elsewhere, forwarded or not collected. State the boots and time range actually examined (`boots` in the answer).
 
-What the journal has that `/var/log/auth.log` does not:
+`journal_export` runs `journalctl` with `--file` or `--directory` at the evidence path, and never at this machine's journal: quote the path it read. Run it as a job with `secret_output: true` and `write_text: true` to keep the native export (`-o json --all`, every field, byte for byte) in `$OUT/journal-native.jsonl`; that file is the lossless result. The answer's projection carries, for each entry: `cursor`, `realtime_us` and `monotonic_us` raw with the decoded UTC `time`, `boot_id`, `machine_id`, the source clocks where present, the identity fields (`pid`, `uid`, `comm`, `exe`, `unit`, `audit_session`, `syslog_identifier`, `transport`) and `native_line`; a field journalctl wrote as bytes or as null is named, not turned into text. Pass `since` and `until` with their zone (`UTC` suffix or `@epoch`): a bare time is read in this machine's zone and is refused. A journal directory that holds links is refused too, because journalctl may follow them out of the evidence: pass each real file. An entry over 32 MiB is counted and located (`parse_errors.oversized_lines`) and is in the native file.
 
-- **`_PID`, `_COMM`, `_EXE`, `_CMDLINE`** on most entries, so a message can be
-  tied to the binary that produced it rather than to a program name in the text.
-- **`_UID`, `_AUDIT_SESSION`, `_SYSTEMD_UNIT`**, which is how you tie a line to
-  a service and a login session.
-- **`_BOOT_ID`**, which groups everything from one boot. Order by boot first and
-  by time second, and a clock change stops mattering.
-- **Entries from units that never wrote to syslog at all.**
+Shows: the entries journald wrote in the files supplied. Does not show: entries that were never written, were rotated away or were not collected; that the `MESSAGE` is true; who ran a command whose `_CMDLINE` it carries. Record: locations, machine id, namespaces, `boots`, the path `journal_export` read, `cursor` and `native_line` of each cited entry.
 
-Two cautions a reviewer will raise:
-
-1. **The journal is not tamper-evident in the way people assume.** It has
-   sequence numbers and per-file hashes, and Forward Secure Sealing exists, but
-   it is off by default. A root user can delete a journal file. Missing files in
-   an otherwise continuous sequence are the thing to look for, and
-   `journalctl --verify` reports what it can.
-2. **`journalctl` on your own machine reads your own journal by default.** Pass
-   `--file` or `--directory` at the evidence, always, and quote the path you
-   read in the report. This is the Linux version of the timezone mistake, and it
-   is just as easy to make.
+Sensitive output: journal messages and `_CMDLINE` can hold passwords and tokens. The answer carries their length only; `write_text: true` and `preview_text: true`, each only in a job run with `secret_output: true`, give the text. Cite the cursor and `native_line`, never the text or a hash of it.

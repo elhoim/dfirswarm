@@ -1,45 +1,24 @@
 ---
 id: logs/auth
-title: The authentication logs, and what each line actually proves
-when: Someone logged in, tried to, or raised their privileges.
-needs: [triage/system-profile]
+title: Authentication and privilege-use records
+when: Reading retained auth logs, their timestamp assumptions and attribution limits.
+needs: []
 tools: [auth_log, utmp_parse]
 requires_host: []
 ---
 
-    Debian and Ubuntu   /var/log/auth.log, auth.log.1, auth.log.*.gz
-    Red Hat family      /var/log/secure
-    Either              the systemd journal, which may hold the same lines
+Use when you read `auth.log` or `secure`. Not for what each line type shows (`logs/auth-lines`, only if you interpret a line), for year and rollover rules (`logs/auth-time`, only if you convert stamps) or for the journal (`logs/journal`).
 
-`auth_log` parses both, follows the rotated and gzipped files in order, and
-returns structured records instead of text. Read the whole set: rotation is
-where an attacker's session usually falls, because the current file only covers
-the last few days.
+    Debian family       /var/log/auth.log, auth.log.1, auth.log.*.gz
+    Red Hat family      /var/log/secure and its rotations (often with a date suffix)
+    Either              the systemd journal, which may hold the same lines (`logs/journal`)
 
-The lines that carry weight:
+These are candidate destinations, not guaranteed files. Read the rsyslog, journald and logrotate configuration, then inventory every retained rotation and any remote copy; a missing rotation is a gap to name. `auth_log` reads plain and gzip text, orders the files by their rotation suffix and says which basis ordered each (`order_basis`, `cross_file_order`): a number or a date in the name orders a file, a name with neither is ordered by name only, and a mix of schemes is reported as an order that is not established. Every record carries its file, physical line and byte offset.
 
-    Accepted password|publickey for <user> from <ip> port <p> ssh2
-    Failed password for [invalid user] <user> from <ip>
-    session opened for user <u> by (uid=N)      pam_unix, the actual login
-    sudo: <user> : TTY=... ; PWD=... ; USER=root ; COMMAND=<cmd>
-    su: (to root) <user> on pts/N
-    useradd|usermod|groupadd                     account changes
-    sshd: Server listening / Received signal     the daemon restarting
+**Time.** A traditional stamp has no year and no zone: `auth_log` states the year and zone basis per file (`year_basis`, `time_zone`; `triage/system-profile` and `triage/clocks-boots` fix the zone), and its `status` is about the parse, not about coverage. Before you date, order or count lines, read `logs/auth-time` (only if you convert or compare stamps).
 
-**`Accepted publickey` names the key, not the person.** The fingerprint in the
-line maps to an entry in some `~/.ssh/authorized_keys`. Find which, and say
-whose file it was in: that is the difference between "the account was used" and
-"this key was used, and it was installed on this date".
+**Corroboration.** Compare the sessions that matter with wtmp and btmp (`utmp_parse`, classic format only) and with the journal. Differences among them can come from forwarding, filtering, retention, collection or parser differences as well as from alteration, and these text files are editable by root: establish what each source would have recorded before alleging an alteration, and report a disagreement as a question with the alternatives, not as a finding.
 
-**A failed-password burst followed by one acceptance is not always a successful
-brute force.** It is also what a user with a stale saved password looks like.
-Check the source address against the same account's history before you call it.
+Shows: what the logging services wrote, in file and line order. Does not show: a person, or that an absent line did not happen (`logs/auth-lines` per line type). Record: files and rotations read, `order_basis`, `year_basis`, `status`, `unparsed`, `read_errors`.
 
-**sudo lines are the best command-line evidence on a Linux box.** They carry the
-working directory and the whole command. An attacker who knows that uses `sudo
--s` once and then leaves no further trace, so a single `sudo su -` or `sudo -i`
-followed by silence is itself the finding.
-
-Everything above is text a root user can edit. Cross-check the important
-sessions against `wtmp`/`btmp` with `utmp_parse` and against the journal with
-`logs/journal`: three sources that disagree tell you the logs were touched.
+Sensitive output: a sudo line is a command line. `auth_log` answers with fields and locators and no `raw`, `command` or typed name; `write_text: true` writes them to a private file under `$OUT`, and `preview_text: true` puts them in the answer, each only in a job run with `secret_output: true`. A `contains` filter outside a job matches only what the answer shows. Cite the file and line, never the command, a typed name or a hash of either.

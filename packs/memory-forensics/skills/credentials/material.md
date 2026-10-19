@@ -1,14 +1,16 @@
 ---
 id: credentials/material
-title: Credential material in memory, and how to handle and report it
-when: An examination may expose credentials, keys, tokens or cookies in memory, or you must say whether credentials were exposed or taken.
+title: Credential material in memory, and reporting it
+when: Memory may expose credentials, keys or tokens; say whether any were exposed or taken.
 needs: []
 tools: [mem_fs, ioc_scan]
 requires_host: [memprocfs, vol, aeskeyfind]
 ---
 
-Memory may hold credential-related material. Whether it does, in what form, and
-whether anything could reach it depends on the capture, the operating system and
+Use when memory may expose credentials, or you say whether any were taken. Not for AES schedules.
+
+Whether memory holds credential-related material, in what form, and whether
+anything could reach it depends on the capture, the operating system and
 build, the process and its protection settings. Read what the image shows; do not
 assume the rest.
 
@@ -52,26 +54,7 @@ another.
 Say which stage remains unestablished. What a handle or a dumped region does and
 does not show is in `processes/injection`.
 
-**Key schedules.** `aeskeyfind` tests every position of an image against the
-AES-128 and AES-256 expanded-key layout and tolerates a few decayed bits. Run it as
-a `secret_output` job (`aeskeyfind -q -v IMAGE`; `-v` adds the offset in
-hexadecimal, and its help names the rest). Its stdout carries the keys: take the
-offsets and the count, not the keys; never put one on a command line or in a file
-under `work/`. A hit shows that bytes laid out like a schedule are at that offset.
-It does not show which application or artefact used it, that it is in use (a
-library may keep a schedule it no longer needs), or that it opens anything.
-Establish it only by opening something the evidence holds, with the authority the
-case gives, through a reader that takes the key from a sealed file. A negative
-covers the two standard layouts, the bytes read and the threshold used; it does
-not say no key was in memory, and AES-192, other ciphers and other layouts are not
-examined. The tool library (`--tools-from tool-library`) has two more layouts,
-`aes_schedule_scan` (the bytes of each word reversed) and `aes_inverse_scan` (as a
-decryption routine stores it). They write a key to a private file under their
-`out_dir`, and their answer still carries a digest of it: run them as
-`secret_output` jobs and copy neither the key nor that digest into a post, the
-ledger or the report. `aeskeyfind` is in the memory and full images; a host run has
-it only if the operator installed it, and without it this check was not run, and
-the report says so.
+Only for AES key schedules: `credentials/key-schedules`.
 
 **Does not show.** That a credential was used, by whom, or against what; that a
 located string is a live secret; that the absence of a hit means no secret was

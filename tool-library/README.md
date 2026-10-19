@@ -24,9 +24,13 @@ scripts/swarm.sh start … --tools-from tool-library
 and put a finished run's own tools back with
 `scripts/swarm.sh tools <id> --save tool-library`.
 
-**Copies of the computer-forensics-base pack's tools.** `file_carver`, `catalog_search`,
-`sig_carve`, `ioc_scan` and `sqlite_query` here are the pack's own, byte for byte (a test
-holds them equal), and so they answer as the pack's do. Run as a job, a tool that writes
+**Copies of the packs' tools.** Every tool here that a pack also holds
+(`packs/*/tools/<name>`, among them `file_carver`, `catalog_search`,
+`sig_carve`, `ioc_scan`, `chunk_needles`, `sqlite_query`, `check_inputs` and `icat_extract` of the
+computer-forensics-base pack) is the pack's own, byte for byte, `run.py` and `manifest.json` (one
+test, `tests/tool-library-twins.test.ts`, holds them equal; a difference would have to be declared
+there with its reason, and none is), and so it answers as the pack's does. A pack change to such a
+tool updates the copy in the same PR. Run as a job, a tool that writes
 (`file_carver`, and the scanners' result files) writes only under `$OUT` and refuses
 a path outside it: give `{OUT}/<name>`, or a path under your own `work/<you>/`, which the
 harness maps there. `ioc_scan` and the other scanners return locators, and write the bytes
@@ -113,22 +117,22 @@ or `tools/`.
 
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
-| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
-| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
+| `aes_inverse_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
+| `aes_schedule_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |
-| `amcache_apps` | python3 | `maintainer` | 2 | Application and file inventory from Amcache.hve (presence, not execution): path, hash, publisher, version and… |
+| `amcache_apps` | python3 | `maintainer` | 6 | Application and file inventory from Amcache.hve (presence, not execution): path, hash, publisher, version and… |
 | `browser_history` | python3 | `maintainer` | 3 | Query a browser history database from a copy of it and its -wal, -shm and -journal sidecars, made under the j… |
 | `catalog_grep` | python3 | `s864a02` | 1 | Grep catalog/AF-Case2.E01/p0/filelist.txt for a pattern; return matching lines. |
 | `catalog_search` | python3 | `sd1d100` | 10 | Search the evidence catalogue with a regex: a disk's filelist, timeline, bodyfile, fsstat or partitions, or a… |
-| `check_inputs` | python3 | `sfcc304` | 2 | Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs. |
-| `chunk_needles` | python3 | `sd1d102` | 3 | Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snip… |
+| `check_inputs` | python3 | `sfcc304` | 4 | Diff inputs/ against inputs.json (size and sha256). The manifest is validated whole first: a malformed entry,… |
+| `chunk_needles` | python3 | `sd1d102` | 7 | Scan a local file, or one inode streamed from an image through icat, for ASCII and UTF-16LE needles; return p… |
 | `contact_sheet` | python3 | `s10d40e` | 1 | Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place… |
 | `csearch` | python3 | `sf6df06` | 2 | Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) f… |
 | `destlist_v4` | python3 | `sd29252` | 1 | Read the DestList stream of a Windows jump list, version 4 (the 130-byte entry layout): for each entry its pl… |
 | `encoded_literal_scan` | python3 | `s3472f0` | 1 | Find a literal you know the start and end of (marker ... closer) hidden in base64, base32, hex, rot13 or as U… |
-| `esedb_query` | python3 | `maintainer` | 6 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as TABLES through esedbexport: list the tables… |
+| `esedb_query` | python3 | `maintainer` | 10 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as TABLES through esedbexport: list the tables… |
 | `evtx_filter` | python3 | `sd1d101` | 1 | Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix |
-| `evtx_query` | python3 | `sbe1801` | 3 | Query an EVTX event log and return filtered events with timestamp, event id, channel, computer, provider, Eve… |
+| `evtx_query` | python3 | `sbe1801` | 7 | Query an EVTX event log and return filtered events with timestamp, event id, channel, computer, provider, Eve… |
 | `extract_stream` | python3 | `sfcc303` | 5 | Extract one data stream of an NTFS volume by inode address to a file with icat (the Sleuth Kit). The stream i… |
 | `file_carver` | python3 | `s183904` | 3 | Cut ONE candidate file out of a raw dump at a known offset: from the offset to the end the format's own struc… |
 | `fls_root` | python3 | `s9d8306` | 2 | Run fls on an EXT4 volume (default offset 503808, image inputs/Webserver.E01). Reads inode/recursive/image/of… |
@@ -137,9 +141,9 @@ or `tools/`.
 | `grep_filelist` | python3 | `s864a08` | 4 | Search the catalog filelist for a pattern (case-insensitive). Returns the first 100 matching lines as a JSON … |
 | `guest_syslog` | python3 | `s5d1001` | 1 | Extract unique syslog-like lines from a binary (Kali/rsyslog) matching a month-day prefix; drop kernel lines. |
 | `hdfs_node_icat` | python3 | `s9a5f03` | 2 | Extract an inode from a cluster node's image with icat and hash what it wrote. node picks one of the HDFS cas… |
-| `icat_extract` | python3 | `s864a08` | 3 | Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha2… |
+| `icat_extract` | python3 | `s864a08` | 8 | Extract one Sleuth Kit address (an inode, or inode-type-id for an NTFS stream such as 168-128-4) from a disk … |
 | `icat_root` | python3 | `s9d8306` | 5 | Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-sector offset are t… |
-| `ioc_scan` | python3 | `s183900` | 4 | Stream a large binary for ASCII and UTF-16LE needles and return locators: for every occurrence an id, its sta… |
+| `ioc_scan` | python3 | `s183900` | 5 | Stream a large binary for ASCII and UTF-16LE needles and return locators: for every occurrence an id, its sta… |
 | `ledger_timeline` | python3 | `se5fdcd` | 3 | Write a run's dated ledger entries as one timeline in time order (Markdown table, CSV or JSON Lines). Leaves … |
 | `lnk_parse` | python3 | `s183902` | 4 | Parse a Windows shell link (.lnk), or every link structure found in a slice of a dump, by the MS-SHLLINK layo… |
 | `mam_pf_parse` | python3 | `s2f6600` | 1 | Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero l… |
@@ -151,10 +155,10 @@ or `tools/`.
 | `recyclebin_i` | python3 | `maintainer` | 3 | Parse $Recycle.Bin $I metadata (version 1 and 2 records, unsigned fields): the original path, original size a… |
 | `reg_hive_query` | python3 | `sbe1805` | 1 | Query a Windows registry hive file (regipy) and return a key's values and subkey names as JSON. |
 | `regkeys` | python3 | `sf4b205` | 4 | Dump a registry key's values and subkeys from a hive with regipy. Text values are decoded, REG_BINARY comes b… |
-| `regkv` | python3 | `s9f2005` | 3 | Read a Windows registry hive with regipy: a key's values (each with its registry type and length, read whole:… |
-| `sig_carve` | python3 | `s183906` | 2 | A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, an… |
+| `regkv` | python3 | `s9f2005` | 7 | Read a Windows registry hive with regipy: a key's values (each with its registry type and length, read whole:… |
+| `sig_carve` | python3 | `s183906` | 3 | A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, an… |
 | `sigscan_e01` | python3 | `s5d1001` | 3 | Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offs… |
-| `sqlite_query` | python3 | `s881002` | 4 | Run a read-only SQL query over a SQLite database file through Python's sqlite3 module and an authorizer that … |
+| `sqlite_query` | python3 | `s881002` | 7 | Run a read-only SQL query over a SQLite database file through Python's sqlite3 module and an authorizer that … |
 | `usn_journal` | python3 | `maintainer` | 4 | Parse an NTFS change journal ($UsnJrnl:$J) into records from v2, v3 and v4 entries: name, USN, timestamp (ISO… |
 | `utf16_urls` | python3 | `s5d1003` | 3 | String candidates for URLs, file: and Visited: entries and 192.168.x.x addresses in a file; not a browser par… |
 | `volrun` | python3 | `s69d306` | 2 | Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr. |
@@ -221,8 +225,12 @@ run (the first named, where a tool is made from several).
   package leaves in the sandbox; a key file anywhere else travels with the
   package unless the hit is a sensitive ledger entry citing it, or the scan
   ran as a `secret_output` job) and the answer gives the offset, size,
-  layout and the key's sha256 for the ledger. A hit is a lead, and the tools
-  say so.
+  layout and the key file's name: record the finding's offset and key file
+  name, never a digest of the key, which neither tool prints or writes. A key
+  that is found again, in a later window or call on the same `out_dir`, names
+  the file it already has; only a plain file holding exactly the key is reused
+  (and made private), and a directory, a symlink or a file of another key at a
+  name is passed over. A hit is a lead, and the tools say so.
 - `encoded_literal_scan` — three Python scanners made in run `s3472f0`
   (`encoded_flag_scan`, `base32_flag_literals`, seat `s3472f003`, and
   `utf32_flag_literals`, seat `s3472f004`), each with the opening of the

@@ -10,8 +10,14 @@ know it is the encrypted one.
 
 ## What it carries
 
-**Five skills**: `identify/headers`, `volumes/bitlocker`,
-`volumes/luks-filevault`, `archives/protected`, `keys/where-they-hide`.
+**Twelve skills**: five decision leaves and six second-level leaves they point to
+("only if X"); every leaf is at most 800 tokens. `identify/headers`
+(`identify/by-format`), `volumes/bitlocker` (`volumes/bitlocker-opening`),
+`volumes/luks-filevault` (`volumes/filevault-apfs`), `archives/protected`
+(`archives/formats`), `keys/where-they-hide` (`keys/recovery-key-scan`,
+`keys/other-sources`). The twelfth is the pack's router, `encrypted/router` (at
+most 400 tokens): it names the other eleven by the question each answers, holds no
+rule, and is the one line a run shows for the pack when its skills index is over budget.
 
 **Three tools.**
 `crypto_id` names the scheme from the first bytes of a volume or file and reads

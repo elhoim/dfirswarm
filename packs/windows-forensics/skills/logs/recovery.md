@@ -1,7 +1,7 @@
 ---
 id: logs/recovery
-title: Recovering records of a cleared or damaged log
-when: A log is cleared, empty, damaged or incomplete and other acquired sources may hold its records.
+title: Recovering cleared logs
+when: Other sources may hold the records.
 needs: []
 tools: [evtx_carve, evtx_query, sig_carve, icat_extract]
 requires_host: []
