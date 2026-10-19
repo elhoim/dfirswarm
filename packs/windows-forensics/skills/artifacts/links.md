@@ -1,7 +1,7 @@
 ---
 id: artifacts/links
-title: Reading a shell link (.lnk)
-when: You read a .lnk file, or carve link structures from a dump, for a target, volume or share.
+title: Shell links
+when: Read a .lnk, or carve link structures.
 needs: [artifacts/shell]
 tools: [lnk_parse]
 requires_host: [lnkinfo]

@@ -1,7 +1,7 @@
 ---
 id: filesystem/indx
-title: Index slack and names a directory no longer lists
-when: You need file names a directory index still holds after the file left it.
+title: Index slack
+when: Names a directory index still holds.
 needs: [filesystem/mft]
 tools: [indx_carve, extract_stream, usn_journal]
 requires_host: [istat]

@@ -1,7 +1,7 @@
 ---
 id: registry/devices-dates
-title: Device install, arrival and removal dates
-when: The question turns on when a removable device was first, last or recently attached.
+title: Device dates
+when: First, last or recent attachment.
 needs: [registry/devices]
 tools: [regkv, timestamp_decode, icat_extract]
 requires_host: []

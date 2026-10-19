@@ -1,7 +1,7 @@
 ---
 id: browser/webcache
-title: WebCache and legacy index.dat
-when: The evidence holds WebCacheV01.dat or Internet Explorer index.dat files.
+title: WebCache, index.dat
+when: WebCacheV01.dat or index.dat files.
 needs: [browser/artefacts]
 tools: [esedb_query]
 requires_host: [esedbexport, msiecfexport]

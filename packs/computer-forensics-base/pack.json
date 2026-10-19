@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.10.1",
+  "version": "1.11.2",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -16,7 +16,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "1df0d6665bd036fc44a288726c699f4955ce7e17e3248a88a58dc38819203250",
-      "README.md": "883436ac4bac7d356bb3ff7efb9855b0b12ecaaf753de94663545ebd1c667bc8",
+      "README.md": "68ed3b86bd21ead801191952df01cb415607dd0a07f44204ce536856d5bbc534",
       "tools/image_layout/manifest.json": "a14059c9b70056357766492b45e54b6ecb60bca0252fd00a2f4463df948ee589",
       "tools/image_layout/run.py": "f697a814e00af50644da5d071f4f8f749249631a6e1077d4e20272aaedf44482",
       "tools/file_carver/manifest.json": "8a694bf0247bb8dbddcaaee988dc3c90ccbeae387133a982a010d1f27c193248",
@@ -35,12 +35,12 @@
       "tools/icat_extract/run.py": "f149d427ef88eb974ae945e7b814bacf08bdd0cd7abc224d640262756bf778bd",
       "tools/feature_scan/manifest.json": "b82963b125972c3334a6f5240295177ec86b3eaae7cc48a58a017ac5cd20443c",
       "tools/feature_scan/run.py": "0b3f241f02d9c767ac268d73ec9784b8fe8614620db63b079a39704c81c096fa",
-      "tools/sqlite_query/manifest.json": "33599f644cb0fb1080a0c1b52f31c95edab621f23ef0a2e2144f21c01795fcba",
-      "tools/sqlite_query/run.py": "a6820003273735363aca5fd3666894a1c537c33a5d9ad69690b9981683fbeeb8",
+      "tools/sqlite_query/manifest.json": "893d9a8fd60db4f6dc37406681e88aa2d6f98067a25a61b3f8e280a213c816b9",
+      "tools/sqlite_query/run.py": "2ec004cb03f07c227563d3995b9d9002c64f6470c83d27d675628f35e700ab84",
       "tools/chunk_needles/manifest.json": "897d93bfc6f975463a1872fed677316721eb2e68d003daaa4cc6497162fc3b99",
       "tools/chunk_needles/run.py": "92000b3bdb9eb64e1ce564bc83f978022add08fb2b7ae104c81e685f6d6f9d88",
-      "tools/archive_extract/manifest.json": "17d112f65a349197cf71d47c0f14c27b494365c29131fdec14c802a3db1d0a23",
-      "tools/archive_extract/run.py": "cab7ea5281288f4350c215185b05a1be3fcd647cfe47a15300f5dbc1681fe2d9",
+      "tools/archive_extract/manifest.json": "851c772314ce70a6a2b492d096e3fdea0242bb727bf20a9b5a419817fef34a67",
+      "tools/archive_extract/run.py": "fac10ef0e5b2ef6468945dd0ee130a1ea3570620675218c145601170164ec593",
       "tools/ioc_scan/manifest.json": "854382b0fa2e4eeec6702bed5b56e564001872e6e80715c6e2c3a43182bc47e6",
       "tools/ioc_scan/run.py": "d29a37ce8bc90a60dd84f5dc73d2d2dbbf4fa81cfd8126ca825df0399d729117",
       "tools/sig_carve/manifest.json": "60478c46b91538bd6102ef15d25b9f34d1a5aca37c78db9f87513b3fbb06bb7b",
@@ -51,7 +51,7 @@
       "tools/timeline_super/run.py": "4e14d4c705286828295c399befae2c92b3009c754051a456a50ea39b41b3895f",
       "tests/pack.test.sh": "4fd2b94956fed060021eba9d9fc9b812516dc7c6413cee639477aa36642cd053",
       "tests/run_tests.py": "91e0d82b456267b0f27e0bc7e4efbb7abf22f8be76879275166d66a8eb662d02",
-      "tests/support.py": "25dd0413871d8a821c15bab882d250a7e1dcd13afbb4967613d8e99347a56c4a",
+      "tests/support.py": "ed8a4670ddbf90e4562e57319ea31501be0d0920571d7bdfdfe7e9392b37def8",
       "tests/test_archive_extract.py": "d2c5ebb034d2421af742e77121d53c4db236652575e32aff42f592b9dc9ecf83",
       "tests/test_archive_members.py": "530203982848870e669124c830ae003270156b25149112e6d203dd3a6dbe48bc",
       "tests/test_catalog_search.py": "d5f21599576a6f26cbd2cebeb4b5a7817b2310f352c0981c0757c0bdee2990d6",
@@ -66,7 +66,7 @@
       "tests/test_manifests.py": "3d1b4dbdacdc8a11553320ca621c6f9b859570f03f2292f49a368c326a04a50f",
       "tests/test_scan_core.py": "a7d8980b2d87a2da0307ba231b4d4d57659d483c40d87fe66f000eb68bdeec0d",
       "tests/test_sig_carve.py": "5d559f6c55dd61edacf50121fa6b0d659c79daff899272caf180fb272ddbad19",
-      "tests/test_sqlite_query.py": "238749d6f41f188e498065974271c63a8a78552c013750ec186dbe688ca297e5",
+      "tests/test_sqlite_query.py": "7ec02213f4f28f2b428fc2177599dcfb556500948e0f0cb77454869beae2ff27",
       "tests/test_sqlite_snapshot.py": "ea6485a055fdc4b54fa501975f40ea37f832600564de7a0125d01c564e05abf2",
       "tests/test_timeline_super.py": "e20794b8cc2fe84b455795ca0453ce8d599877b612e424fc9c2ffa170ab8b299",
       "tests/test_timestamp_decode.py": "c5ea731a916f17727c0a282631450d73cacd2e26ec3472461318b21c1e08de45",
@@ -87,7 +87,7 @@
       "skills/evidence/catalog.md": "2c3bb4e6cbdb90f52dc4e29334448ce7518b0fe236f660385b6182e2c9431399",
       "skills/evidence/collections.md": "81b789869278ecd15b3b585ac580984e86b4a53d56631f44e83568a5baf5280e",
       "skills/evidence/coverage.md": "b2547de852d7943a4271c0bb6443c676c2f4bc19034771ae56884f806cda0750",
-      "skills/evidence/imaging.md": "239c48fc38a1660abccc6bc53790c9e012f242575bbcd2b5e1be39aaff22a3da",
+      "skills/evidence/imaging.md": "c82ad5544273385be06cef9a193db4d5cdd66ad1ae1f0aa200201034cabbc563",
       "skills/evidence/provenance.md": "8bbbbb42417b0cafbefacbf870a06e1aaa5f725ed1015d13f9a8568f8dc46e4f",
       "skills/evidence/scope.md": "310d60e13d41df55ef456b34fd72222e21bb50c58ca0d31f5df8d3119335bcba",
       "skills/evidence/tool-validation.md": "e75f55cea7121dcf8ca391cfa4ef479fc1f5858c0cbad19b6c29e74a5cfe432b",
@@ -96,18 +96,22 @@
       "skills/filesystem/encrypted-metadata.md": "a4bbde77b68abd250c5add4c96d0ab7b46e24ccd58943e28961e898dee30fa9c",
       "skills/filesystem/encrypted.md": "11a9b8705b374179664772e950ea7c6fff26fb1d8016874a6f1844bea23036aa",
       "skills/filesystem/extract.md": "4a4c8eb9e87717e48c5f40836402f64ce9c73463f53b93cc1c1f5087623f20d3",
-      "skills/filesystem/layers.md": "f5080ee565aef02d91360a9a6ea1851a19bee59b3e95efaf67790b68e91cf030",
+      "skills/filesystem/layers-mapping.md": "a7ce0efb19030a3f3cf669453ff96d3788a7375eb41fccde200a95992b93b85a",
+      "skills/filesystem/layers.md": "08235b2c4e2f5f2cbea6934dfc87f9ba85534b7088a198e6fa364d01e10fff3a",
       "skills/filesystem/scanners.md": "e00e7980a9dfa3a8e63c1aea7391d62e9e04616a7b63bc7dd9d11e5f9d7248b3",
       "skills/filesystem/semantics.md": "9db1eafc72dbb98222678210d75dcd53737fc024b322baa6746d63779f0deec1",
       "skills/data/documents-media.md": "2b6dc742cf3bcb76cf0413117ecae125e3011e283d536f7720b1c8cab3d00d70",
-      "skills/data/sqlite.md": "1ab59a3ff0ec2d4483eb9e98d98cb5bd2417c2c750f27a4d075602d4f5956b0f",
-      "skills/timeline/build.md": "74869b41d7b2b440c8b059cdb82189f527211ae78ae1f0dfe1260858fa9ec6fd",
-      "skills/timeline/clocks.md": "cb05c15dd79783b7e97a76fa66d7885f7c235311c39680d2df180a3728ad45f9",
+      "skills/data/sqlite-secrets.md": "e26d255b11dd8e16b8862f5fbb53fe60e9054e4f44a3f50962847b25d33d2982",
+      "skills/data/sqlite.md": "1635fb734ba12e37419df63bd2eb6c5c526453811ca4b7d2eed64b672956610c",
+      "skills/timeline/build.md": "1ed2444b754cd9233ba5c9e465758c3b468df600ac6141289af1afc3e64b6e08",
+      "skills/timeline/clocks-drift.md": "5e373612780bc2475d0dc068aa761a3861c689216d237b5a68472a1d5f9dd58d",
+      "skills/timeline/clocks.md": "63f4c147708eb9e128d182105a7f430b95bc0324fed15ea17ebad408eae1b921",
       "skills/timeline/super-scope.md": "402ed8b0b1d7e91435a1c172c7aebdea12ab1f812ba81b8303e4a24108b7d798",
       "skills/timeline/super.md": "141f267266838cd620e925225331adc3fe9971e09095f63064490c54ef02731a",
+      "skills/base/router.md": "ce2fb80f48d2926c54dd7a5c8977e8c4d28581417455d2d7b44bbb6d1ca1587d",
       "requires/host.json": "9c93c8306c96e4259aa50ca874e8a210c5a2b9b5d6e6fd4f3db3fd2e2f7421e1",
       "requires/python.txt": "e045dd44c9347ec21afa34ac093ea33e15085d64744758eb3d5b6b970884ab24",
-      "skills/INDEX.md": "05d8abaef9cc5bbe30017f49096229b239d2416806c7a13120696581cbda6320"
+      "skills/INDEX.md": "3df654abd3a9b38f4f544529a0336d1bf6a34f16e7926b9ff77cf8fbbcf61fa2"
     }
   },
   "tools": [
@@ -128,7 +132,7 @@
     "timeline_super",
     "timestamp_decode"
   ],
-  "skills": 25,
+  "skills": 29,
   "recipes": [
     "computer-forensics-base/ad1-items",
     "computer-forensics-base/archive-members",
@@ -143,6 +147,14 @@
     }
   ],
   "method_only": [
+    {
+      "path": "skills/base/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
+    },
+    {
+      "path": "skills/timeline/clocks-drift.md",
+      "why": "a method leaf about clock changes, drift, monotonic order and the two NTFS time sets; it reads what other leaves' tools return and runs no tool or program of its own"
+    },
     {
       "path": "skills/evidence/scope.md",
       "why": "a method skill about what the case allows the examination to answer; the question register, the leads and the operator requests it names are the harness's, not a tool or program of this pack"
