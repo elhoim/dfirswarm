@@ -10,8 +10,8 @@ says "if that pack is loaded" and asks you to check the run's tool inventory.
 
 ## What it carries
 
-**Seventeen skills**: seven decision leaves, each a question of a case, and ten
-second-level leaves they point to ("only if X"); every leaf is at most 800 tokens.
+**Eighteen skills**: seven decision leaves, each a question of a case, ten
+second-level leaves they point to ("only if X") and the router `ransomware/router` (at most 400 tokens; the prompt shows this one line for the pack when the run's index is over its budget, and it names every leaf); every leaf is at most 800 tokens.
 `scope/first-hour` (`scope/triage-tools`, `scope/phase-timeline`),
 `exfil/before-encryption` (`exfil/measure-and-claims`),
 `encryptor/traces` (`encryptor/windows-evidence`, `encryptor/samples-and-notes`),

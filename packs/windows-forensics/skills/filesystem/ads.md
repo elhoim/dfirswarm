@@ -1,7 +1,7 @@
 ---
 id: filesystem/ads
-title: Named NTFS data streams
-when: You need to enumerate, extract or date alternate data streams, or assess execution from one.
+title: NTFS data streams
+when: List, extract or date alternate streams.
 needs: [filesystem/mft]
 tools: [mft_records, extract_stream, usn_journal, file_type]
 requires_host: [fls, istat]

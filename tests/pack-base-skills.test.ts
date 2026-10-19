@@ -12,6 +12,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { estimateTokens, readPackIndex, readPackIndexes, renderSkillsSection, SKILL_BUDGET } from "../extensions/skills.ts";
 import { ROOT, runPy, runPySnippet } from "./tool-library-harness.ts";
 
 const PACK = join(ROOT, "packs", "computer-forensics-base");
@@ -48,11 +49,17 @@ const SECOND_LEVEL: Record<string, string> = {
   "filesystem/scanners": "filesystem/carving",
   "filesystem/encrypted-metadata": "filesystem/encrypted",
   "timeline/super-scope": "timeline/super",
+  "filesystem/layers-mapping": "filesystem/layers",
+  "timeline/clocks-drift": "timeline/clocks",
+  "data/sqlite-secrets": "data/sqlite",
 };
+
+// The pack's one router: it is shown alone when a run's index is over budget, and names every other skill once.
+const ROUTER = "base/router";
 
 // Skills whose tools can put secrets, credentials or private text in front of the agent: each has a Sensitive output part.
 const SENSITIVE = [
-  "data/documents-media", "data/sqlite", "filesystem/carving", "filesystem/encrypted", "filesystem/encrypted-metadata", "filesystem/extract",
+  "data/documents-media", "data/sqlite", "data/sqlite-secrets", "filesystem/carving", "filesystem/encrypted", "filesystem/encrypted-metadata", "filesystem/extract",
   "filesystem/scanners", "filesystem/semantics", "timeline/super", "evidence/archives",
 ];
 
@@ -62,15 +69,16 @@ const NEW = [
   "filesystem/semantics", "filesystem/layers", "data/documents-media",
 ];
 
-// A leaf over 800 tokens is a warning (the seal refuses above 1,000). The few that carry content restored by the
-// review of #133 sit above 800 with a ceiling here: a leaf that is not on this list stays at 800, and these may only shrink.
-const WARNING_CEILING: Record<string, number> = { "filesystem/layers": 890, "data/sqlite": 840, "timeline/clocks": 820 };
+// A leaf is at most 800 tokens (a warning above, a refusal above 1,000) and the router at most 400. The three leaves the review of
+// #133 left above 800 (layers, sqlite, clocks) were split into second-level leaves, so no leaf has a ceiling of its own any more.
+const LEAF_MAX = 800;
+const ROUTER_MAX = 400;
 
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., and has a short index entry", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, 25);
+  assert.equal(skills.size, 29);
   for (const s of skills.values()) {
-    assert.ok(TOKENS(s.text) <= (WARNING_CEILING[s.id] ?? 800), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
+    assert.ok(TOKENS(s.text) <= (s.id === ROUTER ? ROUTER_MAX : LEAF_MAX), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
     assert.ok(TOKENS(s.text) <= 1000, `${s.id} is over the 1,000 a skill may have`);
     assert.ok(s.text.split("\n").length <= 300, `${s.id} lines`);
     const first = s.body.trim().split("\n")[0];
@@ -80,11 +88,31 @@ test("every skill is a leaf within the budget, opens with Use when ... Not for .
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
     // The two reporting leaves are method leaves about the ledger's acts: they read no artefact, so they show nothing.
-    if (!s.id.startsWith("reporting/")) assert.match(s.body, /\*\*Does not show\.\*\*/, `${s.id} has a Does not show part`);
+    // The router reads no artefact either: it names notes and holds no rule.
+    if (!s.id.startsWith("reporting/") && s.id !== ROUTER) assert.match(s.body, /\*\*Does not show\.\*\*/, `${s.id} has a Does not show part`);
   }
   const index = await readFile(join(SKILLS, "INDEX.md"), "utf8");
   for (const id of skills.keys()) assert.ok(index.includes(`\`${id}\``), `${id} is in the index`);
-  assert.ok(TOKENS(index) <= 1000, `the pack index is ${Math.round(TOKENS(index))} tokens`);
+  // The pack budget is the harness's own count of the index entries (extensions/skills.ts), not the file's size: past it a pack shows its router only.
+  const parsed = await readPackIndex(PACK);
+  assert.equal(parsed.entries.length, 29);
+  assert.ok(parsed.tokens <= SKILL_BUDGET.pack, `the pack index is ${Math.round(parsed.tokens)} tokens of entries`);
+});
+
+test("the base pack index is at most 1,000 tokens counted as the harness counts it: the entry lines of INDEX.md, not the whole file", async () => {
+  // Past 1,000 the harness shows the base pack by its router alone in every run, the base pack alone included. The budget is on the
+  // entries (extensions/skills.ts readPackIndex): the file's header lines (the title, the fetch sentence, the Router: line) are not
+  // in it, so the whole file is larger than the count and is not the measure. This test holds the two measures consistent: the
+  // harness's entries are exactly the file's "- `id`" lines, each counted as bytes / 4.245 rounded up, and their sum is the pack's count.
+  const text = await readFile(join(SKILLS, "INDEX.md"), "utf8");
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => /^- `[^`]+`/.test(l));
+  const parsed = await readPackIndex(PACK);
+  assert.deepEqual(parsed.entries.map((e) => e.line), lines, "the harness reads every entry line of the file, and no other");
+  const sum = lines.reduce((n, l) => n + estimateTokens(l), 0);
+  assert.equal(sum, parsed.tokens, "the entries, counted line by line, are the harness's count");
+  assert.ok(lines.every((l) => estimateTokens(l) === Math.ceil(TOKENS(l))), "each line is its bytes / 4.245, rounded up");
+  assert.ok(parsed.tokens <= SKILL_BUDGET.pack, `the base pack index is ${parsed.tokens} tokens of entries, over ${SKILL_BUDGET.pack}`);
+  assert.ok(TOKENS(text) > parsed.tokens, "the whole file, header included, is more than its entries");
 });
 
 test("the new skills say what to record, and the skills whose tools can surface secrets have a Sensitive output part", async () => {
@@ -98,12 +126,15 @@ test("the new skills say what to record, and the skills whose tools can surface 
   // The phrase is the worker prompt's: a job that may read a secret runs with secret_output: true.
   const prompt = await readFile(join(ROOT, "prompts", "worker-system.md"), "utf8");
   assert.match(prompt, /runs with `secret_output: true`/);
-  for (const id of ["data/sqlite", "data/documents-media", "filesystem/scanners", "filesystem/encrypted-metadata", "filesystem/extract", "filesystem/semantics"]) {
+  for (const id of ["data/sqlite", "data/sqlite-secrets", "data/documents-media", "filesystem/scanners", "filesystem/encrypted-metadata", "filesystem/extract", "filesystem/semantics"]) {
     assert.match(skills.get(id)!.body, /`secret_output: true`/, `${id} says secret_output: true`);
   }
   // The skill about hashes writes the secret-digest exception, and the SQLite one keeps a short BLOB's digest out of the ledger.
   assert.match(skills.get("evidence/provenance")!.body, /A digest of a secret is not/);
-  assert.match(skills.get("data/sqlite")!.body, /never the value, a fragment of it, or the `sha256` and base64 of a short BLOB/);
+  assert.match(skills.get("data/sqlite-secrets")!.body, /never the value, a fragment of it, or the `sha256` and base64 of a short BLOB/);
+  // The parent cites the row's locator, not `rowid`: on an INTEGER PRIMARY KEY table the rowid is the value (review of #144).
+  assert.match(skills.get("data/sqlite")!.body, /run the query as a job with `secret_output: true` and cite table, row locator and column, never the value/);
+  assert.doesNotMatch(skills.get("data/sqlite")!.body, /cite table, `rowid` and column/);
 });
 
 test("needs is at most two deep and its chain is at most 1,900 tokens; every id another pack needs is still here", async () => {
@@ -159,22 +190,25 @@ test("every second-level leaf is pointed to by a leaf that says when to open it,
     const p = skills.get(parent)!;
     const at = p.body.indexOf(`\`${child}\``);
     assert.ok(at >= 0, `${parent} points to ${child}`);
-    assert.match(p.body.slice(Math.max(0, at - 160), at + 40), /\bNot for\b|[Oo]nly if|\bsays when\b/, `${parent} says when to open ${child}`);
+    assert.match(p.body.slice(Math.max(0, at - 160), at + 40), /\bNot for\b|[Oo]nly if|\bsays when\b|\bBefore you\b/, `${parent} says when to open ${child}`);
   }
   // Pointers: who sends the agent to the new leaves.
   const pointers: Array<[string, string]> = [
     ["evidence/verify", "evidence/provenance"], ["evidence/catalog", "evidence/coverage"], ["filesystem/carving", "evidence/coverage"],
     ["timeline/build", "timeline/clocks"], ["timeline/super-scope", "timeline/clocks"], ["data/sqlite", "timeline/clocks"],
-    ["evidence/imaging", "filesystem/layers"], ["filesystem/carving", "filesystem/layers"], ["filesystem/extract", "filesystem/semantics"],
+    ["evidence/imaging", "filesystem/layers"], ["evidence/imaging", "filesystem/layers-mapping"], ["timeline/build", "timeline/clocks-drift"],
+    ["filesystem/carving", "filesystem/layers"], ["filesystem/extract", "filesystem/semantics"],
     ["filesystem/encrypted-metadata", "evidence/scope"], ["data/documents-media", "evidence/scope"], ["evidence/coverage", "evidence/tool-validation"],
     ["reporting/citations", "evidence/coverage"],
   ];
   for (const [from, to] of pointers) assert.ok(skills.get(from)!.body.includes(`\`${to}\``), `${from} points to ${to}`);
   // Every skill is named by another skill of the pack, besides being in the index: none is reachable only by luck.
   const everything = [...skills.values()];
-  for (const s of everything) {
+  for (const s of everything.filter((x) => x.id !== ROUTER)) {
     assert.ok(everything.some((o) => o.id !== s.id && o.body.includes(`\`${s.id}\``)), `${s.id} is named by no other skill`);
   }
+  // ... and the second-level leaves are named by their parent, not only by the router.
+  for (const [child, parent] of Object.entries(SECOND_LEVEL)) assert.ok(skills.get(parent)!.body.includes(`\`${child}\``), `${parent} names ${child}`);
 });
 
 // Fields and names a skill teaches, each of which a tool must write or read: file -> skill -> names.
@@ -191,6 +225,9 @@ const TAUGHT: Array<[string, string, string[]]> = [
   ["tools/ioc_scan/run.py", "filesystem/scanners", ["write_values", "all_results"]],
   ["tools/feature_scan/run.py", "filesystem/scanners", ["out_dir_contains_secret_values", "report.xml"]],
   ["tools/archive_extract/run.py", "evidence/provenance", ["SHORT_MEMBER"]],
+  ["tools/sqlite_query/run.py", "data/sqlite-secrets", ["write_values", "rowid_from", "rowid_to", "locators_file", "sqlite-query-values.jsonl", "table_kind",
+    "rowid_is_a_value", "virtual_table_unsupported", "cells_not_exported", "value_too_large", "unreadable", "values_file_error", "locator",
+    "n_ranks", "shadowed", "row_unreadable", "values_file_holds"]],
 ];
 
 test("the tool fields a skill names are fields the tools write", async () => {
@@ -235,7 +272,7 @@ test("the claims the review found are not in the skills, and the front matter li
   // A body that names a tool of the pack in code lists it; the list is exactly what the pack-links lint holds, and here for the new leaves.
   const tools = (await readdir(join(PACK, "tools"))).sort();
   for (const s of skills.values()) {
-    const listed = new Set([...(s.meta.tools as string[]), ...(s.meta.requires_host as string[])]);
+    const listed = new Set([...((s.meta.tools as string[]) ?? []), ...((s.meta.requires_host as string[]) ?? [])]);
     for (const t of tools) {
       const named = new RegExp("(?<![\\w.-])" + t + "(?![\\w-])").test(s.body);
       if (named) assert.ok(listed.has(t), `${s.id} names ${t} but does not list it`);
@@ -301,9 +338,31 @@ test("archive_extract runs with secret_output only when members may hold credent
 test("data/sqlite: on a secret table select locators only, because the inline page always carries values; the BLOB fields are the tool's", async () => {
   const skills = await load(SKILLS);
   const s = skills.get("data/sqlite")!;
-  const sensitive = paragraph(s, "**Sensitive output.**");
-  assert.match(sensitive, /`limit` is 1 or more, so the inline page always carries at least one row of values/);
-  assert.match(sensitive, /select only locators \(`rowid`, `length\(col\)`, `typeof\(col\)`\)/);
+  // The workaround is the fallback in the second-level leaf the Sensitive output line points to; the mode is the way in a job.
+  const secrets = skills.get("data/sqlite-secrets")!;
+  const fallback = paragraph(secrets, "**Fallback, outside a job or without the mode.**");
+  assert.match(fallback, /`limit` is 1 or more, so the inline page always carries at least one row of values/);
+  assert.match(fallback, /select only locators \(`rowid`, `length\(col\)`, `typeof\(col\)`\) `FROM t NOT INDEXED ORDER BY rowid`/);
+  // Through an index on the secret column the locators come ranked by its values (the final review of #144): the table itself, in
+  // rowid order, and a WITHOUT ROWID table in its key's.
+  assert.match(fallback, /WITHOUT ROWID: `ORDER BY` the key, which ranks it\./);
+  // The pointer says when to read the leaf: before any query on such a table, since the inline page carries values (the review of
+  // #144 found it inverted: "Only if you need the rows" sent the agent there only when it wanted values in its context).
+  assert.match(paragraph(s, "**Sensitive output.**"), /Before you query one, read `data\/sqlite-secrets`: the inline page always holds values\./);
+  assert.doesNotMatch(s.body, /Only if you need the rows/);
+  // The example is a job with secret_output, written as the other packs write one (a job_run tool=... line has no place for the flag).
+  const example = secrets.body.split("\n").find((l) => l.includes("job_run") && l.includes("sqlite_query"))!;
+  assert.match(example, /^ {4}job_run\(tool: "sqlite_query", secret_output: true, args: \{.*"write_values": true\}\)$/);
+  const memory = await readFile(join(ROOT, "packs", "memory-forensics", "skills", "processes", "preserve-regions.md"), "utf8");
+  assert.match(memory, /job_run\(tool: "mem_fs", secret_output: true, args: \{/, "the form the memory pack uses");
+  // What the tool guarantees about a row's locator, said as the tool says it.
+  const locate = paragraph(secrets, "**What locates a row**");
+  assert.match(locate, /declared `INTEGER`: that column is the rowid, so the rowid is a value: never printed, a range refused \(`rowid_is_a_value`\)/);
+  assert.match(locate, /which ranks the key's values/);
+  assert.match(locate, /WITHOUT ROWID: `n` in primary key order, which ranks those values too/);
+  assert.match(paragraph(secrets, "**Lengths.**"), /a PIN stored as an integer has lost its leading zeros/);
+  assert.match(paragraph(secrets, "**Fallback, outside a job or without the mode.**"), /Where a column is the `INTEGER PRIMARY KEY`, `rowid` is its value: leave it out/);
+  assert.match(paragraph(secrets, "**Record.**"), /the locator \(`rowid`, or `n` where `locator` is `n`\)/);
   assert.match(s.body, /`blob_b64_head`, its first `head_bytes` \(long\)/);
   assert.doesNotMatch(s.body, /a BLOB is `blob_b64` \(its head inline when long\)/);
   assert.match(s.body, /found the same number of committed frames/);
@@ -314,20 +373,24 @@ test("data/sqlite: on a secret table select locators only, because the inline pa
   try {
     const db = join(dir, "t.db");
     const made = await runPySnippet(
-      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table tok(id integer primary key, v blob)'); c.execute('insert into tok(v) values(?)',(b'planted-secret-value-0001',)); c.commit()",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table tok(host text, v blob)'); c.execute('create index ixv on tok(v)'); [c.execute('insert into tok(host, v) values(?, ?)',('host-%d' % i, v)) for i, v in enumerate((b'zz-planted-secret-value-0001', b'aa-planted-secret-value-0002'))]; c.commit()",
       [db],
       {},
     );
     assert.equal(made.code, 0, made.stderr);
     const script = join(PACK, "tools", "sqlite_query", "run.py");
-    const b64 = Buffer.from("planted-secret-value-0001").toString("base64");
-    const loc = await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok", limit: 1 });
+    const b64 = Buffer.from("zz-planted-secret-value-0001").toString("base64");
+    // The skill's query, with t and col filled in: rowid order, not the order of the index on v (which would put rowid 2 first).
+    const loc = await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok NOT INDEXED ORDER BY rowid", limit: 2 });
     assert.equal(loc.code, 0, loc.stdout + loc.stderr);
     const answer = JSON.parse(loc.stdout);
     assert.equal(answer.ok, true);
     assert.ok(!loc.stdout.includes("planted-secret") && !loc.stdout.includes(b64), "a locator select puts no value in the answer");
     assert.ok(loc.stdout.includes("blob"), "typeof(v) says it is a blob");
-    const plain = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok", limit: 1 });
+    assert.deepEqual(answer.rows.map((r: { values: unknown[] }) => r.values[0]), [1, 2]);
+    const ranked = JSON.parse((await runPy(script, dir, { db_path: db, sql: "SELECT rowid, length(v), typeof(v) FROM tok", limit: 2 })).stdout);
+    assert.deepEqual(ranked.rows.map((r: { values: unknown[] }) => r.values[0]), [2, 1], "without the clause SQLite reads the covering index, in the values' order");
+    const plain = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok WHERE rowid = 1", limit: 1 });
     assert.ok(plain.stdout.includes(b64), "a plain select puts the base64 of a short BLOB in the inline page");
     const zero = await runPy(script, dir, { db_path: db, sql: "SELECT v FROM tok", limit: 0 });
     assert.notEqual(zero.code, 0);
@@ -372,9 +435,9 @@ test("semantics and the catalogue agree on a named stream; clocks do not give a 
   assert.doesNotMatch(clocks, /skipped[^\n]*keep both readings/);
 });
 
-test("filesystem/layers: the backing chain needs --backing-chain; the lost container rows and rules are back", async () => {
+test("filesystem/layers: the backing chain needs --backing-chain; the lost container rows and rules are back (the mapping rules in the second-level leaf)", async () => {
   const skills = await load(SKILLS);
-  const layers = skills.get("filesystem/layers")!.body;
+  const layers = skills.get("filesystem/layers")!.body + "\n" + skills.get("filesystem/layers-mapping")!.body;
   assert.match(layers, /`qemu-img info --backing-chain`/);
   assert.match(layers, /plain `info` only the immediate backing file/);
   assert.match(layers, /only a claim by whoever named the file/);
@@ -392,7 +455,7 @@ test("content the split pass of #133 dropped is back where the review named it",
   // L1 extract's wrong-header list; L3 the super timeline is not every timestamp; L8 the clock bullet's list; L5 the LUKS header source.
   assert.match(body("filesystem/semantics"), /A wrong header can mean overwritten, fragmented, compressed, encrypted, truncated or the wrong record; a matching header or size is one check, not all of them/);
   assert.match(body("timeline/super"), /not every timestamp on the volume/);
-  assert.match(body("timeline/clocks"), /copying, extraction, restoration and ordinary file system behaviour explain it/);
+  assert.match(body("timeline/clocks-drift"), /copying, extraction, restoration and ordinary file system behaviour explain it/);
   assert.match(body("filesystem/encrypted-metadata"), /give the version, header source, key slots and tokens/);
 });
 
@@ -418,4 +481,65 @@ test("scope routes a lookup the evidence suggests as the worker prompt does: net
   assert.match(prompt, /Where SWARM\.md says the run has the dynamic network, that lookup is a `net_request`/);
   // net_request is the harness's, not a tool of this pack: the method leaf still lists no tool.
   assert.deepEqual(scope.meta.tools, []);
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+test("the router is the pack's only router, within 400 tokens, and names every other skill exactly once; every old id is alive", async () => {
+  const skills = await load(SKILLS);
+  const routers = [...skills.values()].filter((s) => s.meta.router === "true");
+  assert.deepEqual(routers.map((s) => s.id), [ROUTER], "one router, and it is base/router");
+  const router = skills.get(ROUTER)!;
+  assert.ok(TOKENS(router.text) <= ROUTER_MAX, `the router is ${Math.round(TOKENS(router.text))} tokens`);
+  assert.match(router.body.trim().split("\n")[0], /^Use when .*\bNot for\b/);
+  assert.deepEqual(router.meta.tools ?? [], [], "the router names no tool");
+  // Every other skill is named once as a line of its own or in the line of the leaf it specialises; none twice, none missing.
+  const named = [...router.body.matchAll(/`([a-z0-9-]+\/[a-z0-9-]+)`/g)].map((m) => m[1]);
+  assert.equal(new Set(named).size, named.length, `a skill is named twice: ${named.filter((n, i) => named.indexOf(n) !== i).join(", ")}`);
+  assert.deepEqual([...named].sort(), [...skills.keys()].filter((id) => id !== ROUTER).sort());
+  // The ids of the pack as they were before the router (other packs' `needs` and text name them): all of them still resolve.
+  const before = [
+    "data/documents-media", "data/sqlite", "evidence/ad1", "evidence/archives", "evidence/catalog", "evidence/collections", "evidence/coverage",
+    "evidence/imaging", "evidence/provenance", "evidence/scope", "evidence/tool-validation", "evidence/verify", "filesystem/carving",
+    "filesystem/encrypted", "filesystem/encrypted-metadata", "filesystem/extract", "filesystem/layers", "filesystem/scanners",
+    "filesystem/semantics", "reporting/citations", "reporting/disagreement", "timeline/build", "timeline/clocks", "timeline/super", "timeline/super-scope",
+  ];
+  assert.equal(before.length, 25);
+  for (const id of before) assert.ok(skills.has(id), `${id} is still a skill`);
+  // The generated index names it as the pack's router, which is the line the harness reads.
+  assert.match(await readFile(join(SKILLS, "INDEX.md"), "utf8"), /^Router: `base\/router`$/m);
+});
+
+test("a run of the base pack with encrypted-containers, windows and linux fits the run's 2,500-token index budget only because the base pack has a router", async () => {
+  // The disk profile (base, encrypted-containers, windows) used to need the router; windows-forensics' index was then cut to fit its own
+  // budget and the profile fits whole. This set is over the budget whole, and the other packs' routers are left out of the count on purpose:
+  // what this holds is the base pack's router, whatever the other packs have.
+  const dirs = ["computer-forensics-base", "encrypted-containers", "windows-forensics", "linux-forensics"].map((p) => join(ROOT, "packs", p));
+  const packs = (await readPackIndexes(dirs)).map((p) => (p.id === "computer-forensics-base" ? p : { ...p, router: null }));
+  const withRouter = renderSkillsSection(packs).report;
+  const base = withRouter.packs.find((p) => p.id === "computer-forensics-base")!;
+  assert.equal(base.shown, "router", "the base pack is shown by its router when the run is over budget");
+  assert.ok(withRouter.shown_tokens <= SKILL_BUDGET.run, `the set shows ${Math.round(withRouter.shown_tokens)} tokens of entries, over the run's ${SKILL_BUDGET.run}`);
+  assert.ok(withRouter.index_tokens > SKILL_BUDGET.run, "the whole index is over the budget; that is what makes the router the entry shown");
+  // The same packs with no router (as the base pack was) cannot be shortened: the section is over budget and the report says which pack could not be.
+  const without = renderSkillsSection(packs.map((p) => (p.id === "computer-forensics-base" ? { ...p, router: null } : p))).report;
+  assert.ok(without.shown_tokens > SKILL_BUDGET.run, `without the router the set shows ${Math.round(without.shown_tokens)} tokens`);
+  assert.ok(without.no_router.includes("computer-forensics-base"));
+  // The router's own line is what the prompt carries for the pack, and it is within the entry budget.
+  const entry = packs[0]!.entries.find((e) => e.id === ROUTER)!;
+  assert.ok(entry.tokens <= SKILL_BUDGET.entry);
+});
+
+test("no rule was lost when layers, sqlite and clocks were split: the register of their sentences is still in the pack", async () => {
+  const skills = await load(SKILLS);
+  const norm = (s: string): string => s.replace(/[`*]/g, "").replace(/\s+/g, " ").toLowerCase().trim();
+  const corpus = norm([...skills.values()].map((s) => s.body).join("\n"));
+  const rules = JSON.parse(await readFile(join(ROOT, "tests", "pack-split-rules", "computer-forensics-base.json"), "utf8")) as Array<[string, string]>;
+  assert.ok(rules.length >= 80, "the register is the whole one");
+  for (const [from, frag] of rules) assert.ok(corpus.includes(frag), `from ${from}, gone: "${frag}" (moved or reworded: update tests/pack-split-rules/computer-forensics-base.json in the same change)`);
+  // Where the three leaves went: each of the moved rules is in the second-level leaf, and the parent points to it.
+  const where = (id: string): string => norm(skills.get(id)!.body);
+  assert.ok(where("filesystem/layers-mapping").includes("rebuild it from that metadata and all the members with a reader that supports the layer"));
+  assert.ok(where("timeline/clocks-drift").includes("a logged clock change is a finding"));
+  assert.ok(where("data/sqlite-secrets").includes("on such a table select only locators"));
 });

@@ -172,12 +172,14 @@ test("encrypted_survey calls a shared trailer an observation pending a reference
     const ev = join(cwd, "work", "ev");
     await mkdir(ev, { recursive: true });
     const trailer = Buffer.from("deadbeef4b455931", "hex");
-    for (let i = 0; i < 2; i++) await writeFile(join(ev, `f${i}.docx.lockd`), Buffer.concat([randomBytes(80_000), trailer]));
+    // The byte just before each trailer is fixed and different per file: a random one would equal its neighbour's once in 256 files and
+    // make the common suffix nine bytes long (three files: once in 65536).
+    for (let i = 0; i < 2; i++) await writeFile(join(ev, `f${i}.docx.lockd`), Buffer.concat([randomBytes(80_000), Buffer.from([0x11 * (i + 1)]), trailer]));
     await writeFile(join(ev, "other.pdf.lockd"), Buffer.concat([randomBytes(80_000), randomBytes(8)]));
     const solo = body<Survey>(await tool(SURVEY, cwd, { root: "work/ev", tail_bytes: 8 }));
     assert.equal(solo.shared_tail_suffix, null, "three files do not share one trailer");
     assert.deepEqual(solo.repeated_tails.map((t) => [t.tail_hex, t.files]), [[trailer.toString("hex"), 2]]);
-    await writeFile(join(ev, "other.pdf.lockd"), Buffer.concat([randomBytes(80_000), trailer]));
+    await writeFile(join(ev, "other.pdf.lockd"), Buffer.concat([randomBytes(80_000), Buffer.from([0x33]), trailer]));
     const out = await tool(SURVEY, cwd, { root: "work/ev", tail_bytes: 8 });
     const survey = body<Survey>(out);
     assert.deepEqual(survey.shared_tail_suffix && [survey.shared_tail_suffix.suffix_hex, survey.shared_tail_suffix.basis, survey.shared_tail_suffix.across_files],
@@ -197,8 +199,9 @@ test("encrypted_survey reports the trailer of two files that share eight bytes a
     const ev = join(cwd, "work", "ev");
     await mkdir(ev, { recursive: true });
     const trailer = Buffer.from("0badc0de0badf00d", "hex");
-    await writeFile(join(ev, "a.pdf.crypt"), Buffer.concat([randomBytes(60_000), trailer]));
-    await writeFile(join(ev, "b.pdf.crypt"), Buffer.concat([randomBytes(70_000), trailer]));
+    // Different fixed bytes before the trailer: with random ones the two files share a ninth byte once in 256 runs, and the suffix is nine bytes.
+    await writeFile(join(ev, "a.pdf.crypt"), Buffer.concat([randomBytes(60_000), Buffer.from([0x01]), trailer]));
+    await writeFile(join(ev, "b.pdf.crypt"), Buffer.concat([randomBytes(70_000), Buffer.from([0x02]), trailer]));
     const survey = body<Survey>(await tool(SURVEY, cwd, { root: "work/ev" }));
     assert.deepEqual(survey.shared_tail_suffix && [survey.shared_tail_suffix.suffix_hex, survey.shared_tail_suffix.bytes, survey.shared_tail_suffix.across_files, survey.shared_tail_suffix.basis],
       [trailer.toString("hex"), 8, 2, "observation"]);

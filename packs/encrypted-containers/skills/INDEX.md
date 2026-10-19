@@ -2,8 +2,11 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `encrypted/router`
+
 - `archives/formats` ZIP, 7-Zip, RAR, Office and PDF protection: You read a member's protection, a ZIP time, an Office or a PDF encryption structure.
 - `archives/protected` Examining encrypted archives and protected documents: An archive or document may require a password.
+- `encrypted/router` Encrypted-container notes by question: Pick an encrypted-container note when none is listed, or you cannot choose.
 - `identify/by-format` Encryption signs by format, and their limits: You name BitLocker, LUKS, Apple, VeraCrypt, archive, Office or PDF protection from a signature.
 - `identify/headers` Identifying encrypted evidence and its limits: A volume, archive or document may be encrypted.
 - `keys/other-sources` Password stores, memory, escrow and shell history: Key material may sit in a store, keychain, memory image, escrow record or shell history.
