@@ -92,11 +92,12 @@ When the evidence cannot answer something a reference service can (a domain's re
 | `mobile-forensics` | 7 | 3 | 1 |
 | `memory-forensics` | 9 | 3 | 1 |
 | `network-forensics` | 8 | 6 | 1 |
-| `reverse-engineering` | 12 | 6 | 1 |
+| `reverse-engineering` | 20 | 6 | 1 |
 | `encrypted-containers` | 5 | 3 | 1 |
 | `cloud-forensics` | 9 | 3 | 1 |
 | `ransomware-response` | 7 | 2 | 1 |
 | `triage-collection` | 14 | 2 | 1 |
+| `virtualization-backup-forensics` | 11 | 3 | 1 |
 
 A **pack** is a directory an operator installs once and names at kickoff: skills
 an agent fetches by name, tools seeded into the run, the host binaries the case
