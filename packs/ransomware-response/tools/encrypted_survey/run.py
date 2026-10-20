@@ -5,7 +5,8 @@ This is a SURVEY. It names candidates by two heuristics and measures entropy in 
 windows; it does not measure how much of any file was encrypted, whether a file
 survives whole, who the family is, or when anything ran. What it does:
 
-  * walks the tree in name order, follows no link, reads no file that is not a regular
+  * walks the tree in print order (directories and names ordered by the text the answer prints for
+    them, names that are withheld in an order drawn afresh each run), follows no link, reads no file that is not a regular
     file, and puts every entry it visited, skipped or could not read into a census;
   * names a file a CANDIDATE when its name carries an extension after a known one
     ("report.docx.locked") or when the first 64 KiB of the file reads at 7.5 bits per
@@ -128,30 +129,31 @@ class LosslessPage:
         import sys as _sys
         _sys.stdout.write(json.dumps({
             "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
-                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, describe(exc)),
             "status": "failed",
+            "status_basis": "the tool stopped with an error (see error); the whole result could not be kept, so there is no answer",
         }) + "\n")
         _sys.exit(1)
 
     def _write(self, row: object) -> None:
         assert self._out is not None
-        text = json.dumps(row, ensure_ascii=False, default=str)
-        try:
-            text.encode("utf-8")
-        except UnicodeEncodeError:
-            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
-            text = json.dumps(row, ensure_ascii=True, default=str)
+        # ASCII only: U+2028, U+0085, a bidi override and a lone surrogate (a file name that is not UTF-8) are escaped, lose nothing, and a
+        # line of the file is always a row.
+        text = json.dumps(row, ensure_ascii=True, default=str)
         try:
             self._out.write(text)
             self._out.write("\n")
         except OSError as exc:
             self._cannot_write(exc)
 
-    def add(self, row: object) -> None:
+    def add(self, row: object, evidence: str | None = None) -> object:
+        """Keep a row: read back by the backstop first (`evidence` is the name of a file printed as it is on purpose), then paged. Returns
+        the row as kept."""
+        row = seal_row(row, evidence)
         self.total += 1
         if len(self.page) < self.limit:
             self.page.append(row)
-            return
+            return row
         if self._out is None:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +167,7 @@ class LosslessPage:
             for kept in self.page:
                 self._write(kept)
         self._write(row)
+        return row
 
     def finish(self) -> dict:
         result = {
@@ -468,17 +471,67 @@ def cell(value):
 # BEGIN SHARED NAMES
 # The same text is in encrypted_survey and ransom_note_scan, so that the two tools judge a name alike (a ransomware-response test holds
 # the copies equal). A path is printed only through shown(): every component is judged, and no directory above a file is exempt.
+# Everything derived from a name that is withheld (an extension, a stem, a length, the place of the name among its siblings) is withheld
+# with it: a name that is withheld is replaced by one constant marker, and the order of a listing never follows the text that was withheld.
 WITHHELD = "<identifier-shaped name withheld>"
 WITHHELD_PATHS = [0]              # printed paths that had a component withheld (one per call of shown)
 _IDRUN = re.compile(r"[A-Za-z0-9]{8,}")
 _WORDY = re.compile(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)*|[A-Z]+")
+_PAIR_SEPARATORS = re.compile(r"[:._ -]")
+_DIGIT_GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
+HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+SINGLE_CASE_RUN = 16              # a run of letters of one case is a word below this many letters, a random run from here on
+HEX_PAIRS = 8                     # this many pairs of hex digits joined by one separator are a byte string
+# Directory names every Windows, Linux and ESXi host has, whose letters and digits would otherwise be taken for an identifier. A component
+# is printed as it is when it is one of these, whole and in any case.
+WELL_KNOWN = frozenset((
+    "system32", "syswow64", "inetcache", "inetcookies", "inethistory", "msocache", "psreadline", "framework", "framework64",
+    "sqlserver", "gpucache", "dawnwebgpucache", "dawngraphitecache", "grshadercache", "indexeddb", "overlay2", "datastore1"))
+
+
+def fold(name):
+    """The name as the rule reads it: NFKC (a full-width letter or digit is the ASCII one), every decimal digit of any script as its
+    ASCII digit, and no format character (a zero-width space or joiner cannot split a token)."""
+    if name.isascii():
+        return name
+    out = []
+    for ch in unicodedata.normalize("NFKC", name):
+        if ord(ch) < 128:
+            out.append(ch)
+        elif unicodedata.category(ch) == "Cf":
+            continue
+        elif unicodedata.category(ch) == "Nd":
+            out.append(str(unicodedata.decimal(ch)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _hex_pairs(text):
+    """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two."""
+    run = 0
+    for piece in _PAIR_SEPARATORS.split(text):
+        if len(piece) == 2 and piece[0] in HEX_DIGITS and piece[1] in HEX_DIGITS:
+            run += 1
+            if run >= HEX_PAIRS:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def _digit_groups(text):
+    """Whether groups of three or more digits, joined by a space or a comma, hold ten or more digits together."""
+    return any(sum(c.isdigit() for c in m.group(0)) >= 10 for m in _DIGIT_GROUPS.finditer(text))
 
 
 def shaped(name):
-    """Whether a name holds a token shaped like an identifier. The name is folded with NFKC first (a full-width letter or digit counts as
-    the ASCII one). A token is a run of 8 or more ASCII letters and digits. It is identifier-shaped when it holds both letters and digits,
-    or is 10 or more digits, or is letters only and is not one word, one capitalised word, several capitalised words or all capitals."""
-    text = unicodedata.normalize("NFKC", name)
+    """Whether a name holds a token shaped like an identifier. The name is folded first (fold). A token is a run of 8 or more ASCII
+    letters and digits. It is identifier-shaped when it holds both letters and digits, or is 10 or more digits, or is letters only and is
+    not one word, one capitalised word, several capitalised words or all capitals, or is 16 or more letters of one case. So are 8 or more
+    pairs of hex digits joined by one separator (a colon, a dash, a dot, an underscore or a space), and groups of digits joined by a space
+    or a comma that hold 10 digits or more."""
+    text = fold(name)
     for m in _IDRUN.finditer(text):
         token = m.group(0)
         if token.isdigit():
@@ -488,16 +541,20 @@ def shaped(name):
             return True
         elif not _WORDY.fullmatch(token):
             return True
-    return False
+        elif len(token) >= SINGLE_CASE_RUN and (token.islower() or token.isupper()):
+            return True
+    return len(text) >= 23 and _hex_pairs(text) or len(text) >= 11 and _digit_groups(text)
 
 
 @functools.lru_cache(maxsize=65536)
 def _judge(part):
-    """What to print in place of one path component, or None to print it as it is."""
+    """What to print in place of one path component, or None to print it as it is. A component that is judged is withheld whole, by
+    one marker that says nothing of its length or its shape."""
+    if part.lower() in WELL_KNOWN:
+        return None
     if shaped(part):
         return WITHHELD
-    clean = scrub(part, "names")
-    return clean if clean != part else None
+    return WITHHELD if scrub(part, "names") != part else None
 
 
 def shown(path, values=(), keep_last=False, count=True):
@@ -528,7 +585,211 @@ def shown(path, values=(), keep_last=False, count=True):
     if changed and count:
         WITHHELD_PATHS[0] += 1
     return "/".join(parts)
+
+
+_ORDER_SALT = os.urandom(16)
+
+
+def print_order(entries, judged):
+    """The directory entries in the order an answer prints them: by the text printed for each (the marker for a name that is judged
+    and withheld, the name itself otherwise; `judged(entry)` says whether the answer prints the entry's name through the judge), and the
+    entries that print alike in an order drawn afresh every run (a keyed hash of the raw name under a salt of this run). The rank of a
+    withheld name among its siblings, the order a directory lists them in and the inode never show in what an answer lists, in the
+    order of its rows, in the numbers it hands out or in which entries a limit keeps."""
+    texts = []
+    for entry in entries:
+        name = entry.name
+        try:
+            texts.append((_judge(name) or name) if judged(entry) else name)
+        except OSError:
+            texts.append(_judge(name) or name)
+    order = sorted(range(len(entries)), key=texts.__getitem__)
+    out, i = [], 0
+    while i < len(order):
+        j = i + 1
+        while j < len(order) and texts[order[j]] == texts[order[i]]:
+            j += 1
+        group = order[i:j]
+        if len(group) > 1:
+            group.sort(key=lambda n: (hashlib.blake2b(entries[n].name.encode("utf-8", "surrogatepass"), key=_ORDER_SALT, digest_size=8).digest(), n))
+        out.extend(group)
+        i = j
+    return [entries[n] for n in out]
 # END SHARED NAMES
+
+
+# BEGIN SHARED BACKSTOP
+# The same text is in encrypted_survey and ransom_note_scan (a ransomware-response test holds the copies equal). Every row a page or the census
+# keeps and the answer itself pass through here on their way out, whatever the code that made them did: a second check, written apart from
+# shown() (it reads a string whole, not component by component, and calls neither the judge, scrub nor any call site's decision), that
+# replaces a string holding an identifier-shaped text by a marker, counts it, and makes a complete answer partial. The one exception is on
+# purpose: the name of a file that is not named like a note is evidence and is printed as it is (the caller says so with `evidence`, and the
+# check refuses that claim for a name that is note-named). Content that is hex by nature (a digest, a tail) is passed by its key.
+BOUNDARY = {"replaced": 0, "by": {}, "where": [], "not_listed": 0}
+OWN_NAMES = set()                 # the names of the files this run wrote (their digest is the name of the root and of the table)
+FREE_KEYS = frozenset(("sha256", "tail_hex", "suffix_hex"))
+SERIAL_KEYS = frozenset(("note_id", "finding_id", "first_note_id", "duplicate_of"))      # a sequence number this tool counted: N000001, F1000000
+_SERIAL = re.compile(r"[NF][0-9]{6,12}")
+MAX_REPLACED_LISTED = 20
+MAX_JUDGED = 1 << 16
+_SUSPECT = re.compile(r"[A-Za-z0-9]{8}|(?:[0-9A-Fa-f]{2}[:._ -]){4}|[0-9]{3}[ ,][0-9]{3}")
+_ALNUM_RUN = re.compile(r"[A-Za-z0-9]+")
+_PAIRS = re.compile(r"(?<![^:._ -])[0-9A-Fa-f]{2}(?:[:._ -][0-9A-Fa-f]{2}){7}(?![^:._ -])")
+_GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
+
+
+class Sealed(dict):
+    """A row that has been through the backstop: it is not read again (its evidence name would not pass without the claim made for it)."""
+
+
+def _read_as(text):
+    """The string as the check reads it: NFKC, decimal digits of any script as ASCII digits, no format character."""
+    if text.isascii():
+        return text
+    kept = []
+    for ch in unicodedata.normalize("NFKC", text):
+        category = unicodedata.category(ch)
+        if category == "Cf":
+            continue
+        kept.append(str(unicodedata.decimal(ch)) if category == "Nd" and ord(ch) > 127 else ch)
+    return "".join(kept)
+
+
+@functools.lru_cache(maxsize=65536)
+def _why(text):
+    """The reason a string may not be printed (a fixed sentence, never a part of the string), or None."""
+    flat = _read_as(text)
+    for run in _ALNUM_RUN.findall(flat):
+        size = len(run)
+        if size < 8 or run.lower() in WELL_KNOWN:
+            continue
+        digits = sum(1 for c in run if c.isdigit())
+        if digits == size:
+            if size >= 10:
+                return "a long run of digits"
+        elif digits:
+            return "letters and digits in one run"
+        elif run.isupper() or run.islower():
+            if size >= 16:
+                return "a long run of letters of one case"
+        elif any(c.isupper() and not (i + 1 < size and run[i + 1].islower()) for i, c in enumerate(run)):
+            return "letters that do not read as words"
+    if _PAIRS.search(flat):
+        return "pairs of hex digits"
+    for m in _GROUPS.finditer(flat):
+        if sum(c.isdigit() for c in m.group(0)) >= 10:
+            return "groups of digits"
+    return None
+
+
+_CLEAN = set()                    # short strings already found clean (keys, repeated words): not read again
+
+
+def _refuse(text, evidence):
+    """Why this string may not be printed, or None."""
+    size = len(text)
+    if size < 8 or text in _CLEAN or text in OWN_NAMES:
+        return None
+    if size > MAX_JUDGED:
+        return "a string too long to check"
+    if evidence and not NAME_HINTS.search(evidence):
+        if text.lower() in evidence.lower():              # the name itself, or a piece of it (its extension)
+            return None
+        if text.endswith("/" + evidence):                 # a path whose last component is the evidence
+            text = text[:-len(evidence) - 1]
+            size = len(text)
+            if size < 8:
+                return None
+    why = None if text.isascii() and not _SUSPECT.search(text) else _why(text)
+    if why is None and size <= 64 and len(_CLEAN) < 20000:
+        _CLEAN.add(text)
+    return why
+
+
+def _place(where):
+    """The place of a string as text: the keys that are plain words and the indexes above it, never a key that came from a name."""
+    parts = []
+    while where is not None:
+        where, label = where
+        parts.append(label if isinstance(label, int) or re.fullmatch(r"[a-z][a-z_0-9]{0,40}", str(label)) else "*")
+    return "/" + "/".join(str(p) for p in reversed(parts))
+
+
+def _replaced(why, where):
+    BOUNDARY["replaced"] += 1
+    BOUNDARY["by"][why] = BOUNDARY["by"].get(why, 0) + 1
+    if len(BOUNDARY["where"]) < MAX_REPLACED_LISTED:
+        BOUNDARY["where"].append({"at": _place(where), "check": why})
+    else:
+        BOUNDARY["not_listed"] += 1
+    return "<withheld at the output: %s>" % why
+
+
+def _read_back(value, where, key, evidence):
+    """`value` with every string checked; the same object when nothing was replaced."""
+    if isinstance(value, Sealed):
+        return value
+    if isinstance(value, str):
+        if len(value) < 8 or key in FREE_KEYS or (key in SERIAL_KEYS and _SERIAL.fullmatch(value)):
+            return value
+        why = _refuse(value, evidence)
+        return _replaced(why, where) if why else value
+    if isinstance(value, dict):
+        pairs, changed = [], False
+        for k, v in value.items():
+            nk = _read_back(k, (where, "(key)"), None, None) if isinstance(k, str) and len(k) >= 8 else k
+            if isinstance(v, (str, dict, list, tuple)):
+                nv = _read_back(v, (where, k), k if isinstance(k, str) else None, evidence)
+            else:
+                nv = v
+            changed = changed or nk is not k or nv is not v
+            pairs.append((nk, nv))
+        if not changed:
+            return value
+        out = {}
+        for nk, nv in pairs:
+            while nk in out:
+                nk = "%s #" % nk
+            out[nk] = nv
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [_read_back(v, (where, i), None, evidence) for i, v in enumerate(value)]
+        return value if all(a is b for a, b in zip(items, value)) else items
+    return value
+
+
+def seal_row(row, evidence=None):
+    """A row on its way to a page or the census: every string read back. `evidence` is the name of the file the row is about when it is
+    printed as it is on purpose (a file that is not named like a note)."""
+    if isinstance(row, Sealed):
+        return row
+    out = _read_back(row, None, None, evidence)
+    return Sealed(out) if isinstance(out, dict) else out
+
+
+def release(doc):
+    """The answer: every string that was not read back already is read back now. A complete answer that had a string replaced is partial."""
+    out = _read_back(doc, None, None, None)
+    if BOUNDARY["replaced"] and isinstance(out, dict):
+        note = {"strings_replaced_at_the_output": BOUNDARY["replaced"], "by_check": dict(BOUNDARY["by"]), "replaced_at": list(BOUNDARY["where"]),
+                "replaced_not_listed": BOUNDARY["not_listed"],
+                "note": "every string of this answer and of the files it names was read back by a second check, written apart from the rule "
+                        "that withholds names; a string it found identifier-shaped is replaced by a marker and its place is in replaced_at"}
+        merged = {}
+        for k, v in out.items():
+            merged[k] = v
+            if k == "status_basis":
+                merged["boundary"] = note
+        merged.setdefault("boundary", note)
+        if merged.get("status") == "complete":
+            merged["status"] = "partial"
+            if "complete" in merged:
+                merged["complete"] = "partial"
+            merged["status_basis"] = "%s; %d strings held an identifier-shaped text that the first rule missed and were replaced at the output (see boundary)" % (
+                merged.get("status_basis") or "every entry was visited", BOUNDARY["replaced"])
+        out = merged
+    return out
+# END SHARED BACKSTOP
 
 
 def output_place(tool, key):
@@ -563,13 +824,15 @@ class Census:
         self.rows = 0
         PAGES.append(self)
 
-    def add(self, row):
+    def add(self, row, evidence=None):
+        row = seal_row(row, evidence)
         self._out.write(json.dumps(row, ensure_ascii=True, default=str))
         self._out.write("\n")
         self.rows += 1
+        return row
 
     def finish(self, receipt):
-        receipt = {"record": "receipt", "rows": self.rows, **receipt}
+        receipt = release({"record": "receipt", "rows": self.rows, **receipt})
         self._out.write(json.dumps(receipt, ensure_ascii=True, default=str))
         self._out.write("\n")
         self._out.flush()
@@ -589,23 +852,37 @@ class NoCensus:
     def __init__(self):
         self.rows = 0
 
-    def add(self, row):
+    def add(self, row, evidence=None):
         self.rows += 1
+        return row
 
     def finish(self, receipt):
         pass
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, "status": "failed",
-                      "status_basis": "the tool stopped with an error (see error); it produced no survey", **extra}))
+    print(json.dumps(release({"error": message, "status": "failed",
+                              "status_basis": "the tool stopped with an error (see error); it produced no survey", **extra})))
     raise SystemExit(1)
 
 
 def describe(exc):
-    """An error without the path it names: type, errno name and the system's own words."""
+    """An error without the path it names: type, errno name and the system's own words (never the text of an exception that has none:
+    it can name the place of the output)."""
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc))
+    words = getattr(exc, "strerror", None) or ("no free name for a result file" if str(exc).startswith("no free name") else "no system message")
+    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", words)
+
+
+def where_it_failed(exc):
+    """The line of this tool an unexpected exception was raised on: enough to find it, and no text of the exception (which can name a path)."""
+    tb = exc.__traceback__
+    line = None
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == __file__:
+            line = tb.tb_lineno
+        tb = tb.tb_next
+    return "line %s of the tool" % line if line else "an unknown line"
 
 
 PROGRESS = {}
@@ -693,6 +970,19 @@ def name_reasons(name):
     return [], None
 
 
+EXT_WITHHELD = "<extension withheld: the name of this file is withheld>"
+
+
+def evidence_of(name):
+    """The name of a file when it is printed as it is on purpose (a file that is not named like a note), else None."""
+    return None if NAME_HINTS.search(name) else name
+
+
+def judged_entry(entry):
+    """Whether the answer prints this entry's name through the judge: a directory always, any other entry when it is named like a note."""
+    return entry.is_dir(follow_symlinks=False) or bool(NAME_HINTS.search(entry.name))
+
+
 def display(path):
     """The path as it may be printed. Every directory above the file is judged by shown(); the file's own name is withheld when it
     is named like a note and holds an identifier-shaped token (the name ransom_note_scan withholds), and is otherwise printed as it
@@ -723,7 +1013,7 @@ def open_regular(path):
 
 
 def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census, stopped):
-    """Yield (path, lstat) for every regular file under `top`, in name order, following no link.
+    """Yield (path, lstat) for every regular file under `top`, in print order (print_order), following no link.
 
     A directory that cannot be listed, an entry that cannot be examined, a link and a file
     that is not a regular file are each counted, listed and put in the census; none is dropped.
@@ -737,12 +1027,12 @@ def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census, st
         directory, is_top = stack.pop()
         try:
             with os.scandir(directory) as it:
-                entries = sorted(it, key=lambda e: e.name)
+                entries = print_order(list(it), judged_entry)
         except OSError as exc:
             counters["directories_failed"] += 1
             row = {"path": shown(directory), "status": "failed", "what": "directory", "reason": "the directory could not be listed",
                    "error": describe(exc)}
-            exceptions.add(row)
+            row = exceptions.add(row)
             census.add({"record": "failed_directory", **row})
             continue
         counters["directories_visited"] += 1
@@ -755,15 +1045,15 @@ def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census, st
                 if entry.is_symlink():
                     counters["links_not_followed"] += 1
                     row = {"path": display(entry.path), "status": "skipped", "reason": "a symbolic link: not followed, so neither it nor its target was read"}
-                    skipped.add(row)
-                    census.add({"record": "skipped", **row})
+                    row = skipped.add(row, evidence_of(entry.name))
+                    census.add({"record": "skipped", **row}, evidence_of(entry.name))
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if is_top and entry.name in exclude_top:
                         counters["directories_excluded"] += 1
                         row = {"path": shown(entry.path), "reason": "named in exclude_top_level_dirs: a top-level %s directory of a Linux root; "
                                                                      "its contents were not read. Name it as the root to read it" % shown(entry.name, count=False)}
-                        exclusions.append(row)
+                        exclusions.append(seal_row(row))
                         census.add({"record": "excluded", **row})
                         continue
                     subdirs.append(entry.path)
@@ -771,15 +1061,16 @@ def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census, st
                 st = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 counters["entries_failed"] += 1
-                row = {"path": display(entry.path), "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)}
-                exceptions.add(row)
+                # what the entry is was not learned: it may be a directory, so its name is judged like one
+                row = {"path": shown(entry.path), "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)}
+                row = exceptions.add(row)
                 census.add({"record": "failed_entry", **row})
                 continue
             if not stat.S_ISREG(st.st_mode):
                 counters["special_files_skipped"] += 1
                 row = {"path": display(entry.path), "status": "skipped", "reason": "not a regular file (%s): not opened" % kind_of(st.st_mode)}
-                skipped.add(row)
-                census.add({"record": "skipped", **row})
+                row = skipped.add(row, evidence_of(entry.name))
+                census.add({"record": "skipped", **row}, evidence_of(entry.name))
                 continue
             yield entry.path, st
         stack.extend((d, False) for d in reversed(subdirs))
@@ -872,12 +1163,13 @@ def main():
     counters = {"directories_visited": 0, "directories_failed": 0, "directories_excluded": 0, "entries_failed": 0,
                 "links_not_followed": 0, "special_files_skipped": 0, "regular_files_visited": 0,
                 "candidate_files": 0, "noncandidate_files": 0, "unmeasured_files": 0, "read_failed_files": 0,
-                "profile_failures": 0, "mtime_unconvertible": 0}
+                "profile_failures": 0, "mtime_unconvertible": 0, "appended_extensions_withheld": 0}
     PROGRESS["coverage"] = counters
     sizes = {"candidate_bytes": 0, "noncandidate_bytes": 0, "unmeasured_bytes": 0, "read_failed_bytes": 0}
     unmeasured_by_reason = collections.Counter()
     appended = collections.Counter()
     appended_over = [0]
+    appended_from = {}           # an appended extension -> the name of a file that is printed as it is and carries it
     all_hours, cand_hours = collections.Counter(), collections.Counter()
     all_over, cand_over = [0], [0]
     tails = collections.Counter()
@@ -898,10 +1190,19 @@ def main():
         else:
             bump(all_hours, hour_bucket(modified), HOUR_CAP, all_over)
         base = os.path.basename(path)
-        if NAME_HINTS.search(base) and size < 100000:
+        evidence = evidence_of(base)
+        if evidence is None and size < 100000:
             note_names.add({"file": shown_path, "bytes": size})
         reasons, ext = name_reasons(base)
-        row["appended_extension"] = ext
+        # An extension is a piece of the name: when the name is withheld the extension is withheld with it (it can be the identifier),
+        # counted and not tabled, whatever the file's other fields say.
+        if ext and evidence is None and shown(base, count=False) != base:
+            counters["appended_extensions_withheld"] += 1
+            ext_printed = EXT_WITHHELD
+            ext = None
+        else:
+            ext_printed = ext
+        row["appended_extension"] = ext_printed
         head = None
         head_exact = None
         fd = None
@@ -933,7 +1234,7 @@ def main():
             row.update({"status": "read_failed", "reason": "the file could not be read", "error": failure})
             if reasons:
                 row["name_reasons"] = reasons
-            census.add(row)
+            census.add(row, evidence)
             continue
         found = list(reasons)
         if head_exact is not None and head_exact >= HEAD_THRESHOLD:
@@ -948,6 +1249,8 @@ def main():
             sizes["candidate_bytes"] += st.st_size
             if ext:
                 bump(appended, ext, EXT_CAP, appended_over)
+                if evidence is not None:
+                    appended_from.setdefault(ext, evidence)
             if modified is not None:
                 bump(cand_hours, hour_bucket(modified), HOUR_CAP, cand_over)
             if head is None:
@@ -994,7 +1297,7 @@ def main():
                                               "head_entropy": head, "windows": windows,
                                               "basis": "candidate: the end window reads below 6.5 bits per byte. That can be "
                                                        "padding, zero fill, a trailer or an unencrypted region; it does not show "
-                                                       "what was encrypted, and encryption between the windows is not seen"})
+                                                       "what was encrypted, and encryption between the windows is not seen"}, evidence)
                         except OSError as exc:
                             counters["profile_failures"] += 1
                             row["profiled"] = False
@@ -1004,8 +1307,8 @@ def main():
                 row["profiled"] = False
                 row["profile_skipped"] = unmeasured
                 not_profiled[unmeasured] += 1
-            candidates.add(row)
-            census.add(row)
+            row = candidates.add(row, evidence)
+            census.add(row, evidence)
         elif head is None:
             row["status"] = "unmeasured"
             row["reason"] = unmeasured
@@ -1013,14 +1316,14 @@ def main():
             counters["unmeasured_files"] += 1
             sizes["unmeasured_bytes"] += st.st_size
             unmeasured_by_reason[unmeasured] += 1
-            census.add(row)
+            census.add(row, evidence)
         else:
             row["status"] = "noncandidate"
             row["reasons"] = []
             counters["noncandidate_files"] += 1
             sizes["noncandidate_bytes"] += st.st_size
             if full_census:
-                census.add(row)
+                census.add(row, evidence)
         if fd is not None:
             os.close(fd)
 
@@ -1034,7 +1337,7 @@ def main():
     cand_page = hours(cand_hours, "candidates by hour")
     ext_page = NoReplacePage("encrypted_survey", [real, "appended extensions"], limit)
     for ext, n in sorted(appended.items(), key=lambda kv: (-kv[1], kv[0])):
-        ext_page.add({"extension": ext, "files": n})
+        ext_page.add({"extension": ext, "files": n}, appended_from.get(ext))
     tail_page = NoReplacePage("encrypted_survey", [real, "repeated tails"], limit)
     for tail, n in sorted(tails.items(), key=lambda kv: (-kv[1], kv[0])):
         if n > 1:
@@ -1050,6 +1353,7 @@ def main():
              "note_name_candidates": note_names.finish(), "skipped": skipped.finish(), "exceptions": exceptions.finish(),
              "all_files_mtime_hourly": all_page.finish(), "candidate_mtime_hourly": cand_page.finish(),
              "appended_extension_observations": ext_page.finish(), "repeated_tails": tail_page.finish()}
+    OWN_NAMES.update(page["all_results"] for page in pages.values() if page.get("all_results"))
 
     c = counters
     reasons = []
@@ -1082,6 +1386,9 @@ def main():
                        % (EXT_CAP, appended_over[0]))
     if census_problem:
         reasons.append(census_problem)
+    if BOUNDARY["replaced"]:
+        reasons.append("%d strings held an identifier-shaped text that the first rule missed and were replaced at the output (see boundary)"
+                       % BOUNDARY["replaced"])
     complete = "partial" if reasons else "complete"
     basis = ("; ".join(reasons) if reasons else
              "every entry under the root was visited and accounted for (candidate, noncandidate, unmeasured or read_failed), the read "
@@ -1089,11 +1396,14 @@ def main():
     receipt = {"parser": PARSER, "complete": complete, "status": complete, "status_basis": basis, "partial_reasons": reasons,
                "coverage": {**counters, "bytes_read": budget.read, "paths_withheld": WITHHELD_PATHS[0]}, "bytes": sizes,
                "parameters": {"root": shown_root, "sample": sample_size, "tail_bytes": tail_bytes, "read_budget_bytes": budget.total,
-                              "max_seconds": max_seconds, "exclude_top_level_dirs": exclude_top, "census": full_census}}
+                              "max_seconds": max_seconds, "exclude_top_level_dirs": [shown(x, count=False) for x in exclude_top],
+                              "census": full_census}}
     census.finish(receipt)
+    if getattr(census, "shown", None):
+        OWN_NAMES.add(census.shown)
 
     regular = counters["regular_files_visited"]
-    print(json.dumps({
+    print(json.dumps(release({
         "root": shown_root,
         "parser": PARSER,
         "complete": complete,
@@ -1134,8 +1444,9 @@ def main():
                           "files it names, once per printed path counted here: some families put the victim's identifier in a "
                           "directory or in the note's name. The name of any other file, an encrypted file's included, is printed as it "
                           "is. List the directory for a name that was withheld."} if WITHHELD_PATHS[0] else {}),
-        "sampling": {"method": "first %d profile-eligible candidates in traversal order (directories and names sorted, depth first); "
-                               "not random and not stratified; a candidate of 4096 bytes or less has no profile" % sample_size,
+        "sampling": {"method": "first %d profile-eligible candidates in print order (depth first; directories and names ordered by the text the "
+                               "answer prints for them, names that are withheld in an order drawn afresh every run, so which of them fall "
+                               "in the sample differs between runs); not stratified; a candidate of 4096 bytes or less has no profile" % sample_size,
                      "sample": sample_size, "profiled": sampled, "candidates_not_profiled": dict(not_profiled),
                      "tail_bytes": tail_bytes, "window_bytes": WINDOW},
         "census": None if census_problem else {"file": census.shown, "rows": census.rows,
@@ -1151,7 +1462,7 @@ def main():
                 "family until a reference matches. Take the questions this cannot answer (extent, recoverability, family, "
                 "timing) to file-format validation, a known-good counterpart or a documented layout. coverage and complete say "
                 "what was and was not read; a file in read_failed or unmeasured was not shown to be anything.",
-    }, indent=2))
+    }), indent=2))
 
 
 if __name__ == "__main__":
@@ -1163,5 +1474,5 @@ if __name__ == "__main__":
         raise
     except Exception as exc:  # never an empty or clean answer for a failure
         drop_temporary_files()
-        detail = describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, scrub(str(exc), "text"))
+        detail = describe(exc) if isinstance(exc, OSError) else "%s at %s" % (type(exc).__name__, where_it_failed(exc))
         fail("unexpected failure: %s" % detail)
