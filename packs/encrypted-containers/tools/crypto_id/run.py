@@ -244,7 +244,7 @@ _GROUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{4,6}(?![A-Za-z0-9])")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{8,}")
 _WORD_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _NAMED = re.compile(r"(?i)(?<![A-Za-z0-9])(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
-                    r"[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*([^\s\"'&;,/\\]+)")
+                    r"[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*([^\s\"'&;,/\\<][^\s\"'&;,/\\]*)")
 _CACHE = {}
 
 
@@ -383,7 +383,9 @@ def shown(path, count=True):
 
 
 # Layer 2: written apart from the rules above, over everything that is written. A string it finds suspect is replaced whole.
-_CHECK_QUICK = re.compile(r"(?i)[0-9]{6}|PRIVATE KEY|[A-Za-z0-9+_=-]{24}|pass|pwd|secret|token|api[_-]?key")
+_CHECK_QUICK = re.compile(r"(?i)[0-9]{6}|PRIVATE KEY|[A-Za-z0-9+_=-]{24}|pass|pwd|secret|token|api[_-]?key|AKIA|ASIA|gh.?_|github_pat|xox|eyJ|sk-|AIza|glpat|npm_")
+_CHECK_PREFIX = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{12}|gh[pousr]_[A-Za-z0-9]{16}|github_pat_[A-Za-z0-9_]{16}|xox[abeprs]-[A-Za-z0-9]{8}|eyJ[A-Za-z0-9_-]{8}"
+                           r"|sk-[A-Za-z0-9_-]{16}|AIza[0-9A-Za-z_-]{16}|glpat-[A-Za-z0-9_-]{12}|npm_[A-Za-z0-9]{16}")
 _CHECK_DIGITS = re.compile(r"(?<![0-9])(?:[0-9]{6}[-_. ]?){8}(?![0-9])")
 _CHECK_PEM = re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY|PRIVATE KEY-----")
 _CHECK_RUN = re.compile(r"[A-Za-z0-9+_=-]{24,}")
@@ -397,7 +399,7 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 def _suspect(text):
     if not _CHECK_QUICK.search(text) or _UUID.fullmatch(text):
         return False
-    if _CHECK_DIGITS.search(text) or _CHECK_PEM.search(text) or _CHECK_VALUE.search(text):
+    if _CHECK_DIGITS.search(text) or _CHECK_PEM.search(text) or _CHECK_VALUE.search(text) or _CHECK_PREFIX.search(text):
         return True
     for m in _CHECK_RUN.finditer(text):
         run = m.group()
@@ -536,9 +538,10 @@ CIPHERS = ("aes", "serpent", "twofish", "anubis", "arc4", "blowfish", "camellia"
 _ALT = lambda names: "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))   # noqa: E731 - longest first
 CIPHER_NAME = re.compile(_ALT(CIPHERS))
 HASH_NAME = re.compile(_ALT(HASHES))
-_MODES = ("ecb", "cbc", "ctr", "xts", "lrw", "cfb", "ofb", "gcm", "ccm", "cts", "plain64be", "plain64", "plain", "benbi", "null", "eboiv",
-          "tcw", "random", "adiantum", "essiv(?::(?:%s))?" % _ALT(HASHES))
-CIPHER_MODE = re.compile(r"(?:%s)(?:-(?:%s))*" % (_ALT(_MODES), _ALT(_MODES)))
+_MODE_NAMES = ("ecb", "cbc", "ctr", "xts", "lrw", "cfb", "ofb", "gcm", "ccm", "cts", "plain64be", "plain64", "plain", "benbi", "null", "eboiv",
+               "tcw", "random", "adiantum")
+_MODE = "(?:%s|essiv(?::(?:%s))?)" % (_ALT(_MODE_NAMES), _ALT(HASHES))
+CIPHER_MODE = re.compile(r"%s(?:-%s)*" % (_MODE, _MODE))
 UUID_FORM = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 WITHHELD_FIELDS = []
 
