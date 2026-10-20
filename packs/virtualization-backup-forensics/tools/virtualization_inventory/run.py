@@ -842,11 +842,12 @@ _PLACEHOLDER = r"<(?i:redacted|hidden|masked|removed|omitted|secret|password|pas
 _PH_TAIL = (r"(?-i:[ \t]+(?:(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}|[0-9]{8,40}(?![A-Za-z0-9])"
             r"|(?=(?:[a-z]{8,40}|[A-Z]{8,40})(?![A-Za-z0-9]))(?=[A-Za-z]{0,38}(?i:" + _RARE_RE + r"|[b-df-hj-np-tv-xz]{4}))[A-Za-z]{8}))")
 _PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!" + _PH_TAIL + r")"
-# The name of a flag that takes a secret (`-password x`, `--token x`, `--api-key x`): the words below, any word with `secret` in it, `key` (`-key x`) or `Key` after a
-# lower-case letter (`--sshKey x`), also after up to four words joined by `-` or `_` (`--db-password x`, `--ssh-key x`, `--master-key x`, `--secret-access-key x`);
-# `--key-file x`, `--keyboard x` and `-keep-alive x` are not (the name ends where the flag's value begins).
-_FLAG_NAME = (r"(?:[A-Za-z0-9]{1,20}[-_]){0,4}(?:(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|[A-Za-z0-9]{0,20}secret[A-Za-z0-9]{0,20}|token|api[-_]?key|access[-_]?key|key|auth|bearer|psk)"
-              r"|[A-Za-z0-9]{1,20}(?-i:Key))")
+# The name of a flag that takes a secret (`-password x`, `--token x`, `--api-key x`): the words below, any word with `secret` in it or ending in `token`, `key` (`-key x`) or `Key`,
+# `Token`, `Password`, `Passwd`, `Pwd`, `Pass`, `Passphrase`, `Secret` after a letter or a digit (`--sshKey x`, `--apiToken x`, `-AdminPassword x`, `--sshPass x`), also `pw` and `otp`, also after up to four
+# words joined by `-` or `_` (`--db-password x`, `--ssh-key x`, `--master-key x`, `--secret-access-key x`); `--key-file x`, `--keyboard x` and `-keep-alive x` are not (the name ends
+# where the flag's value begins).
+_FLAG_NAME = (r"(?:[A-Za-z0-9]{1,20}[-_]){0,4}(?:(?i:passw(?:or)?d|passwd|pass(?:[-_]?phrase)?|pwd|pw|otp|[A-Za-z0-9]{0,20}secret[A-Za-z0-9]{0,20}|[A-Za-z0-9]{0,20}token|api[-_]?key|access[-_]?key|key|keypass|storepass|userpass|auth|authorization|bearer|psk|credentials?|community)"
+              r"|[A-Za-z0-9]{1,20}(?-i:Key|Token|Password|Passwd|Pwd|Pass|Passphrase|Secret))")
 _NAMED_SECRET = re.compile(
     r"(?:(?i:pass[_-]?w(?:or)?d|passwd|passphrase|pwd|secret|token|credentials?|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|master[_-]?key"
     r"|shared[_-]?key|signing[_-]?key|encryption[_-]?key|secret[_-]?key|authorization|bearer|dsn|webhook[_-]?url|connection[_-]?string|ssh[_-]?key"
@@ -856,10 +857,32 @@ _NAMED_SECRET = re.compile(
     r"((?!line[ \t]+[0-9])(?!" + _PLACEHOLDER + _PH_END + r")(?:(?:<[^<>\"'\n]{0,200}>[^\s\"'<>;,&\\]*|[^\s\"'>;,&\\][^\s\"'<>;,&]*)(?:[ \t]+[^\s\"'<>;,&=:]+){0,3}))")
 _NAMED_FLAG = re.compile(r"(?<![\w-])--?" + _FLAG_NAME + r"(?:=|[ \t]+)(?!-)(?!" + _PLACEHOLDER + _PH_END + r")(<[^\s\"']*(?:[ \t]+[^\s\"'<>;,&=:]+)?|[^\s\"']+)")
 _NAMED_SET = re.compile(r"(?<![\w-])(?i:set|enable)[ \t]+(?i:passw(?:or)?d|secret|passphrase|token)[ \t]+(?:[0-9][ \t]+)?(?!" + _PLACEHOLDER + _PH_END + r")(<[^\s\"']*(?:[ \t]+[^\s\"'<>;,&=:]+)?|[^\s\"']+)")
+# The path of a file given to a flag that takes a key (`--key client.key`, `-key server.key`, `--client-key=admin.key`, `--tls-auth ta.key`, `--private-key ~/.ssh/id_rsa`) is a path and not a key: a name
+# that ends in .key .pem .pub .crt .p12 .pfx or .jks (to any flag), or, to a flag that ends in `key`, a path that starts with `~/`, `./`, `../`, `/` and one more `/`, or a drive. No part of it is token-like
+# or looks like a stretch of a key.
+_KEY_FLAG_END = re.compile(r"key[=\s]*$", re.I)
+_KEY_FILE_EXT = re.compile(r"[A-Za-z0-9_./~:\\-]{1,120}\.(?:key|pem|pub|crt|p12|pfx|jks)", re.I)
+_KEY_FILE_PATH = re.compile(r"(?:~|\.{1,2})/[A-Za-z0-9_./-]{1,120}|/[A-Za-z0-9_.-]{1,40}(?:/[A-Za-z0-9_.-]{1,40})+|[A-Za-z]:\\[A-Za-z0-9_.\\-]{1,120}", re.I)
+_KEY_FILE_PIECES = re.compile(r"[/\\._-]")
+
+
+def _random_piece(piece):
+    """A part of a path that is a stretch of a key: 8 or more letters and digits with a digit among the letters and either both cases or the class changing three times (ed25519 is not one)."""
+    if len(piece) < 8 or not piece.isalnum() or _HAS_DIGIT.search(piece) is None or piece.isdigit():
+        return False
+    return (_HAS_UPPER.search(piece) is not None and _HAS_LOWER.search(piece) is not None) or sum(1 for a, b in zip(piece, piece[1:]) if _cls(a) != _cls(b)) >= 3
+
+
+def _key_file(flag, value):
+    """Whether `value` given to `flag` is the path of a key file and not a key."""
+    return (len(value) <= 120 and (_KEY_FILE_EXT.fullmatch(value) is not None or (_KEY_FLAG_END.search(flag) is not None and _KEY_FILE_PATH.fullmatch(value) is not None))
+            and not any(_token_like(run) for run in _RUN_CAND.findall(value)) and not any(_random_piece(piece) for piece in _KEY_FILE_PIECES.split(value)))
+
+
 _LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
 # A string none of whose rules can match is passed without the slow path: every rule needs one of these.
-_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|-(?i:pass|pwd|secret|token|api|access|client|auth|bearer|psk)|(?i:key|secret)[ \t]|[a-z0-9]Key[ \t]|-----BEGIN")
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|[-_](?i:pass|pwd|secret|token|api|access|client|auth|bearer|psk)|(?i:key|secret|pass|passw(?:or)?d|passwd|pwd|pw|otp|token|community|credentials?|authorization)[ \t]|[a-z0-9](?:Key|Token|Password|Passwd|Pwd|Pass|Passphrase|Secret)[ \t]|-----BEGIN")
 _PIECE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
 _DIGIT_PLUS = re.compile(r"[0-9+]")
 _SEALED = {}
@@ -960,10 +983,10 @@ def _spans_withheld(part, kind):
     spans += [m.span() + ("token-shaped text",) for m in _BASE64_KEY.finditer(part) if "/" in m.group() or "+" in m.group()]
     spans += [m.span() + ("token-shaped text",) for m in _TOKEN_HEAD.finditer(part)]
     spans += [m.span(1) + ("secret",) for m in _NAMED_SECRET.finditer(part)]
-    spans += [m.span(1) + ("secret",) for m in _NAMED_FLAG.finditer(part)]
+    spans += [m.span(1) + ("secret",) for m in _NAMED_FLAG.finditer(part) if not _key_file(part[m.start():m.start(1)], m.group(1))]
     spans += [m.span(1) + ("secret",) for m in _NAMED_SET.finditer(part)]
     spans += [m.span() + ("token-shaped text",) for m in _RUN_CAND.finditer(part) if _token_like(m.group(), False)]
-    spans += [(m.start(), m.start() + len(m.group().rstrip(".-")), "token-shaped text") for m in _ID_FREE.finditer(part) if not _id_plausible(m.group().rstrip(".-"))]
+    spans += [(m.start(), m.start() + len(m.group().rstrip(".-")), "token-shaped text") for m in _ID_FREE.finditer(part) if not _id_plausible(m.group().rstrip(".-"), True)]
     spans += [m.span() + ("long number",) for m in _LONG_DIGITS.finditer(part)]
     spans += [m.span() + ("private key",) for m in _PRIVATE_KEY.finditer(part)]
     if not spans:
@@ -1062,11 +1085,13 @@ _ID_FREE = re.compile(r"(?<![A-Za-z0-9])(?:t10\.[A-Za-z0-9_.-]{8,120}|iqn\.[0-9]
 _NO_VOWEL5 = re.compile(r"[^aeiou]{5}")
 
 
-def _id_plausible(text):
+def _id_plausible(text, free=False):
     """Whether an iqn. or t10. id holds names: an iqn. whose domain and target have no token-like run and no run of letters of one case that is not words, a t10. whose vendor, model and
-    serial pieces are short or do not mix capitals, small letters and digits as random text does. A GUID or a hexadecimal id is as it is."""
+    serial pieces are short or do not mix capitals, small letters and digits as random text does. A GUID or a hexadecimal id is as it is. `free`: the id is in free text, where the
+    serial a maker puts after the colon of an iqn. (16 to 31 hexadecimal digits: flasharray.3fa2b1c4d5e6f708) is read as it is, as a bare run of them is."""
     if text.startswith("iqn."):
-        return not any(_token_like(run) for run in _RUN_CAND.findall(text[12:])) and all(_letters_plain(run) for run in _LETTER_RUNS.findall(text[12:]))
+        return (not any(_token_like(run) for run in _RUN_CAND.findall(text[12:]) if not (free and len(run) < 32 and _HEX_ONLY.fullmatch(run)))
+                and all(_letters_plain(run) for run in _LETTER_RUNS.findall(text[12:])))
     if text.startswith("t10."):
         for piece in _ID_SEGMENT.findall(text[4:]):
             if len(piece) >= 16 and (len(piece) > 24 or not _t10_piece_plain(piece)):
@@ -1209,35 +1234,24 @@ _TAG = re.compile(r"(?:[a-z]{2,5}|[A-Z]{2,5}|[A-Z][a-z]{1,4})[0-9]{1,4}")
 # product and service words that hold a pair of letters English words rarely do (vmware, vcenter, sqlserver, upgrade, update ...): taken out of a word before it is judged
 _TECH_WORDS = re.compile("vmware|vcenter|vsphere|vsan|proxmox|nextcloud|splunk|openvpn|pfsense|opnsense|switch|postgres(?:ql)?|pgsql|mysql|mssql|sqlserver|rabbitmq|kafka|"
                          "upgrad(?:e|ed|es|ing)|updat(?:e|ed|es|ing)|workstation|helpdesk|cloudhsm|hyperv|xenserver|netapp|nutanix|veeam|commvault|cohesity|wsus|sccm|pgbouncer|mongodb|redis|"
-                         "kubernetes|openshift|jumpbox|gitlab|github|jfrog|zabbix|ldaps?|radius|kerberos|tacacs")
+                         "kubernetes|openshift|jumpbox|gitlab|github|jfrog|zabbix|ldaps?|radius|kerberos|tacacs|cifs|ntnx|qemu|esxi|smtp|sftp|dhcp|https?|iscsi|ntfs|sshd|nightly|monthly|fortnightly|midnight|lightweight|scratch|snmp|crowdstrike|etcd|vmfs|btrfs|openbsd")
 
 
 _SHORT_ONE_CASE = re.compile(r"[a-z0-9]{1,4}|[A-Z0-9]{1,4}")
 _SHORT_TAG = re.compile(r"[a-z0-9]{1,4}|[A-Z0-9]{1,4}|[A-Z][a-z0-9]{0,3}")
+_NAME_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_HAS_VOWEL = re.compile(r"[aeiouyAEIOUY]")
+_HAS_DIGIT_ANY = re.compile(r"[0-9]")
+_YEAR = re.compile(r"(?:19|20)[0-9]{2}")
+_PERIOD = re.compile(r"(?:19|20)[0-9]{2}(?:[Qq][1-4]|[Hh][12]|[Ww][0-5][0-9])")        # 2024Q3, 2024H2, 2024W07
+# the words a copy, a clone, a template, a backup or a disk file of a snapshot is named with: a tag of four characters (z3r0, A1B2) may be followed by them and by nothing else
+_SUFFIX_WORD = re.compile("(?:copy|clone|cloned|template|old|new|bak|backup|snap|snapshot|replica|restore|restored|temp|tmp|test|prod|dev|stage|staging|lab|flat|delta|sesparse|final|orig|archive|disk|base|veeam)[0-9]{0,3}")
+_DATE_STAMP = re.compile("D?" + _DATE.pattern + "(?:_[0-9A-Fa-f]{4}(?![0-9A-Za-z]))?")        # Veeam's D2024-10-04T020013_AB12 (before .vbk)
 
 
-def _plain_word(token, dotted=False, tail=""):
-    """Whether the word after a secret's name in a name reads as a word (Vault, Ring, DB, Server01, KeePass, 2019) and not as a value: letters in words of three or more with vowels
-    (a capitals run of two or three is an acronym), at most four digits and only at the end; also, as a name, a tag and not a value: four characters or fewer of one case (a capital
-    first, digits anywhere), a counter of up to six digits or a date of eight (a time stamp of fourteen), a tag of 2 to 5 letters of one case (or one capital and small letters) and
-    1 to 4 digits (7 characters at most), the extension of a file when a dot comes before it, and a Veeam job name before the `D2024` its time stamp starts with. None of these when `+` or
-    `=` follows the word (`tail`), and with a `/` after it the four-character one only of one case: the value goes on in the alphabet of a key."""
-    if len(token) <= 3:
-        return True
-    if tail not in ("+", "="):
-        if (_SHORT_TAG if tail == "" else _SHORT_ONE_CASE).fullmatch(token) or (dotted and token.lower() in _FILE_EXT):
-            return True
-    if _VEEAM_GLUE.search(token):
-        token = token[:-5]
-        if len(token) <= 4 and tail not in ("+", "="):
-            return True
-    if tail not in ("+", "="):
-        if token.isdigit():
-            return len(token) <= 6 or _DATE8.fullmatch(token) is not None
-        if len(token) <= 7 and _TAG.fullmatch(token):
-            return True
-    if token.isdigit():
-        return False
+def _word_like(token):
+    """Whether a token with letters in it reads as words: letters in words of three or more with vowels (a capitals run of two or three is an acronym), at most four digits and only
+    at the end (Vault, Ring, DB, Server01, KeePass); the product words in _TECH_WORDS are taken out before a word is judged."""
     parts = _WORD_PARTS.findall(token)
     if not parts:
         return False
@@ -1255,7 +1269,7 @@ def _plain_word(token, dotted=False, tail=""):
             low = p.lower()
             if len(p) < 3 or (i > 0 and not p[0].isupper()):
                 return False
-            if sum(c in "aeiouy" for c in low) < 0.2 * len(p):
+            if sum(c in "aeiouy" for c in low) < 0.2 * len(p) and _TECH_WORDS.sub("", low):
                 return False
             for rest in _TECH_WORDS.sub(" ", low).split():
                 if _NO_VOWEL.search(rest) or any(rest[k:k + 2] in _RARE_PAIRS for k in range(len(rest) - 1)):
@@ -1263,12 +1277,109 @@ def _plain_word(token, dotted=False, tail=""):
     return True
 
 
+def _name_class(token, dotted=False, tail="", last=True):
+    """What a token after a secret's name is in a name. W: a word (Vault, Ring, DB, Server01, KeePass). E: the extension of a file after a dot. C: a counter or a year (five or six digits that start
+    with 0, as a snapshot's -000001; 1900 to 2039; a year with a quarter, a half or a week: 2024Q3). G: a group that is a tag and not a value (a number of up to four digits; a date of eight digits or a time stamp of fourteen; 2 to 5 letters of one
+    case and 1 to 4 digits, 7 characters at most; a Veeam job name before the `D2024` its time stamp starts with; and, as the last word of the name only (`last`), four characters or fewer of capitals
+    and digits or with a digit among them). V: a value. G, C and E are not given when `+` or `=` follows the token (`tail`), and with a `/` after it the four-character group only of one case: the value
+    goes on in the alphabet of a key. A token of more than 40 characters is a value."""
+    if len(token) > 40:
+        return "V"
+    free = tail not in ("+", "=")
+    if free and dotted and token.lower() in _FILE_EXT:
+        return "E"
+    if len(token) <= 3:
+        return "W" if token.isalpha() and (token[0].isupper() or _HAS_VOWEL.search(token) is not None) else "G"
+    if _VEEAM_GLUE.search(token):
+        token = token[:-5]
+        if len(token) <= 4 and free:
+            return "G"
+    if free and _PERIOD.fullmatch(token):
+        return "C"
+    if token.isdigit():
+        if not free:
+            return "V"
+        if (token[0] == "0" and len(token) <= 6) or _YEAR.fullmatch(token) is not None:
+            return "C"
+        return "G" if len(token) <= 4 or _DATE8.fullmatch(token) is not None else "V"
+    if _word_like(token):
+        return "W"
+    if free and len(token) <= 7 and _TAG.fullmatch(token) is not None:
+        return "G"
+    if free and last and (_SHORT_TAG if tail == "" else _SHORT_ONE_CASE).fullmatch(token) is not None and (token.isupper() or _HAS_DIGIT_ANY.search(token) is not None):
+        return "G"
+    return "V"
+
+
+def _plain_word(token, dotted=False, tail=""):
+    """Whether one word after a secret's name in a name is a word, a tag, a counter, a date or an extension and not a value (see _name_class); as the last word of the name."""
+    return _name_class(token, dotted, tail) != "V"
+
+
+def _bracket_end(rest):
+    """Where the bracket (or parenthesis) that is open before `rest` closes: the first `]` or `)` that no `[` or `(` in `rest` opened."""
+    depth = 0
+    for i, c in enumerate(rest):
+        if c in "[(":
+            depth += 1
+        elif c in "])":
+            if depth == 0:
+                return i
+            depth -= 1
+    return len(rest)
+
+
+def _words_after(text, start, more):
+    """Whether every word of `text` from `start` on (the first one after a secret's name or a key flag) is a word, a tag, a counter, a date or an extension, and not a value; two or more groups of 4
+    characters or more in a row (`ab12-cd34-ef56`, `1234-5678`) are one value written in parts and are judged as the one word they make together. A date and a time stamp are taken out first.
+    The word before a `/` in a path has one more characters in it to come (`more`). Inside brackets the words stop at the closing one."""
+    rest = text[start:]
+    if text.rfind("[", 0, start) > text.rfind("]", 0, start) or text.rfind("(", 0, start) > text.rfind(")", 0, start):
+        rest = rest[:_bracket_end(rest)]                  # the name of a secret inside brackets: what comes after the closing bracket is another name
+    body = _DATE_STAMP.sub("-", rest)
+    tokens = list(_NAME_TOKEN.finditer(body))
+    ends = "/" if more else ""
+    dotted = [(body[m.start() - 1] if m.start() else text[start - 1:start]) == "." for m in tokens]
+    lasts = [False] * len(tokens)                         # whether only the extension of a file, a figure or two, or a word like `copy` and `template` comes after the token
+    after = True
+    for i in range(len(tokens) - 1, -1, -1):
+        lasts[i] = after
+        m = tokens[i]
+        word = m.group().lower()
+        after = after and (len(word) <= 2 or _SUFFIX_WORD.fullmatch(word) is not None or (dotted[i] and word in _FILE_EXT) or (word[0] == "0" and word.isdigit() and len(word) <= 6)) and body[m.end():m.end() + 1] not in ("+", "=")
+    group, last = [], 0
+    for i, m in enumerate(tokens):
+        token, end = m.group(), m.end()
+        kind = _name_class(token, dotted[i], body[end:end + 1] or ends, lasts[i])
+        if kind == "V":
+            return False
+        if kind == "G" and len(token) >= 4:
+            group.append(token)
+            last = end
+        elif kind != "G":
+            if len(group) >= 2 and _name_class("".join(group), False, body[last:last + 1] or ends) == "V":
+                return False
+            group = []
+    return len(group) < 2 or _name_class("".join(group), False, body[last:last + 1] or ends) != "V"
+
+
+# a flag that takes a secret with the value glued to it or after a space (`--master-key X`, `--master-keyX`, `-keyX`, `--sshKeyX`, `--userpassX`, `--communityX`): a name that holds one is a command line.
+# The word after the flag is judged like the word after a secret's name; `--key-file`, `--keyboard`, `--keyring-backend` and `--key-size` are words after `--key`. A name without a dash before
+# the flag is a name.
+_FLAG_THEN = re.compile(r"(?<![A-Za-z0-9])--?" + _FLAG_NAME + r"(?=[ \t_.-]*['\"(\[]?([A-Za-z0-9]{1,40}))")
+
+
 def _secret_then_value(text, more=False):
     """A name or a path piece that holds a secret's name and then, glued or after a separator or a space, something that is not a word
-    (password-Zq7kP2mR, Token Zq7kP2mR, pwdZq7kP2mR) or a flag with its value (-password x, --token x, set password x): a command line, not a name.
-    `more`: a `/` follows the piece in the path it is cut from."""
-    return (_IDENT_FLAG.search(text) is not None or _NAMED_SET.search(text) is not None
-            or any(not _plain_word(m.group(1), text[m.start(1) - 1:m.start(1)] == ".", text[m.end(1):m.end(1) + 1] or ("/" if more else "")) for m in _SECRET_THEN.finditer(text)))
+    (password-Zq7kP2mR, Token Zq7kP2mR, pwdZq7kP2mR, password-srv01-Zq7kP2mR, password-ab12-cd34-ef56) or a flag with its value (-password x, --token x, --master-keyZq7kP2mR, set password x):
+    a command line, not a name. Every word after the first secret's name is judged, not the first alone. `more`: a `/` follows the piece in the path it is cut from."""
+    if _IDENT_FLAG.search(text) is not None or _NAMED_SET.search(text) is not None:
+        return True
+    m = _SECRET_THEN.search(text)
+    if m is not None and not _words_after(text, m.start(1), more):
+        return True
+    m = _FLAG_THEN.search(text)
+    return m is not None and not _words_after(text, m.start(1), more)
 
 
 def _ident_text_ok(text, limit, path, slash=False, more=False):
@@ -1647,11 +1758,36 @@ _S_RARE = "|".join("%s[%s]" % (a, "".join(sorted(p[1] for p in _RARE_PAIRS if p[
 _S_PH_TAIL = (r"(?-i:[ \t]+(?:(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}|[0-9]{8,40}(?![A-Za-z0-9])"
               r"|(?=(?:[a-z]{8,40}|[A-Z]{8,40})(?![A-Za-z0-9]))(?=[A-Za-z]{0,38}(?i:" + _S_RARE + r"|[b-df-hj-np-tv-xz]{4}))[A-Za-z]{8}))")
 _S_PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!" + _S_PH_TAIL + r")"
-# a flag that takes a secret (`-password x`, `--token x`, `--db-password x`, `--ssh-key x`, `-key x`; not `--key-file x` or `--keyboard x`)
-_S_FLAG_NAME = (r"(?:[a-z0-9]{1,20}[-_]){0,4}(?:pass(?:w(?:or)?d|phrase)?|pwd|[a-z0-9]{0,20}secret[a-z0-9]{0,20}|token|api[-_]?key|access[-_]?key|key|auth|bearer|psk"
-                r"|[a-z0-9]{1,20}(?-i:Key))")
+# a flag that takes a secret (`-password x`, `--token x`, `--db-password x`, `--ssh-key x`, `-key x`, `--apiToken x`; not `--key-file x` or `--keyboard x`)
+_S_FLAG_NAME = (r"(?:[a-z0-9]{1,20}[-_]){0,4}(?:pass(?:w(?:or)?d|[-_]?phrase)?|pwd|pw|otp|[a-z0-9]{0,20}secret[a-z0-9]{0,20}|[a-z0-9]{0,20}token|api[-_]?key|access[-_]?key|key|keypass|storepass|userpass|auth|authorization|bearer|psk|credentials?|community"
+                r"|[a-z0-9]{1,20}(?-i:Key|Token|Password|Passwd|Pwd|Pass|Passphrase|Secret))")
 _S_FLAG = re.compile(r"(?<![\w-])(?:--?" + _S_FLAG_NAME + r"|(?:set|enable)[ \t]+(?:password|secret|passphrase|token))(?:=|[ \t]+)(?!" + _S_PH + _S_PH_END + r")\S", re.I)
 _S_PHM = re.compile(_S_PH + _S_PH_END, re.I)
+_S_VALUE = re.compile(r"[^\s\"']+")
+# a flag that takes a secret with the value glued to it (`--master-keyX`, `-keyX`, `--sshKeyX`, `--userpassX`): the word glued to it
+_S_FLAG_GLUED = re.compile(r"(?<![A-Za-z0-9])--?" + _S_FLAG_NAME + r"([A-Za-z0-9]{5,40})", re.I)
+
+
+def _s_flag(flat):
+    """Whether `flat` holds a flag that takes a secret with a value, except a key file given to a flag that takes a key (--key client.key, --private-key ~/.ssh/id_rsa)."""
+    for m in _S_FLAG.finditer(flat):
+        v = _S_VALUE.match(flat, m.end() - 1)
+        if v is None or not _key_file(m.group()[:-1], v.group()):
+            return True
+    return False
+
+
+def _s_glued_random(word):
+    """Whether the word glued to a flag that takes a secret is a value and not a word: digits among its letters (two at the end are a counter), capitals among small letters more than once, two of the
+    pairs of letters words rarely hold, a run of five consonants or a vowel in fewer than one letter of five; five digits or more."""
+    core = word.rstrip("0123456789")
+    if not core:
+        return len(word) >= 5
+    if len(word) - len(core) > 2 or not core.isalpha():
+        return True
+    low = core.lower()
+    return (sum(1 for a, b in zip(core, core[1:]) if a.islower() and b.isupper()) >= 2 or sum(1 for k in range(len(low) - 1) if low[k:k + 2] in _RARE_PAIRS) >= 2
+            or _NO_VOWEL5.search(low) is not None or (len(low) >= 6 and sum(c in "aeiou" for c in low) < 0.2 * len(low)))
 
 
 def _class(c):
@@ -1747,7 +1883,7 @@ def _suspect(text):
     if _S_PEM.search(flat):
         return "a PEM marker"
     bare = _S_IDS.sub(_s_id_out, flat)
-    if _s_named(bare) or _S_FLAG.search(flat):
+    if _s_named(bare) or _s_flag(flat) or any(_s_glued_random(m.group(1)) for m in _S_FLAG_GLUED.finditer(flat)):
         return "a named secret"
     if ("t10." in flat or "iqn." in flat) and any(_s_id_random(m.group()) for m in _S_IDS.finditer(flat)):
         return "a random-looking run"
