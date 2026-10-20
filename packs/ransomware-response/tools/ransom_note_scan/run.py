@@ -35,25 +35,37 @@ the same as recovery_key_scan's, whose SecretValues class is copied below.
      is a single token or a single indicator value, where it would be a digest of the value.
   2. A value is written only when the caller asks (`write_values: true`), only when
      the tool runs as a job (JOB_ID and OUT are set) and only to a file under $OUT.
-     The skill says the job runs with `secret_output: true`. Outside a job the
-     request is refused and nothing is written.
+     The manifest makes a job that sets write_values a secret_output job, and the tool
+     checks SECRET_OUTPUT=1 in its environment: outside a job, and in a job that is not
+     secret output (its files would be sealed as ordinary output), the request is
+     refused and nothing is written.
   3. The values file is JSON Lines, mode 0600, created exclusively before anything is
      scanned; each row names the answer's finding id, the note's real path and the
      byte offset. A preview of each note's first lines goes there too, and nowhere else.
   4. A secret is never on a command line. This tool takes a directory and flags only.
   5. Every path this tool prints (notes, rejected name matches, directories it could not
-     list, exclusions, the root) has any component withheld that holds a token shaped like
-     an identifier (eight or more letters and digits, both kinds present) or a value the
-     note held. Some families put the victim's identifier in a name. The shape is a guess,
-     so a harmless name can be withheld, and an identifier of another shape is printed as
-     it is; list the directory for a name that was withheld. The values file keeps the
-     real path.
+     list, exclusions, the root) goes through shown(): any component is withheld that holds
+     a token shaped like an identifier (see shaped(); the manifest gives the rates at which
+     the shape misses and at which it withholds an ordinary name) or a value the note held.
+     Some families put the victim's identifier in a name. The shape is a guess, so a
+     harmless name can be withheld, and an identifier of another shape is printed as it is;
+     list the directory for a name that was withheld. The values file keeps the real path.
+
+`max_seconds` is the tool's own clock (below the manifest's timeout): when it runs out the
+walk stops, what was read is written, and the answer says `partial` and how much of the tree
+was not examined. A note being scanned is finished first. A stop signal (SIGTERM, SIGINT,
+SIGHUP) ends the tool with one JSON answer (status `failed`, `interrupted`), exit code
+128 + the signal, after removing the pages it was still writing; a values file already begun
+is kept, cut back to its last whole row, and the answer says how many rows it holds. A result
+file that is already there is never replaced by another result: the new one takes the next
+free name.
 
 What it does not locate: a long token with no label and no known shape (a 64-digit hex
 string after the word "Token") is neither located nor counted.
 """
 import datetime
 import errno
+import functools
 import hashlib
 import json
 import os
@@ -61,11 +73,13 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
-PARSER = "ransom_note_scan/2"
+PARSER = "ransom_note_scan/3"
 DEFAULT_MAX_SIZE = 200000
 MAX_SIZE_CEILING = 16 << 20
+DEFAULT_SECONDS, MAX_SECONDS = 480, 540    # the manifest allows 600: the walk stops here so that what it has is written and sealed
 DEFAULT_EXCLUDE_TOP = ["proc", "sys", "dev"]
 # Values seen are compared with each other to say "the same value as F000001" without
 # saying the value; the comparison is held in memory, and capped.
@@ -80,10 +94,10 @@ SHORT_NOTE = 128
 
 # Lossless paging (the same in every library tool that pages): the page an
 # agent reads stays small, and when there are more rows the whole result is
-# written as JSON Lines under work/<agent>/tool-output (in a job, $OUT/tool-output)
-# and named. The file name is a digest of the page's key (a path), never of a value.
-# Rows are written with ensure_ascii: a file name that is not UTF-8 reaches Python as lone
-# surrogates, which a UTF-8 file cannot hold and a JSON escape can.
+# written as JSON Lines under work/<agent>/tool-output and named.
+import hashlib
+
+
 class LosslessPage:
     def __init__(self, tool: str, key: object, limit: int):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -111,10 +125,29 @@ class LosslessPage:
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
 
+    def _cannot_write(self, exc: BaseException) -> None:
+        """The whole result cannot be kept: say so as JSON and stop, never a traceback."""
+        import sys as _sys
+        _sys.stdout.write(json.dumps({
+            "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+            "status": "failed",
+        }) + "\n")
+        _sys.exit(1)
+
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=True, default=str))
-        self._out.write("\n")
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
+            text = json.dumps(row, ensure_ascii=True, default=str)
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            self._cannot_write(exc)
 
     def add(self, row: object) -> None:
         self.total += 1
@@ -122,12 +155,15 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(
-                dir=self.path.parent, prefix=f".{self.path.name}-"
-            )
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    dir=self.path.parent, prefix=f".{self.path.name}-"
+                )
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -139,14 +175,137 @@ class LosslessPage:
             "truncated": self.total > len(self.page),
         }
         if self._out is not None:
-            self._out.flush()
-            os.fsync(self._out.fileno())
-            self._out.close()
-            assert self._tmp is not None
-            os.replace(self._tmp, self.path)
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                os.replace(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
             result["all_results"] = self.shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
+
+
+# BEGIN SHARED PLACE
+# The same text is in every windows-forensics tool that keeps a result file (a windows-forensics test holds the copies equal).
+# A result file that is there is never replaced by another result: a file of the same bytes is named again, any other result takes the next free
+# <stem>-<n><suffix>. The name is taken first, with an exclusive create, so a result written at the same moment cannot be replaced either.
+def same_bytes(a, b):
+    """Whether two files hold the same bytes (read in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def place_without_replacing(tmp, path):
+    """Move the finished `tmp` to `path` and never replace what is there. The name is taken first, with an exclusive create, so a
+    result written at the same moment cannot be replaced either. Returns the path that holds it."""
+    for n in range(1, 1000):
+        candidate = path if n == 1 else path.with_name("%s-%d%s" % (path.stem, n, path.suffix))
+        try:
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            if not os.path.islink(candidate) and same_bytes(tmp, candidate):
+                os.unlink(tmp)
+                return candidate
+            continue
+        os.close(fd)
+        os.replace(tmp, candidate)             # only replaces the empty file this call just made
+        return candidate
+    raise OSError("no free name beside %s" % path)
+# END SHARED PLACE
+
+
+# BEGIN SHARED PAGE
+# The same text is in every windows-forensics tool that pages through LosslessPage (held equal by a windows-forensics test): LosslessPage replaces a file of the
+# same name; this one places its finished file with place_without_replacing, and registers itself so that a stop can remove its temporary file.
+PAGES = []
+
+
+class NoReplacePage(LosslessPage):
+    """LosslessPage whose finished file is placed without replacing an earlier file of the same name (a rerun with other limits, or one
+    the time limit stopped, must not leave a smaller file where a larger one was)."""
+
+    def __init__(self, tool, key, limit):
+        super().__init__(tool, key, limit)
+        PAGES.append(self)
+
+    def finish(self) -> dict:
+        result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
+        if self._out is not None:
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                placed = place_without_replacing(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
+            self._tmp = None
+            self.path = placed
+            self.shown = self.shown[: len(self.shown) - len(Path(self.shown).name)] + placed.name
+            result["all_results"] = self.shown
+            result["all_results_format"] = "JSON Lines, one complete result per line"
+        return result
+# END SHARED PAGE
+
+
+# BEGIN SHARED STOP
+# The same text is in regkv, shellbags and amcache_apps (held equal by a windows-forensics test). SIGTERM, SIGINT and SIGHUP end the tool with JSON (status
+# interrupted, exit 128 + the signal) and remove the temporary file a page was writing; the tool's own clock (set_deadline) is below the manifest's.
+import signal
+import time
+
+STOP = {"last_word": None, "deadline": None}
+
+
+def set_deadline(seconds):
+    STOP["deadline"] = time.monotonic() + seconds
+
+
+def out_of_time():
+    return STOP["deadline"] is not None and time.monotonic() > STOP["deadline"]
+
+
+def _on_signal(signum, _frame):
+    for page in list(PAGES):
+        tmp = getattr(page, "_tmp", None)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    last_word = STOP["last_word"]
+    if last_word:
+        try:
+            last_word(signum)
+        except Exception:  # noqa: BLE001 - a last word is best effort
+            pass
+    os._exit(128 + signum)
+
+
+def install_signal_handlers(last_word=None):
+    STOP["last_word"] = last_word
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+
+
+def interrupted_answer(signum, **extra):
+    print(json.dumps({"error": "stopped by signal %d before the answer was complete" % signum, "status": "interrupted",
+                      "status_basis": "the tool was stopped by signal %d; nothing it had read is an answer" % signum,
+                      "signal": signum, **extra}), flush=True)
+# END SHARED STOP
 
 
 class SecretValuesRefused(Exception):
@@ -180,6 +339,15 @@ class SecretValues:
                 "file, not a sealed secret output. Run this as job_run tool=ransom_note_scan with "
                 "secret_output: true, and ask again there. Nothing was written."
             )
+        if os.environ.get("SECRET_OUTPUT") != "1":
+            raise SecretValuesRefused(
+                "write_values is refused in a job that was not run as secret output: its files would "
+                "be sealed as ordinary output. The harness sets SECRET_OUTPUT=1 for a secret job's "
+                "process and it is not set here. Run this as job_run tool=ransom_note_scan (its "
+                "manifest makes a job that sets write_values secret output), or give a command job "
+                "secret_output: true; if that is refused the same way, this run's harness does not set "
+                "the variable and the values mode is not available in it. Nothing was written."
+            )
         self.path = Path(self.out) / self.NAME
         self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)
         # Created now, before anything is scanned: a file or a link already at that name is
@@ -198,8 +366,9 @@ class SecretValues:
     def add(self, finding_id: str, locator: dict, value: str) -> None:
         if not self.enabled:
             return
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=True))
-        self._fh.write("\n")
+        # One write and a flush per row: a stop signal leaves whole rows on disk, at worst one cut row, which stop() removes.
+        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=True) + "\n")
+        self._fh.flush()
         self.written += 1
 
     def close(self) -> None:
@@ -208,6 +377,33 @@ class SecretValues:
             os.fsync(self._fh.fileno())
             self._fh.close()
             self._fh = None
+
+    def stop(self) -> None:
+        """Called when a stop signal ends the tool: close the file, cut it back to its last whole row and count the rows."""
+        if self._fh is None or self.path is None:
+            return
+        try:
+            self._fh.close()
+        except Exception:  # noqa: BLE001 - a signal can arrive inside a write
+            pass
+        self._fh = None
+        rows = last = at = 0
+        try:
+            with open(self.path, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    rows += chunk.count(b"\n")
+                    cut = chunk.rfind(b"\n")
+                    if cut >= 0:
+                        last = at + cut + 1
+                    at += len(chunk)
+            if last < at:
+                os.truncate(self.path, last)
+            self.written = rows
+        except OSError:
+            pass
 
     def summary(self) -> dict:
         return {
@@ -259,8 +455,38 @@ LANGUAGE = ("decrypt", "your files", "encrypted", "ransom", "bitcoin", "private 
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, **extra}))
+    print(json.dumps({"error": message, "status": "failed",
+                      "status_basis": "the tool stopped with an error (see error); it scanned no note", **extra}))
     raise SystemExit(1)
+
+
+PROGRESS = {}
+
+
+def last_word(signum):
+    """What the tool says when a stop signal ends it: one JSON answer, never a clean-looking partial one."""
+    values = PROGRESS.get("values")
+    held = None
+    if values is not None and values.enabled:
+        values.stop()
+        held = {"values_file": values.shown, "rows_in_values_file": values.written,
+                "values_file_is_partial": True,
+                "values_file_note": "the file holds the whole rows written before the stop, not every value of the tree; it is secret output"}
+    print(json.dumps({"error": "stopped by signal %d before the scan was complete" % signum, "status": "failed",
+                      "status_basis": "the tool was stopped by signal %d; the tables it was still writing were removed, so nothing it had "
+                                      "read is an answer" % signum,
+                      "interrupted": True, "signal": signum, "coverage_so_far": PROGRESS.get("coverage"), **(held or {})}), flush=True)
+
+
+def drop_temporary_files():
+    """Remove the files a page was still writing (a failure, not a stop signal, ended the tool)."""
+    for page in list(PAGES):
+        tmp = getattr(page, "_tmp", None)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def describe(exc):
@@ -436,39 +662,231 @@ def count_content(contents, sha, blob, note_id):
 
 # --- paths --------------------------------------------------------------------------
 
+# BEGIN SHARED WITHHOLDING
+# The same text is in pcap_extract, zeek_run, suricata_run and network_log_summary, so that the four tools withhold
+# the same strings; tests/pack-network-withholding.test.ts holds the copies equal. An identifier-shaped string is
+# withheld wherever the tool would print one: a name, a path component, a URL, a message that quotes either.
+COUNTS = {"names": 0, "urls": 0, "text": 0}
+# A run of name characters long enough to be a token. `=` is only a padding at the end (so a key= prefix stays);
+# `/` joins pieces of a base64 token and is handled apart, below.
+_RUN = re.compile(r"[A-Za-z0-9_+%-]{20,}={0,2}|[A-Za-z0-9_+%-]{14,}={2}")
+_SLASHED = re.compile(r"[A-Za-z0-9_+/%-]{30,}={0,2}")
+_HEX = re.compile(r"[0-9a-fA-F]{32,}")
+_PREFIXED = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+                       r"|xox[abeprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}"
+                       r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"
+                       r"|(?i:basic|bearer)\s+[A-Za-z0-9+/=._~-]{8,}")
+# User-info: after `//` (a URL, or a scheme-relative one), or bare as name:password@host. A mailto: address is not one.
+_USERINFO = re.compile(r"(?<=//)[^/?#\s@]+(?=@)")
+_BARE_USERINFO = re.compile(r"(?<![\w.%+:/-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:]{1,128}(?=@[\w\[])")
+
+
+def _withheld(what, length, kind):
+    COUNTS[kind] = COUNTS.get(kind, 0) + 1
+    return ("<%s withheld %d characters>" % (what, length)) if what else ("<withheld %d characters>" % length)
+
+
+def _token_run(run):
+    """Is this run of name characters shaped like a token, and not like words, dates or versions?"""
+    if _HEX.search(run):
+        return True
+    chunks = [(m.group()[0].isdigit(), m.start(), m.end()) for m in re.finditer(r"[A-Za-z]+|[0-9]+", run)]
+    # digits packed between letters ("a9b2c7"), which words, dates and versions do not do
+    packed = 0
+    for i, (is_digit, start, end) in enumerate(chunks):
+        if not is_digit or end - start > 3:
+            continue
+        before = i > 0 and not chunks[i - 1][0] and chunks[i - 1][2] == start
+        after = i + 1 < len(chunks) and not chunks[i + 1][0] and chunks[i + 1][1] == end
+        packed += 1 if before or after else 0
+    if packed >= 3:
+        return True
+    letters = [c for c in run if c.isalpha()]
+    case_flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
+    if len(letters) >= 20 and case_flips >= max(8, 0.4 * len(letters)):
+        return True
+    if run.endswith("==") and len(run) >= 16:
+        return True
+    if run.endswith("=") and len(run) >= 24:
+        return True
+    return len(run) >= 40 and run.isalnum() and any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
+
+
+def _randomish(piece):
+    """A piece of a path that is not a plain word: digits among letters, or capitals inside a word."""
+    if len(piece) < 4 or "." in piece or re.fullmatch(r"[A-Z][a-z]+", piece):
+        return False
+    letters = [c for c in piece if c.isalpha()]
+    mixed = any(c.islower() for c in letters) and any(c.isupper() for c in letters)
+    return (any(c.isdigit() for c in piece) and bool(letters)) or mixed
+
+
+def token_spans(text):
+    spans = [m.span() for m in _PREFIXED.finditer(text)]
+    for m in _RUN.finditer(text):
+        if _token_run(m.group()):
+            spans.append(m.span())
+    # A base64 token holds `/`: pieces too short to be one alone (an AWS-style secret has two) are caught as a whole.
+    for m in _SLASHED.finditer(text):
+        run = m.group()
+        if "/" in run and sum(1 for p in run.split("/") if _randomish(p)) >= 3 and re.search(r"[0-9+]", run):
+            spans.append(m.span())
+    # A flagged piece takes the random-looking pieces next to it across a `/`: the head of a token is not printed.
+    grown = []
+    for start, end in spans:
+        while start > 1 and text[start - 1] == "/":
+            m = re.search(r"[A-Za-z0-9_+%-]+$", text[:start - 1])
+            if not m or not _randomish(m.group()):
+                break
+            start = m.start()
+        while end < len(text) - 1 and text[end] == "/":
+            m = re.match(r"[A-Za-z0-9_+%-]+={0,2}", text[end + 1:])
+            if not m or not _randomish(m.group()):
+                break
+            end = end + 1 + m.end()
+        grown.append((start, end))
+    grown.sort()
+    merged = []
+    for start, end in grown:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def token_shaped(text):
+    return bool(token_spans(text))
+
+
+def scrub(text, kind="text"):
+    """The text with every token-shaped run and every user-info withheld."""
+    text = _USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), text)
+    text = _BARE_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), text)
+    out, last = [], 0
+    for start, end in token_spans(text):
+        out.append(text[last:start])
+        out.append(_withheld("token-shaped text", end - start, kind))
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def redact_url(url):
+    """A URL or request target without its user-info, its token-shaped path text, its query values or its fragment."""
+    rest, fragment = (url.split("#", 1) + [None])[:2]
+    rest, query = (rest.split("?", 1) + [None])[:2]
+    scheme = authority = ""
+    m = re.match(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)([^/]*)(.*)$", rest, re.S)
+    if m:
+        scheme, authority, rest = m.group(1), m.group(2), m.group(3)
+        if "@" in authority:
+            userinfo, authority = authority.rsplit("@", 1)
+            authority = _withheld("userinfo", len(userinfo), "urls") + "@" + authority
+    out = scheme + authority + scrub(rest, "urls")
+    if query is not None:
+        pairs = []
+        for pair in query.split("&"):
+            name, eq, value = pair.partition("=")
+            pairs.append(scrub(name, "urls") + (eq + _withheld("", len(value), "urls") if eq else ""))
+        out += "?" + "&".join(pairs)
+    if fragment is not None:
+        out += "#" + _withheld("", len(fragment), "urls")
+    return out
+
+
+def cell(value):
+    """Text for one tab-separated cell or one printed path: no tab or line break, and a byte that was not UTF-8
+    (a lone surrogate) written as \\xNN, so that no writer raises on it."""
+    text = value if isinstance(value, str) else str(value)
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif 0xD800 <= o <= 0xDFFF:
+            out.append("\\u%04x" % o)
+        elif o < 0x20 or o == 0x7F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+# END SHARED WITHHOLDING
+
+
+
+# BEGIN SHARED NAMES
+# The same text is in encrypted_survey and ransom_note_scan, so that the two tools judge a name alike (a ransomware-response test holds
+# the copies equal). A path is printed only through shown(): every component is judged, and no directory above a file is exempt.
 WITHHELD = "<identifier-shaped name withheld>"
-PATHS_WITHHELD = [0]
-TOKEN = re.compile(r"[A-Za-z0-9]{8,}")
+WITHHELD_PATHS = [0]              # printed paths that had a component withheld (one per call of shown)
+_IDRUN = re.compile(r"[A-Za-z0-9]{8,}")
+_WORDY = re.compile(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)*|[A-Z]+")
 
 
 def shaped(name):
-    """A token of eight or more letters and digits with both kinds present: the shape of many identifiers."""
-    for m in TOKEN.finditer(name):
+    """Whether a name holds a token shaped like an identifier. The name is folded with NFKC first (a full-width letter or digit counts as
+    the ASCII one). A token is a run of 8 or more ASCII letters and digits. It is identifier-shaped when it holds both letters and digits,
+    or is 10 or more digits, or is letters only and is not one word, one capitalised word, several capitalised words or all capitals."""
+    text = unicodedata.normalize("NFKC", name)
+    for m in _IDRUN.finditer(text):
         token = m.group(0)
-        if any(c.isdigit() for c in token) and any(c.isalpha() for c in token):
+        if token.isdigit():
+            if len(token) >= 10:
+                return True
+        elif any(c.isdigit() for c in token):
+            return True
+        elif not _WORDY.fullmatch(token):
             return True
     return False
 
 
-def shown(path, values=()):
+@functools.lru_cache(maxsize=65536)
+def _judge(part):
+    """What to print in place of one path component, or None to print it as it is."""
+    if shaped(part):
+        return WITHHELD
+    clean = scrub(part, "names")
+    return clean if clean != part else None
+
+
+def shown(path, values=(), keep_last=False, count=True):
     """A path as it may be printed: every component that could carry an identifier is withheld.
 
-    A component is withheld when it holds a token shaped like an identifier, or contains a value this
-    note held (case-insensitive, eight characters or more). The same rule applies to every path this
-    tool prints, so a name is never hidden on one line and printed on the next; a harmless directory
-    name can be withheld with it, and the directory can be listed. The real path is in the values file.
+    A component is withheld when it holds a token shaped like an identifier (shaped), when the shared withholding rules above find a
+    token, a key or user-info in it, or when it contains a value the note held (case-insensitive, 8 characters or more). The same rule
+    applies to every path a tool prints, so a name is never hidden on one line and printed on the next; a harmless name can be withheld
+    with it, and the directory can be listed. keep_last leaves the final component as it is (a name that is itself the evidence).
     """
     if not isinstance(path, str):
         return path
     parts = path.split("/")
+    last = len(parts) - 1
+    lows = [v.lower() for v in values if len(v) >= 8]
+    changed = False
     for i, part in enumerate(parts):
-        if not part:
+        if not part or (keep_last and i == last):
             continue
-        low = part.lower()
-        if shaped(part) or any(len(v) >= 8 and v.lower() in low for v in values):
-            parts[i] = WITHHELD
-            PATHS_WITHHELD[0] += 1
+        replaced = _judge(part)
+        if replaced is None and lows:
+            low = part.lower()
+            if any(v in low for v in lows):
+                replaced = WITHHELD
+        if replaced is not None:
+            parts[i] = replaced
+            changed = True
+    if changed and count:
+        WITHHELD_PATHS[0] += 1
     return "/".join(parts)
+# END SHARED NAMES
 
 
 # --- the walk -----------------------------------------------------------------------
@@ -481,16 +899,20 @@ def kind_of(mode):
     return "a special file"
 
 
-def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
+def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
     """Yield (path, size, mtime_ns) of the regular files under `top` whose name looks like a note's.
 
     Directories and entries are taken in name order and no link is followed. A directory that
     cannot be listed is an exception; one skipped at the top by name is an exclusion; a name
     match that is a link, a special file or cannot be examined is a rejection with its reason.
-    Anything that does not match by name is counted and not listed.
+    Anything that does not match by name is counted and not listed. When the tool's own clock runs out the
+    walk ends and `stopped` says how much of the tree it had not reached.
     """
     stack = [(top, True)]
     while stack:
+        if out_of_time():
+            stopped.update({"entries_not_examined": 0, "directories_not_entered": len(stack)})
+            return
         directory, is_top = stack.pop()
         try:
             with os.scandir(directory) as it:
@@ -502,7 +924,10 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
             continue
         counters["directories_visited"] += 1
         subdirs = []
-        for entry in entries:
+        for index, entry in enumerate(entries):
+            if out_of_time():
+                stopped.update({"entries_not_examined": len(entries) - index, "directories_not_entered": len(stack) + len(subdirs)})
+                return
             named = bool(NAME_HINTS.search(entry.name))
             try:
                 if entry.is_symlink():
@@ -517,7 +942,7 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
                         counters["directories_excluded"] += 1
                         exclusions.append({"path": shown(entry.path),
                                            "reason": "named in exclude_top_level_dirs: a top-level %s directory of a Linux root; "
-                                                     "its contents were not read. Name it as the root to read it" % shown(entry.name)})
+                                                     "its contents were not read. Name it as the root to read it" % shown(entry.name, count=False)})
                         continue
                     subdirs.append(entry.path)
                     continue
@@ -601,7 +1026,7 @@ def format_hint(text):
 
 # --- arguments ----------------------------------------------------------------------
 
-KNOWN_PARAMS = {"root", "max_size", "limit", "write_values", "exclude_top_level_dirs"}
+KNOWN_PARAMS = {"root", "max_size", "limit", "write_values", "exclude_top_level_dirs", "max_seconds"}
 
 
 def int_param(args, key, default, low, high=None):
@@ -616,6 +1041,7 @@ def int_param(args, key, default, low, high=None):
 
 
 def main():
+    install_signal_handlers(last_word)
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
@@ -626,9 +1052,10 @@ def main():
     if not isinstance(root, str) or not root:
         fail("root is required: a directory to sweep")
     if not os.path.isdir(root):
-        fail("no such directory", root=root)
+        fail("no such directory", root=shown(root, count=False))
     max_size = int_param(args, "max_size", DEFAULT_MAX_SIZE, 16, MAX_SIZE_CEILING)
     limit = int_param(args, "limit", 100, 1)
+    max_seconds = int_param(args, "max_seconds", DEFAULT_SECONDS, 1, MAX_SECONDS)
     write_values = args.get("write_values", False)
     if not isinstance(write_values, bool):
         fail("write_values must be true or false")
@@ -640,12 +1067,14 @@ def main():
         values = SecretValues(write_values)
     except SecretValuesRefused as exc:
         fail(str(exc), write_values="refused", written=False)
+    PROGRESS["values"] = values
+    set_deadline(max_seconds)
 
     real = os.path.realpath(root)
-    notes = LosslessPage("ransom_note_scan", [real, "notes"], limit)
-    occurrences = LosslessPage("ransom_note_scan", [real, "occurrences"], limit)
-    rejected = LosslessPage("ransom_note_scan", [real, "name matches not read"], limit)
-    exceptions = LosslessPage("ransom_note_scan", [real, "directories and entries not read"], limit)
+    notes = NoReplacePage("ransom_note_scan", [real, "notes"], limit)
+    occurrences = NoReplacePage("ransom_note_scan", [real, "occurrences"], limit)
+    rejected = NoReplacePage("ransom_note_scan", [real, "name matches not read"], limit)
+    exceptions = NoReplacePage("ransom_note_scan", [real, "directories and entries not read"], limit)
     exclusions = []
     counters = {"directories_visited": 0, "directories_failed": 0, "directories_excluded": 0, "entries_failed": 0,
                 "files_visited": 0, "name_matches": 0, "links_not_followed": 0, "special_files_skipped": 0}
@@ -659,9 +1088,11 @@ def main():
     earliest = None
     note_serial = finding_serial = 0
     bytes_read = 0
+    stopped = {}
+    PROGRESS["coverage"] = counters
 
     try:
-        for path, size, mtime_ns in walk(root, set(exclude_top), exceptions, exclusions, rejected, counters):
+        for path, size, mtime_ns in walk(root, set(exclude_top), exceptions, exclusions, rejected, counters, stopped):
             try:
                 blob = read_note(path, max_size)
             except Unreadable as exc:
@@ -762,7 +1193,7 @@ def main():
     finally:
         values.close()
 
-    variants = LosslessPage("ransom_note_scan", [real, "distinct note contents"], limit)
+    variants = NoReplacePage("ransom_note_scan", [real, "distinct note contents"], limit)
     for copies, first, sha in sorted(contents.values(), key=lambda e: (-e[0], e[1])):
         variants.add({"sha256": sha, "copies": copies, "first_note_id": first,
                       **({} if sha else {"digest_withheld": True})})
@@ -781,11 +1212,20 @@ def main():
         reasons.append("%d top-level directories were not read (exclude_top_level_dirs)" % counters["directories_excluded"])
     if lost:
         reasons.append("%d name matches were not read (larger than max_size, unreadable, a link or a special file)" % lost)
+    if stopped:
+        reasons.append("the time limit (max_seconds %d) was reached: %d entries of the directory being read and at least %d directories were "
+                       "not examined, so a note under them was not looked for" % (max_seconds, stopped["entries_not_examined"], stopped["directories_not_entered"]))
     candidate_count = sum(by_class.values())
+    status = "partial" if reasons else "complete"
+    basis = ("; ".join(reasons) if reasons else
+             "every directory was listed and every file whose name matched was read or is listed as not read with its reason; "
+             "the time limit was not reached")
     print(json.dumps({
         "root": shown(root),
         "parser": PARSER,
-        "complete": "partial" if reasons else "complete",
+        "complete": status,
+        "status": status,
+        "status_basis": basis,
         "partial_reasons": reasons,
         "candidate_count": candidate_count,
         "candidates_by_class": dict(sorted(by_class.items())),
@@ -803,16 +1243,18 @@ def main():
                        "time any program executed, and not tied to the clock setting of any machine"}
             if earliest else None),
         "coverage": {**counters, "name_matches_read": candidate_count, "bytes_read": bytes_read, "max_size": max_size},
+        "time_limit": {"max_seconds": max_seconds, "reached": bool(stopped), **stopped},
         "exclusions": exclusions,
         "exceptions": exceptions.page,
         "pages": pages,
         "secret_values": values.summary(),
-        "paths_withheld": PATHS_WITHHELD[0],
-        **({"paths_note": "A name component that holds a token shaped like an identifier, or a value the note held, is withheld "
+        "paths_withheld": WITHHELD_PATHS[0],
+        **({"paths_note": "A name component that holds a token shaped like an identifier (the manifest gives the rates at which the shape "
+                          "misses and at which it withholds an ordinary name), or a value the note held, is withheld "
                           "from every path in this answer and in the files it names, in notes, rejected name matches, directories "
-                          "not listed and exclusions alike; a harmless name can go with it. The real path is in the values file "
+                          "not listed and exclusions alike, once per printed path counted here; a harmless name can go with it. The real path is in the values file "
                           "when write_values was asked for; otherwise list the directory."}
-           if PATHS_WITHHELD[0] else {}),
+           if WITHHELD_PATHS[0] else {}),
         "truncated": any(p["truncated"] for p in pages.values()),
         **({"unrecognised_parameters": unknown} if unknown else {}),
         "note": "Locator output: no identifier, wallet, onion address, URL, contact address or note text is in this answer or in "
@@ -832,7 +1274,11 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            drop_temporary_files()
         raise
     except Exception as exc:  # never an empty or clean answer for a failure
-        fail("unexpected failure: %s: %s" % (type(exc).__name__, exc))
+        drop_temporary_files()
+        detail = describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, scrub(str(exc), "text"))
+        fail("unexpected failure: %s" % detail)
