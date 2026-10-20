@@ -11,21 +11,27 @@ Depends on the Computer Forensics Base Pack.
 
 ## What it carries
 
-**Twelve skills**, each a short decision-rule leaf; the second-level leaves are
+**Twenty skills**, each a short decision-rule leaf; the second-level leaves are
 opened only when the leaf above points to them.
 
 | Family | Skills |
 | --- | --- |
 | Triage | `triage/quarantine` |
-| Executables | `pe/structure`, `pe/signature-and-resources`, `elf/structure`, `elf/packing-and-identity` |
+| Executables | `pe/structure`, `pe/signature-and-resources`, `elf/structure`, `elf/packing-and-identity`, `macho/structure` |
+| Code | `code/static-inspection` |
+| Runtimes | `managed/clr`, `runtimes/go-rust`, `runtimes/python-packaged` |
+| Packing | `packing/static-recovery` |
 | Strings | `strings/obfuscated`, `strings/decoding-and-similarity` |
 | Capabilities | `capabilities/mapping` |
-| Documents | `documents/macros`, `documents/external-and-active-content` |
+| Documents | `documents/macros` (Office), `documents/external-and-active-content`, `documents/pdf-rtf` |
+| Scripts | `scripts/static-analysis` |
 | Rules | `rules/yara`, `rules/authoring` |
 
-Not provided yet, and the skills say so where it matters: a managed (.NET)
-metadata-table reader, Go, Rust and packaged-Python readers, script analysis, a
-Mach-O method, and a trust-aware Authenticode verifier.
+Not provided, and the skills say so where it matters: a .NET metadata-table
+reader or decompiler, a Go build-information reader, a Python archive extractor
+or bytecode disassembler, a packer-signature detector, parse-only script tooling,
+a decompiler for native code, and a trust-aware Authenticode verifier. The new skills
+name only programs the pack declares.
 
 **Six tools of its own, and `file_type` from the base pack.** `file_type` reads
 what a file is from its bytes and says when the extension disagrees.
