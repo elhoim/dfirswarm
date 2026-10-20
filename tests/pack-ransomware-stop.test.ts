@@ -65,6 +65,7 @@ const hiddenTemps = async (cwd: string, extra: string[] = []): Promise<string[]>
   return found;
 };
 
+const NUMBER: Record<string, number> = { SIGTERM: 15, SIGINT: 2, SIGHUP: 1 };
 const SIGNALS: [NodeJS.Signals, number][] = [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]];
 
 for (const [name, script, args] of [
@@ -81,7 +82,7 @@ for (const [name, script, args] of [
         assert.equal(ended.code, code, `${ended.stdout}\n${ended.stderr}`);
         assert.doesNotMatch(ended.stderr, /Traceback|KeyboardInterrupt/);
         const answer = JSON.parse(ended.stdout) as { status: string; status_basis: string; interrupted: boolean; signal: number; coverage_so_far: Record<string, number> };
-        assert.deepEqual([answer.status, answer.interrupted, answer.signal], ["failed", true, { SIGTERM: 15, SIGINT: 2, SIGHUP: 1 }[signal]]);
+        assert.deepEqual([answer.status, answer.interrupted, answer.signal], ["failed", true, NUMBER[signal]]);
         assert.ok(answer.status_basis.length > 20);
         assert.deepEqual(await hiddenTemps(cwd), [], "a temporary file was left");
         assert.deepEqual(await filesUnder(place), {}, "a result file was left that does not end in a receipt");
