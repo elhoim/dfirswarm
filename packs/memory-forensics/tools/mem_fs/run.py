@@ -39,7 +39,9 @@ Mounting needs FUSE (a /dev/fuse the process can open, and fusermount3 or fuserm
 to unmount), which a sandbox may not allow. When it fails the phase and the reason are
 returned, with the engine's own output kept in files (mode 0600) and its first lines
 shown after judging, because "no framework was available" is a legitimate line in a
-report and "the memory was examined and nothing was found" is not.
+report and "the memory was examined and nothing was found" is not. A log keeps the first LOG_CAP
+bytes of its stream (a thread always reads the pipe, so a verbose engine neither stops on a full
+pipe nor fills the disk); the answer counts what was read after that and discarded.
 
 The tool stops by itself: timeout_seconds is at most 480, so the end of the call (the
 engine's stop, its unmount, the last file) stays inside the manifest's 600. A signal
@@ -64,7 +66,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-PARSER = "mem_fs/4"
+PARSER = "mem_fs/5"
 CHUNK = 1 << 20
 DEFAULT_TIMEOUT = 300
 MIN_TIMEOUT = 2
@@ -77,6 +79,7 @@ CLEANUP_WAIT = 20
 OUT_DIR = "mem_fs"
 MANIFEST = "export-manifest.jsonl"
 ENGINE_LINES = 20
+LOG_CAP = 1 << 20          # bytes of each engine stream kept in its log file; the rest is counted and discarded
 ENGINE_LINE_CHARS = 200
 MAX_OUTPUT_COMPONENT = 200
 
@@ -247,8 +250,8 @@ def cell(value):
 # the hybrid design: an allow-list per kind, the shared deny-list, and an independent backstop with its own rules.
 #
 # LAYER 1, an allow-list per kind of field. "release" (a kernel release) and "build" (a Windows build string) are shown only when
-# they fit the grammar of a version: digits, dots and a few short words, nothing else, so a secret placed where a version should be
-# is never printed. "name" (a file, directory, process or key name; "path" is the same for a virtual path, judged as a whole and
+# they fit the grammar of a version: digits, dots and the tags of a closed list (_RELEASE_WORD, _BUILD_WORD), at most 6 groups and 16
+# digits after the version, nothing else, so a secret placed where a version should be, or glued to one, is not printed. "name" (a file, directory, process or key name; "path" is the same for a virtual path, judged as a whole and
 # then component by component) is shown when it has no invisible character, no component over 128 characters, and no chain of 16
 # or more letters and digits that looks random (it flips between letters and digits, or between capitals and lower case, as words
 # do not). A GUID, a SID, a 16-digit hexadecimal address and 0x numbers are typed ids and are plain. "text" (one line of an
@@ -262,7 +265,15 @@ def cell(value):
 # a piece was left between two cuts. A string it finds suspect is replaced whole by <withheld N characters: why>, counted, and the
 # answer says so.
 # NOT RECOGNISED, by design: a plain password or passphrase, a pronounceable secret, anything under 16 characters in a name,
-# a secret in an encoding this block does not read. Withholding is by shape.
+# a secret in an encoding this block does not read. Withholding is by shape. Measured on planted canaries (1,000 per cell; a name
+# alone, then inside `proc_<k>.exe`, `<k>.dll` and `1234-<k>`), the share of keys printed whole: base64 and base62 keys 0 to 0.6 per
+# cent alone and up to 3 per cent in a process-name context (24 base62 characters 2.9, 20 bytes of base64 1.2); in an engine line
+# (kind text, used for the first lines of a failure, which has no allow-list) base64 keys of 16 to 32 bytes 0 to 18 per cent, base62
+# keys of 20 to 32 characters 10 to 61, a 24-character base36 key 48 to 65, a base64 key holding `/` 37 to 40. The prefixes of the vendors in _PREFIX2 and _PREFIXED are read at 0 in 3,400 plants per shape. Printed at
+# 100 per cent, because they are made of pieces under 16 characters or of words: UUID-shaped and 16-digit hexadecimal secrets (typed
+# ids are plain), tokens split by `.` or `:` into pieces under 16 characters, word passwords and passphrases, 14-character policy
+# passwords. Printed at tens of per cent: base32 seeds (43 to 46), licence keys of 5 groups of 5 (18 to 20), a bcrypt hash's
+# 12-character fragments (28 to 31), a vendor key whose prefix is in no list (`rk_live_` was 3 to 18 before it was added).
 import collections
 import unicodedata
 
@@ -282,7 +293,7 @@ _TYPED = re.compile(r"\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f
                     r"|(?<![0-9A-Za-z])0x[0-9A-Fa-f]{1,16}(?![0-9A-Za-z])"
                     r"|(?<![0-9A-Za-z])[0-9A-Fa-f]{16}(?![0-9A-Za-z])"
                     r"|(?<=[A-Za-z0-9]_)[0-9a-z]{13}(?![0-9A-Za-z])")        # the publisher id at the end of an app package family name
-_PREFIX2 = re.compile(r"(?i)glpat-[0-9a-z_-]{16,}|sk_live_[0-9a-z]{16,}|sg\.[0-9a-z_-]{16,}|aiza[0-9a-z_-]{30,}|npm_[0-9a-z]{30,}|dop_v1_[0-9a-f]{32,}|ya29\.[0-9a-z_-]{20,}")
+_PREFIX2 = re.compile(r"(?i)glpat-[0-9a-z_-]{16,}|(?:sk|rk|pk)_(?:live|test)_[0-9a-z]{16,}|whsec_[0-9a-z_+/=-]{16,}|sg\.[0-9a-z_-]{16,}|aiza[0-9a-z_-]{30,}|npm_[0-9a-z]{30,}|dop_v1_[0-9a-f]{32,}|ya29\.[0-9a-z_-]{20,}")
 _PIECE = re.compile(r"[A-Za-z0-9+_=-]{16,}")
 _PLAIN_SHORT = re.compile(r"[A-Za-z0-9 ._()+-]{1,15}")
 _NAMED = re.compile(r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
@@ -294,13 +305,22 @@ _USER_INFO = re.compile(r"[^\s/@:<>]{1,64}:[^\s/<>]{1,128}@[\w\[]")        # the
 _UINFO_SPAN = re.compile(r"(?<![\w.%+-])[\w.%+-]{1,64}:[^\s/<>]{1,128}(?=@[\w\[])")   # layer 2's: up to the last @ before a host
 _BS_PEM = re.compile(r"-----BEGIN")
 _BS_PREFIX = re.compile(r"(?i)(?:akia|asia)[0-9a-z]{16}|gh[pousr]_[0-9a-z]{16}|github_pat_[0-9a-z_]{16}|xox[abeprs]-[0-9a-z-]{8}"
-                        r"|glpat-[0-9a-z_-]{16}|sk_live_[0-9a-z]{16}|sk-[0-9a-z_-]{16}|aiza[0-9a-z_-]{20}|npm_[0-9a-z]{20}"
+                        r"|glpat-[0-9a-z_-]{16}|(?:sk|rk|pk)_(?:live|test)_[0-9a-z]{16}|whsec_[0-9a-z_+/=-]{16}|sk-[0-9a-z_-]{16}|aiza[0-9a-z_-]{20}|npm_[0-9a-z]{20}"
                         r"|eyj[0-9a-z_-]{8,}\.[0-9a-z_-]{8,}\.|sg\.[0-9a-z_-]{16}|(?:basic|bearer)[ \t]{1,3}[0-9a-z+/=._~-]{16}")
 _BS_DIGITS = re.compile(r"[0-9]{19,}")
 _BS_HEX = re.compile(r"[0-9A-Fa-f]{32,}")
 _BS_RUN = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
-_RELEASE = re.compile(r"[0-9]{1,2}\.[0-9]{1,3}(?:\.[0-9]{1,3})?((?:[-+~._](?:[0-9]{1,6}|[A-Za-z]{1,12}[0-9]{0,3})){0,8})")
-_BUILD = re.compile(r"[0-9]{3,6}\.[0-9]{1,5}\.(?:x86|amd64|arm64|armnt)(?:fre|chk)(?:\.[a-z0-9_]{0,24}(?:\.[0-9-]{0,11})?)?")
+# The version grammars are closed lists, not shapes: a release is the version, then at most six groups, each a number of up to five digits or one
+# word of the list below (a distribution's or a kernel flavour's own tag, with up to three digits after it); a Windows build string is the build, the
+# platform, and a branch made of at most four words of the list below and a date. A word that is not in the list, or a seventh group, or more than 16
+# digits in all, is not a version, and the string is withheld whole (a release with an unusual tag is withheld too: the count is in boundary).
+_RELEASE_WORD = (r"(?:generic|lowlatency|aws|azure|gcp|gke|oem|cloud|kvm|virtual|raspi|rpi|lts|zen|hardened|realtime|rt|rc|amd64|arm64|armhf|"
+                 r"i[3-6]86|x86_64|aarch64|ppc64le|s390x|el|fc|ubuntu|debian|deb|bpo|pve|default|arch|mainline|android|linuxkit|coreos|edge|std|"
+                 r"smp|preempt|uek|lp|oracle|ibm|nvidia|tegra|stable|gentoo|xanmod|liquorix|v7l?|v8|k3s|dirty)")
+_RELEASE = re.compile(r"[0-9]{1,2}\.[0-9]{1,3}(?:\.[0-9]{1,3})?((?:[-+~._](?:[0-9]{1,5}|" + _RELEASE_WORD + r"[0-9]{0,3}(?:_[0-9]{1,3})?)){0,6})\+?")
+_BUILD_WORD = (r"(?:win7sp1|win7|win8|winmain|winblue|vibranium|th[12]|rs|rs[0-9]{1,2}|[0-9]{2}h[12]|vb|ni|co|ge|fe|zn|mn|sv|lh|r[0-9]{1,2}|release|"
+               r"prerelease|rtm|gdr|ldr|svc|sec|escrow|inmarket|flt|prod|dev|beta|lab|sp[0-9]|rc|oem|st|uup|rel|main|win|vista|server|ltsc)[0-9]{0,2}")
+_BUILD = re.compile(r"[0-9]{3,6}\.[0-9]{1,5}\.(?:x86|amd64|arm64|armnt)(?:fre|chk)(?:\.(?:" + _BUILD_WORD + r"(?:_" + _BUILD_WORD + r"){0,3})?(?:\.[0-9]{0,6}(?:-[0-9]{0,4})?)?)?")
 
 
 def _norm(text):
@@ -437,10 +457,10 @@ def shown(text, kind="name"):
     BOUNDARY["shown"] += 1
     key = "text" if kind == "text" else "names"
     if kind in ("release", "build"):
-        if len(text) > 64:
+        if len(text) > (48 if kind == "release" else 64):
             return _whole(text, "not a version", key)
-        grammar = _RELEASE if kind == "release" else _BUILD
-        if not grammar.fullmatch(text):
+        found = (_RELEASE if kind == "release" else _BUILD).fullmatch(text)
+        if not found or (kind == "release" and sum(len(d) for d in re.findall(r"[0-9]+", found.group(1))) > 16):
             return _whole(text, "not a %s string" % kind, key)
         return Shown(text)
     if _PLAIN_SHORT.fullmatch(text):
@@ -701,6 +721,22 @@ class SecretValuesRefused(Exception):
     pass
 
 
+def make_private_dirs(path):
+    """mkdir -p where every directory it creates has mode 0700 (Path.mkdir(parents=True, mode=...) gives the parents the default mode,
+    so the names of what is below them would be listed by anyone)."""
+    missing, here = [], Path(path)
+    while not os.path.lexists(here):
+        missing.append(here)
+        if here.parent == here:
+            break
+        here = here.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(str(directory), 0o700)
+        except FileExistsError:
+            pass
+
+
 class SecretValues:
     """Where content read from memory goes when, and only when, the caller asked for it.
 
@@ -730,7 +766,11 @@ class SecretValues:
                 "MemProcFS was not started.")
         self.root = Path(self.out) / OUT_DIR if enabled else None
         job_name = re.sub(r"[^A-Za-z0-9_.-]", "_", self.job)
-        self.shown = ("store/jobs/%s/out/%s" % (job_name, OUT_DIR)) if enabled else None
+        # Whether or not THIS call writes values, an earlier call of the same job may have: the job's output is what is sealed, and the
+        # answer must not say it holds no values because this call asked for none.
+        self.values_root = Path(self.out) / OUT_DIR if (self.job and self.out) else None
+        self.shown = ("store/jobs/%s/out/%s" % (job_name, OUT_DIR)) if self.values_root is not None else None
+        self.earlier = self._holds()
 
     def shown_path(self, rel: str) -> str:
         return "%s/%s" % (self.shown, rel)
@@ -739,7 +779,7 @@ class SecretValues:
         """A file descriptor for $OUT/mem_fs/<rel>, created exclusively, never through a link, mode 0600. The file is counted the moment it exists."""
         assert self.root is not None
         target = self.root / rel
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        make_private_dirs(target.parent)
         parent, root = target.parent.resolve(), self.root.resolve()
         if parent != root and root not in parent.parents:
             raise OSError(errno.EPERM, "the output directory is not inside $OUT/%s" % OUT_DIR)
@@ -762,7 +802,7 @@ class SecretValues:
     def note(self, row: dict) -> None:
         assert self.root is not None
         if self._manifest is None:
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            make_private_dirs(self.root)
             fd = os.open(str(self.root / MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
             self._manifest = os.fdopen(fd, "a", encoding="ascii")
         self._manifest.write(json.dumps(row) + "\n")
@@ -777,25 +817,36 @@ class SecretValues:
                 self._manifest.close()
                 self._manifest = None
 
-    def holds_values(self) -> bool:
-        """Whether $OUT/mem_fs holds a value file, from this call or an earlier one in the same job."""
-        if not self.enabled or self.root is None:
+    def _holds(self) -> bool:
+        """Whether $OUT/mem_fs holds anything, from this call or an earlier one in the same job (a call that asked for no values included)."""
+        if self.values_root is None:
             return False
         try:
-            return any(self.root.iterdir())
+            return any(self.values_root.iterdir())
         except OSError:
-            return self.written > 0
+            return False
+
+    def holds_values(self) -> bool:
+        return self._holds()
 
     def summary(self) -> dict:
-        present = self.written > 0 or self.holds_values()
-        return {
+        present = self.written > 0 or self.earlier or self._holds()
+        earlier_only = present and self.written == 0 and self.earlier
+        answer = {
             "requested": self.enabled,
             "written": self.written,
             "values_dir": self.shown if present else None,
-            "manifest": ("%s/%s" % (self.shown, MANIFEST)) if present and self.root is not None and (self.root / MANIFEST).exists() else None,
+            "manifest": ("%s/%s" % (self.shown, MANIFEST)) if present and self.values_root is not None and (self.values_root / MANIFEST).exists() else None,
             "contains_secret_values": present,
+            "earlier_calls_in_this_job_wrote_values": self.earlier,
             "format": "files byte for byte, mode 0600; the manifest is JSON Lines, appended to by every call of the job: item_id, virtual_path, output, bytes, sha256, status" if present else None,
         }
+        if present and not self.enabled:
+            answer["note"] = ("this call asked for no values and wrote none, but the job's output holds values written by earlier calls of this job: "
+                              "treat the whole output as secret; the manifest, appended to by every call, is the record of what is there")
+        elif earlier_only:
+            answer["note"] = "this call wrote no value; the values in the job's output were written by earlier calls (the manifest lists them all)"
+        return answer
 
 
 def writable_mount(path):
@@ -894,6 +945,41 @@ def engine_lines(path):
     return {"lines": [shown(line[:ENGINE_LINE_CHARS], "text") for line in text[:ENGINE_LINES] if line.strip()],
             "lines_in_first_64k": len(text), "more_than_64k": more,
             "note": "the first %d lines, each cut at %d characters and judged as text; the whole log is the file named in logs" % (ENGINE_LINES, ENGINE_LINE_CHARS)}
+
+
+class LogDrain:
+    """Copies one stream of the engine into its private log file, the first LOG_CAP bytes of it; the rest is read, counted and discarded.
+    A pipe that is always read cannot fill and stop the engine, and the log of a verbose engine (raw text of the capture, 0600 but not
+    judged) cannot grow without bound, which a file the engine writes itself would."""
+
+    def __init__(self, stream, handle):
+        self.stream, self.handle, self.kept, self.dropped = stream, handle, 0, 0
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            while True:
+                data = self.stream.read1(65536)
+                if not data:
+                    break
+                room = max(0, LOG_CAP - self.kept)
+                if room:
+                    try:
+                        self.handle.write(data[:room])
+                        self.kept += min(room, len(data))
+                    except (OSError, ValueError):
+                        room = 0
+                self.dropped += len(data) - min(room, len(data))
+        except (OSError, ValueError):
+            pass
+
+    def finish(self, wait):
+        self.thread.join(wait)
+        try:
+            self.handle.flush()
+        except (OSError, ValueError):
+            pass
 
 
 def _pdeathsig():
@@ -1018,9 +1104,9 @@ def main():
         fail("the engine's log files could not be created next to the mount", reason=shown(describe_text(exc), "text"), logs=str(stdout_log))
     STATE["logs"] = {"stdout": str(stdout_log), "stderr": str(stderr_log)}
     try:
-        # Files instead of pipes: MemProcFS can be verbose, and a full pipe would
-        # otherwise deadlock before the mount becomes readable. They are kept.
-        proc = subprocess.Popen(argv, stdout=stdout_file, stderr=stderr_file,
+        # Pipes that a thread per stream always reads into the log files (up to LOG_CAP each): MemProcFS can be verbose, and a full pipe
+        # would otherwise deadlock before the mount becomes readable. The logs are kept.
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 preexec_fn=_pdeathsig if sys.platform.startswith("linux") else None)
     except OSError as exc:
         stdout_file.close()
@@ -1028,6 +1114,7 @@ def main():
         fail("memprocfs would not start", phase="startup", reason=shown(describe_text(exc), "text"), command=" ".join(argv),
              logs={"stdout": str(stdout_log), "stderr": str(stderr_log)})
 
+    drains = [LogDrain(proc.stdout, stdout_file), LogDrain(proc.stderr, stderr_file)]
     state = {"phase": "startup", "abandon": False}
     problem = None  # (phase, message)
     result = {}
@@ -1091,9 +1178,11 @@ def main():
             os.close(source_fd)
             item["status"] = judged("failed: the output file could not be created: %s" % describe(exc))
             return "failed"
+        # `size` and the digest count the bytes the operating system accepted (an unbuffered writer, short writes followed), so a disk that
+        # fills leaves a count, a digest and a file that agree; what is on disk is read back at the end and said.
         digest, size, partial, error = hashlib.sha256(), 0, None, None
         try:
-            with os.fdopen(fd, "wb") as out, os.fdopen(source_fd, "rb") as src:
+            with os.fdopen(fd, "wb", buffering=0) as out, os.fdopen(source_fd, "rb") as src:
                 while True:
                     if state["abandon"]:
                         partial = "the call was stopped or its deadline was reached"
@@ -1104,27 +1193,41 @@ def main():
                     if size + len(chunk) > max_bytes:
                         partial = "max_bytes_per_path (%d) was reached while reading" % max_bytes
                         break
-                    out.write(chunk)
-                    digest.update(chunk)
-                    size += len(chunk)
-                out.flush()
+                    view = memoryview(chunk)
+                    while len(view):
+                        taken = out.write(view)
+                        if not taken:
+                            raise OSError(errno.EIO, "a write took no bytes")
+                        digest.update(view[:taken])
+                        size += taken
+                        view = view[taken:]
                 os.fsync(out.fileno())
         except OSError as exc:
             error = exc
+        try:
+            on_disk = os.lstat(secret.root / rel).st_size
+        except OSError:
+            on_disk = None
         item["bytes"] = size
+        if on_disk is not None and on_disk != size:
+            item["bytes_on_disk"] = on_disk
         item["output"] = shown(secret.shown_path(rel), "path")
+        kept = "%d bytes are on disk and kept" % (on_disk if on_disk is not None else size)
         if error is not None:
-            item["status"] = judged("failed: reading %s: %s; %d bytes were written and are kept" % (label, describe(error), size))
+            item["status"] = judged("failed: copying %s: %s; %s (the manifest row counts the %d bytes the system accepted and their digest)" % (label, describe(error), kept, size))
             category = "failed"
         elif partial:
-            item["status"] = "partial: %s; %d bytes were written and are kept" % (partial, size)
+            item["status"] = "partial: %s; %s" % (partial, kept)
             category = "partial"
         else:
             item["status"] = "exported"
             category = "exported"
         try:
-            secret.note({"item_id": item["item_id"], "virtual_path": virtual, "output": rel, "bytes": size,
-                         "sha256": digest.hexdigest(), "status": str(item["status"])})
+            row = {"item_id": item["item_id"], "virtual_path": virtual, "output": rel, "bytes": size,
+                   "sha256": digest.hexdigest(), "status": str(item["status"])}
+            if on_disk is not None and on_disk != size:
+                row["bytes_on_disk"] = on_disk
+            secret.note(row)
         except OSError as exc:
             # The file is on disk and counted; a manifest row that could not be written is said, never hidden.
             item["status"] = Shown(str(item["status"]) + "; the manifest row was not written: " + describe(exc))
@@ -1145,7 +1248,7 @@ def main():
                     item["status"] = "refused: %s" % exc.reason
                     category = "refused"
                 except (RuntimeError, OSError) as exc:
-                    item["status"] = judged("failed: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+                    item["status"] = judged("failed: %s" % describe_text(exc))
                     category = "failed"
             counts[category] += 1
             page.add(sealed(item))
@@ -1248,7 +1351,7 @@ def main():
             page.add(sealed(hidden_rows[index]))
 
     def describe_for_result(exc):
-        return exc if isinstance(exc, (FileNotFoundError, OutsideMount)) else describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)
+        return exc if isinstance(exc, (FileNotFoundError, OutsideMount)) else describe_text(exc)
 
     def work():
         try:
@@ -1308,8 +1411,13 @@ def main():
                             break
             if is_mounted(mount) and not problem:
                 problem = ("cleanup", "memprocfs stopped but the FUSE mount remained")
-            stdout_file.close()
-            stderr_file.close()
+            for drain in drains:
+                drain.finish(5)
+            for handle in (stdout_file, stderr_file, proc.stdout, proc.stderr):
+                try:
+                    handle.close()
+                except (OSError, ValueError):
+                    pass
             if state["abandon"] and worker is not None:
                 worker.join(5)
             secret.close()
@@ -1328,7 +1436,10 @@ def main():
         if unreached > 0:
             counts["not_attempted"] += unreached
     logs = {"stdout": str(stdout_log), "stderr": str(stderr_log),
-            "stdout_bytes": stdout_log.stat().st_size, "stderr_bytes": stderr_log.stat().st_size, "mode": "0600"}
+            "stdout_bytes": stdout_log.stat().st_size, "stderr_bytes": stderr_log.stat().st_size, "mode": "0600",
+            "stdout_dropped_bytes": drains[0].dropped, "stderr_dropped_bytes": drains[1].dropped,
+            "cap_bytes": LOG_CAP,
+            "cap_note": "each log keeps the first %d bytes of its stream; what the engine wrote after that was read and discarded (the dropped counts)" % LOG_CAP}
     paged = page.finish()
     items = {"items": page.page} if mode == "export" else {}
 
@@ -1414,8 +1525,14 @@ def main():
 
 
 def describe_text(exc):
-    code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc))
+    """An exception as words that name no path: the message of an OSError is its strerror (no file name); a RuntimeError from resolving a path
+    quotes the path it was resolving, with the components of the mounted tree, so it is not quoted; any other message is judged as a path."""
+    if isinstance(exc, OSError):
+        code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
+        return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or type(exc).__name__)
+    if isinstance(exc, RuntimeError):
+        return "%s: a symbolic link loop, or a path too deep to resolve, in the mounted tree (the resolver's message quotes the path and is not shown)" % type(exc).__name__
+    return "%s: %s" % (type(exc).__name__, shown(str(exc), "path"))
 
 
 def run_guarded():

@@ -28,9 +28,10 @@ Headers recognised:
 
 What the answer prints from the capture is header facts: numbers, the four-letter state of a hibernation file, and two strings that sit in
 a capture as free text, a kernel release (kernel_build) and a Windows build string (version_user). Those two are shown only when they have
-the grammar of a version (the SHOWN block): a secret placed where a version should be is not printed, and the banner around a kernel
+the grammar of a version, a closed list of tags (the SHOWN block): a secret placed where a version should be, or glued to one, is not printed, and the banner around a kernel
 release is not printed at all (kernel_build_offset says where it is). The tool stops its sampling by itself after SCAN_SECONDS, and a signal
-ends it with one JSON answer (status interrupted, exit 128 plus the signal).
+ends it with one JSON answer (status interrupted, exit 128 plus the signal). The walk of a LiME file's headers has its own clock
+(LIME_WALK_SECONDS) and cap; when it stops before the end of the file (container.walk_complete false) the status is partial.
 """
 import errno
 import hashlib
@@ -45,7 +46,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-PARSER = "mem_profile/3"
+PARSER = "mem_profile/4"
 HINTS = [
     (b"Windows", "Windows"), (b"Linux version ", "Linux"),
     (b"Darwin Kernel Version", "macOS or iOS"), (b"FreeBSD", "FreeBSD"),
@@ -62,6 +63,8 @@ FIRST_OFFSETS = 5
 LIME_MAGIC = 0x4C694D45  # the bytes "EMiL"
 LIME_HEADER = 32
 LIME_WALK_CAP = 1_000_000
+LIME_WALK_SECONDS = 60  # the walk of a LiME file's headers stops here (one read per range); the sampling that follows has its own SCAN_SECONDS
+LIME_CHECK_EVERY = 1024  # ranges between two looks at the clock
 RANGE_PAGE = 200
 SCAN_SECONDS = 200      # the sampling stops here; the manifest's limit is 300
 
@@ -232,8 +235,8 @@ def cell(value):
 # the hybrid design: an allow-list per kind, the shared deny-list, and an independent backstop with its own rules.
 #
 # LAYER 1, an allow-list per kind of field. "release" (a kernel release) and "build" (a Windows build string) are shown only when
-# they fit the grammar of a version: digits, dots and a few short words, nothing else, so a secret placed where a version should be
-# is never printed. "name" (a file, directory, process or key name; "path" is the same for a virtual path, judged as a whole and
+# they fit the grammar of a version: digits, dots and the tags of a closed list (_RELEASE_WORD, _BUILD_WORD), at most 6 groups and 16
+# digits after the version, nothing else, so a secret placed where a version should be, or glued to one, is not printed. "name" (a file, directory, process or key name; "path" is the same for a virtual path, judged as a whole and
 # then component by component) is shown when it has no invisible character, no component over 128 characters, and no chain of 16
 # or more letters and digits that looks random (it flips between letters and digits, or between capitals and lower case, as words
 # do not). A GUID, a SID, a 16-digit hexadecimal address and 0x numbers are typed ids and are plain. "text" (one line of an
@@ -247,7 +250,15 @@ def cell(value):
 # a piece was left between two cuts. A string it finds suspect is replaced whole by <withheld N characters: why>, counted, and the
 # answer says so.
 # NOT RECOGNISED, by design: a plain password or passphrase, a pronounceable secret, anything under 16 characters in a name,
-# a secret in an encoding this block does not read. Withholding is by shape.
+# a secret in an encoding this block does not read. Withholding is by shape. Measured on planted canaries (1,000 per cell; a name
+# alone, then inside `proc_<k>.exe`, `<k>.dll` and `1234-<k>`), the share of keys printed whole: base64 and base62 keys 0 to 0.6 per
+# cent alone and up to 3 per cent in a process-name context (24 base62 characters 2.9, 20 bytes of base64 1.2); in an engine line
+# (kind text, used for the first lines of a failure, which has no allow-list) base64 keys of 16 to 32 bytes 0 to 18 per cent, base62
+# keys of 20 to 32 characters 10 to 61, a 24-character base36 key 48 to 65, a base64 key holding `/` 37 to 40. The prefixes of the vendors in _PREFIX2 and _PREFIXED are read at 0 in 3,400 plants per shape. Printed at
+# 100 per cent, because they are made of pieces under 16 characters or of words: UUID-shaped and 16-digit hexadecimal secrets (typed
+# ids are plain), tokens split by `.` or `:` into pieces under 16 characters, word passwords and passphrases, 14-character policy
+# passwords. Printed at tens of per cent: base32 seeds (43 to 46), licence keys of 5 groups of 5 (18 to 20), a bcrypt hash's
+# 12-character fragments (28 to 31), a vendor key whose prefix is in no list (`rk_live_` was 3 to 18 before it was added).
 import collections
 import unicodedata
 
@@ -267,7 +278,7 @@ _TYPED = re.compile(r"\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f
                     r"|(?<![0-9A-Za-z])0x[0-9A-Fa-f]{1,16}(?![0-9A-Za-z])"
                     r"|(?<![0-9A-Za-z])[0-9A-Fa-f]{16}(?![0-9A-Za-z])"
                     r"|(?<=[A-Za-z0-9]_)[0-9a-z]{13}(?![0-9A-Za-z])")        # the publisher id at the end of an app package family name
-_PREFIX2 = re.compile(r"(?i)glpat-[0-9a-z_-]{16,}|sk_live_[0-9a-z]{16,}|sg\.[0-9a-z_-]{16,}|aiza[0-9a-z_-]{30,}|npm_[0-9a-z]{30,}|dop_v1_[0-9a-f]{32,}|ya29\.[0-9a-z_-]{20,}")
+_PREFIX2 = re.compile(r"(?i)glpat-[0-9a-z_-]{16,}|(?:sk|rk|pk)_(?:live|test)_[0-9a-z]{16,}|whsec_[0-9a-z_+/=-]{16,}|sg\.[0-9a-z_-]{16,}|aiza[0-9a-z_-]{30,}|npm_[0-9a-z]{30,}|dop_v1_[0-9a-f]{32,}|ya29\.[0-9a-z_-]{20,}")
 _PIECE = re.compile(r"[A-Za-z0-9+_=-]{16,}")
 _PLAIN_SHORT = re.compile(r"[A-Za-z0-9 ._()+-]{1,15}")
 _NAMED = re.compile(r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
@@ -279,13 +290,22 @@ _USER_INFO = re.compile(r"[^\s/@:<>]{1,64}:[^\s/<>]{1,128}@[\w\[]")        # the
 _UINFO_SPAN = re.compile(r"(?<![\w.%+-])[\w.%+-]{1,64}:[^\s/<>]{1,128}(?=@[\w\[])")   # layer 2's: up to the last @ before a host
 _BS_PEM = re.compile(r"-----BEGIN")
 _BS_PREFIX = re.compile(r"(?i)(?:akia|asia)[0-9a-z]{16}|gh[pousr]_[0-9a-z]{16}|github_pat_[0-9a-z_]{16}|xox[abeprs]-[0-9a-z-]{8}"
-                        r"|glpat-[0-9a-z_-]{16}|sk_live_[0-9a-z]{16}|sk-[0-9a-z_-]{16}|aiza[0-9a-z_-]{20}|npm_[0-9a-z]{20}"
+                        r"|glpat-[0-9a-z_-]{16}|(?:sk|rk|pk)_(?:live|test)_[0-9a-z]{16}|whsec_[0-9a-z_+/=-]{16}|sk-[0-9a-z_-]{16}|aiza[0-9a-z_-]{20}|npm_[0-9a-z]{20}"
                         r"|eyj[0-9a-z_-]{8,}\.[0-9a-z_-]{8,}\.|sg\.[0-9a-z_-]{16}|(?:basic|bearer)[ \t]{1,3}[0-9a-z+/=._~-]{16}")
 _BS_DIGITS = re.compile(r"[0-9]{19,}")
 _BS_HEX = re.compile(r"[0-9A-Fa-f]{32,}")
 _BS_RUN = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
-_RELEASE = re.compile(r"[0-9]{1,2}\.[0-9]{1,3}(?:\.[0-9]{1,3})?((?:[-+~._](?:[0-9]{1,6}|[A-Za-z]{1,12}[0-9]{0,3})){0,8})")
-_BUILD = re.compile(r"[0-9]{3,6}\.[0-9]{1,5}\.(?:x86|amd64|arm64|armnt)(?:fre|chk)(?:\.[a-z0-9_]{0,24}(?:\.[0-9-]{0,11})?)?")
+# The version grammars are closed lists, not shapes: a release is the version, then at most six groups, each a number of up to five digits or one
+# word of the list below (a distribution's or a kernel flavour's own tag, with up to three digits after it); a Windows build string is the build, the
+# platform, and a branch made of at most four words of the list below and a date. A word that is not in the list, or a seventh group, or more than 16
+# digits in all, is not a version, and the string is withheld whole (a release with an unusual tag is withheld too: the count is in boundary).
+_RELEASE_WORD = (r"(?:generic|lowlatency|aws|azure|gcp|gke|oem|cloud|kvm|virtual|raspi|rpi|lts|zen|hardened|realtime|rt|rc|amd64|arm64|armhf|"
+                 r"i[3-6]86|x86_64|aarch64|ppc64le|s390x|el|fc|ubuntu|debian|deb|bpo|pve|default|arch|mainline|android|linuxkit|coreos|edge|std|"
+                 r"smp|preempt|uek|lp|oracle|ibm|nvidia|tegra|stable|gentoo|xanmod|liquorix|v7l?|v8|k3s|dirty)")
+_RELEASE = re.compile(r"[0-9]{1,2}\.[0-9]{1,3}(?:\.[0-9]{1,3})?((?:[-+~._](?:[0-9]{1,5}|" + _RELEASE_WORD + r"[0-9]{0,3}(?:_[0-9]{1,3})?)){0,6})\+?")
+_BUILD_WORD = (r"(?:win7sp1|win7|win8|winmain|winblue|vibranium|th[12]|rs|rs[0-9]{1,2}|[0-9]{2}h[12]|vb|ni|co|ge|fe|zn|mn|sv|lh|r[0-9]{1,2}|release|"
+               r"prerelease|rtm|gdr|ldr|svc|sec|escrow|inmarket|flt|prod|dev|beta|lab|sp[0-9]|rc|oem|st|uup|rel|main|win|vista|server|ltsc)[0-9]{0,2}")
+_BUILD = re.compile(r"[0-9]{3,6}\.[0-9]{1,5}\.(?:x86|amd64|arm64|armnt)(?:fre|chk)(?:\.(?:" + _BUILD_WORD + r"(?:_" + _BUILD_WORD + r"){0,3})?(?:\.[0-9]{0,6}(?:-[0-9]{0,4})?)?)?")
 
 
 def _norm(text):
@@ -422,10 +442,10 @@ def shown(text, kind="name"):
     BOUNDARY["shown"] += 1
     key = "text" if kind == "text" else "names"
     if kind in ("release", "build"):
-        if len(text) > 64:
+        if len(text) > (48 if kind == "release" else 64):
             return _whole(text, "not a version", key)
-        grammar = _RELEASE if kind == "release" else _BUILD
-        if not grammar.fullmatch(text):
+        found = (_RELEASE if kind == "release" else _BUILD).fullmatch(text)
+        if not found or (kind == "release" and sum(len(d) for d in re.findall(r"[0-9]+", found.group(1))) > 16):
             return _whole(text, "not a %s string" % kind, key)
         return Shown(text)
     if _PLAIN_SHORT.fullmatch(text):
@@ -828,11 +848,16 @@ def elf_header(head):
     return out
 
 
-def lime_ranges(fh, size):
-    """Walk a LiME file range by range: each is a 32-byte header and then the bytes it frames."""
+def lime_ranges(fh, size, deadline=None):
+    """Walk a LiME file range by range: each is a 32-byte header and then the bytes it frames. `walk_complete` says whether the walk
+    reached the end of the file; a walk that stopped (a header that is not LiME's, the cap, the clock, a range that runs past the file) did not."""
     page = LosslessPage("mem_profile", [os.path.realpath(fh.name), "lime ranges"], RANGE_PAGE)
     problems, position, total, version, previous_start, previous_end = [], 0, 0, None, None, None
     while position < size and page.total < LIME_WALK_CAP:
+        if deadline is not None and page.total % LIME_CHECK_EVERY == 0 and time.monotonic() >= deadline:
+            problems.append("the walk stopped at its time limit (%d s) after %d ranges, with %d bytes after offset %d not walked" %
+                            (LIME_WALK_SECONDS, page.total, size - position, position))
+            break
         fh.seek(position)
         head = fh.read(LIME_HEADER)
         if len(head) < LIME_HEADER:
@@ -869,6 +894,7 @@ def lime_ranges(fh, size):
             problems.append("the walk stopped at %d ranges (the cap), with %d bytes after offset %d not walked" % (page.total, size - position, position))
     paged = page.finish()
     out = {"format": "LiME", "version": version, "range_count": paged["matched"], "ranges": page.page,
+           "walk_complete": position >= size,
            "physical_bytes_total": total,
            "ranges_note": "the ranges as the LiME headers frame them, in file order; the file is the ranges one after another, so a physical address is not a file offset"}
     if paged.get("all_results"):
@@ -879,7 +905,7 @@ def lime_ranges(fh, size):
     return out
 
 
-def identify(path):
+def identify(path, deadline=None):
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
         head = fh.read(64)
@@ -892,7 +918,7 @@ def identify(path):
                     "compression": "not read: a hibernation file's pages are usually compressed, and this tool does not decode them",
                     "recognition_basis": "the first 4 bytes are %s" % head[:4].decode("ascii", "replace")}, size
         if head[:4] == b"EMiL":
-            return {**lime_ranges(fh, size), "recognition_basis": "the first 4 bytes are the LiME magic"}, size
+            return {**lime_ranges(fh, size, deadline), "recognition_basis": "the first 4 bytes are the LiME magic"}, size
         if head[:4] == b"AVML":
             return {"format": "AVML", "recognition_basis": "the first 4 bytes are AVML",
                     "framing": "not read by this tool: its ranges and compression are not described here"}, size
@@ -998,7 +1024,7 @@ def main():
         fail("the file is empty: there is nothing to profile", path=path)
 
     started = time.monotonic()
-    container, size = identify(path)
+    container, size = identify(path, started + LIME_WALK_SECONDS)
     ranges = sample_ranges(size, megabytes)
     counts, first, scan_stopped = scan(path, ranges, [(n, label) for n, label in HINTS] + [(n, label) for n, label in STRUCTURES],
                                        started + SCAN_SECONDS)
@@ -1078,6 +1104,11 @@ def main():
         out["status"] = "complete"
         out["status_basis"] = ("the header was read and the sample ranges named in sampled_ranges were scanned in full; this is a first pass, "
                                "not a validation of the capture")
+    if container.get("walk_complete") is False:
+        walk = ("the walk of the LiME headers stopped before the end of the file (container.problems says where and why), so the range list "
+                "is not the capture's whole framing")
+        out["status_basis"] = walk if out["status"] == "complete" else out["status_basis"] + "; " + walk
+        out["status"] = "partial"
     out = sealed(out)
     out["boundary"] = boundary_summary()
     if BOUNDARY["backstop_replaced"]:

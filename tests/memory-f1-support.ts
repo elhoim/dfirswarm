@@ -84,6 +84,8 @@ export type StubOptions = {
   stderrText?: string;
   /** a file the stub writes its pid to */
   pidFile?: string;
+  /** bytes of text the stub writes to each of its stdout and stderr */
+  flood?: number;
 };
 
 /** A stub `memprocfs` on PATH that makes the directory a mount would have made (see tests/pack-memory-forensics.test.ts), and the env it needs. */
@@ -109,6 +111,13 @@ if os.environ.get("STUB_PID"):
 print("stub memprocfs: initialising")
 if os.environ.get("STUB_STDERR"):
     print(os.environ["STUB_STDERR"], file=sys.stderr, flush=True)
+if os.environ.get("STUB_FLOOD"):
+    line = ("x" * 1023 + "\\n").encode()
+    for _ in range(int(os.environ["STUB_FLOOD"]) // 1024):
+        sys.stdout.buffer.write(line)
+        sys.stderr.buffer.write(line)
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.flush()
 sys.stdout.flush()
 if os.environ.get("STUB_MODE") == "exit":
     sys.exit(3)
@@ -138,6 +147,44 @@ while True:
   await writeFile(join(shim, "sitecustomize.py"), "import os, os.path\nos.path.ismount = lambda p: os.path.isdir(os.path.join(p, 'sys'))\n");
   return {
     PYTHONPATH: shim, STUB_TREE: tree, STUB_LOG: log, STUB_MODE: o.mode ?? "", STUB_LINKS: JSON.stringify(o.links ?? []),
-    STUB_STDERR: o.stderrText ?? "", ...(o.pidFile ? { STUB_PID: o.pidFile } : {}),
+    STUB_STDERR: o.stderrText ?? "", ...(o.pidFile ? { STUB_PID: o.pidFile } : {}), ...(o.flood ? { STUB_FLOOD: String(o.flood) } : {}),
   };
+}
+
+/**
+ * A directory for PYTHONPATH whose sitecustomize.py makes time.monotonic() move by FAKE_CLOCK_STEP seconds on every call (the clock a
+ * tool reads is then a count of looks at it, not of seconds), and makes os.path.getsize() report FAKE_GETSIZE_EXTRA more bytes for a
+ * path ending in FAKE_GETSIZE_SUFFIX (a file that ends before the size it was measured at), and sets RLIMIT_FSIZE to FAKE_FSIZE bytes
+ * for a process that runs a tool (a write past it is a short write and then EFBIG: a disk that fills), and with FAKE_ISMOUNT makes a directory
+ * with a sys/ inside it a mount point (the stub engine's tree). Nothing happens without those variables.
+ */
+export async function shimDir(cwd: string): Promise<string> {
+  const dir = join(cwd, "shim-f2");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "sitecustomize.py"), `import os, sys, time
+_step = float(os.environ.get("FAKE_CLOCK_STEP", "0") or 0)
+if _step:
+    _now = [0.0]
+    def _mono():
+        _now[0] += _step
+        return _now[0]
+    time.monotonic = _mono
+_extra = int(os.environ.get("FAKE_GETSIZE_EXTRA", "0") or 0)
+if _extra:
+    _getsize = os.path.getsize
+    _suffix = os.environ.get("FAKE_GETSIZE_SUFFIX", "")
+    def _fake(p):
+        n = _getsize(p)
+        return n + _extra if str(p).endswith(_suffix) else n
+    os.path.getsize = _fake
+_fsize = int(os.environ.get("FAKE_FSIZE", "0") or 0)
+if _fsize and sys.argv:
+    import resource
+    _hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    # the tool is limited; the stub engine it starts (which inherits the limit) is not
+    resource.setrlimit(resource.RLIMIT_FSIZE, (_fsize if sys.argv[0].endswith("run.py") else _hard, _hard))
+if os.environ.get("FAKE_ISMOUNT"):
+    os.path.ismount = lambda p: os.path.isdir(os.path.join(p, "sys"))
+`);
+  return dir;
 }

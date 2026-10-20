@@ -20,10 +20,10 @@ established) and a `validation` (header plausible, implausible, truncated or onl
 a signature; truncated means the file itself ends first, and `cut_complete: false`
 means the slice is shorter than the declared length, not that the image is cut). Offsets are offsets in the file, and the offsets are the whole
 provenance: there is no path. Record the signatures selected, the interval
-searched, the hit count, the extraction limit (default 25, earliest hits first)
+searched, the hit count, the extraction limit (default 25, at most 1,000, earliest hits first)
 and how many hits were not extracted. The sweep has its own clock (`max_seconds`, default
-600): when it stops the answer is partial and `coverage.resume_start` is the `start` for
-the rest; bound a very large image with `start` and `max_bytes`. A slice can start inside a structure, end
+600; slices cut out count toward `max_results_bytes`): when it stops the answer is partial and `coverage.resume_start` is the `start` for
+the rest, and each call moves it forward; bound a very large image with `start` and `max_bytes`. A slice can start inside a structure, end
 before it finishes or run into unrelated adjacent pages: check its start, its
 declared length and its internal consistency before you choose a parser, and
 treat a successful parse as evidence about the records it validated.

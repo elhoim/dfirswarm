@@ -36,10 +36,15 @@ Hits are found and numbered in offset order, so `max_extract` takes the earliest
 candidates and the answer says how many it did not extract.
 
 THE TOOL'S OWN CLOCK. A sweep stops by itself at `max_seconds` (default 600, at most
-780, inside the manifest's 900) or when the hit list has reached `max_results_bytes`,
-and says so: status "partial", and `coverage.resume_start`, the offset to give as
-`start` for the rest. Every hit whose signature lies before that offset is in the
-answer and in the hit list; nothing after it was looked at, nothing is lost.
+780, inside the manifest's 900) or when the hit list and the slices cut out have reached
+`max_results_bytes`, and says so: status "partial", and `coverage.resume_start`, the
+offset to give as `start` for the rest. Every hit whose signature lies before that offset
+is in the answer and in the hit list; nothing after it was looked at, nothing is lost.
+The clock is looked at before every slice that is cut out (a slice is up to 64 MiB), at
+every 4,096th hit otherwise, and inside the search of a window. Every call makes progress:
+the first window is always searched whole and the first hit always reported, so a call
+that is given so little time that it cannot finish even that runs past `max_seconds` by
+that one window of work and still moves `resume_start` forward; a resume loop ends.
 
 MEMORY CONTENT. A slice is memory content: it can be a credential store (a SAM, SYSTEM
 or SECURITY hive, a browser database) or run into the pages next to one. The hit list
@@ -62,7 +67,7 @@ import tempfile
 import time
 from pathlib import Path
 
-PARSER = "mem_carve/4"
+PARSER = "mem_carve/5"
 SIGNATURES = [
     (b"regf", "registry hive", 1 << 20),
     (b"ElfChnk\x00", "event log chunk", 65536),
@@ -97,7 +102,8 @@ MAX_PROBLEMS = 20
 # The clock and the size of the hit list. 780 + the end of a sweep (closing, placing, the answer) stays inside the manifest's 900.
 MAX_SECONDS_DEFAULT, MAX_SECONDS_CAP = 600, 780
 MAX_RESULT_BYTES_DEFAULT, MAX_RESULT_BYTES_CAP, MAX_RESULT_BYTES_FLOOR = 1 << 30, 16 << 30, 1 << 20
-CHECK_EVERY = 4096          # hits between two looks at the clock
+CHECK_EVERY = 4096          # hits between two looks at the clock (a hit with a slice cut out is looked at every time)
+MAX_EXTRACT_CAP = 1000      # slices one call may cut: each is up to 64 MiB, and a larger number is a second call from resume_start
 FIND_CHECK_EVERY = 1 << 16  # finds between two looks at the clock inside one window
 
 
@@ -237,6 +243,22 @@ class LosslessPage:
         self._tmp = None
         return placed
 # END SHARED PAGE
+
+
+def make_private_dirs(path):
+    """mkdir -p where every directory it creates has mode 0700 (Path.mkdir(parents=True, mode=...) gives the parents the default mode,
+    so the names of what is below them would be listed by anyone)."""
+    missing, here = [], Path(path)
+    while not os.path.lexists(here):
+        missing.append(here)
+        if here.parent == here:
+            break
+        here = here.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(str(directory), 0o700)
+        except FileExistsError:
+            pass
 
 
 class ExtractManifest:
@@ -530,8 +552,10 @@ def main():
     if preview > MAX_PREVIEW:
         limit_clamped, preview = limit, MAX_PREVIEW
     max_extract = args.get("max_extract", 25)
-    if not isinstance(max_extract, int) or isinstance(max_extract, bool) or max_extract < 0:
-        fail("max_extract must be a non-negative integer")
+    if not isinstance(max_extract, int) or isinstance(max_extract, bool) or not 0 <= max_extract <= MAX_EXTRACT_CAP:
+        fail("max_extract must be an integer from 0 to %d: each slice is up to 64 MiB, so a call cuts at most %d; cut more with another "
+             "call whose start is coverage.resume_start or the offset after the last slice" % (MAX_EXTRACT_CAP, MAX_EXTRACT_CAP),
+             max_extract=max_extract if isinstance(max_extract, (int, str)) else None)
     kinds = args.get("kinds")
     if kinds is not None and (not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds)):
         fail("kinds must be a list of signature names (strings)")
@@ -581,7 +605,7 @@ def main():
         extract_to = resolve_output(extract_to)
         if Path(out).resolve() not in extract_to.parents and extract_to != Path(out).resolve():
             fail("extract_to must be a directory under $OUT in a job", extract_to=str(args.get("extract_to")))
-        extract_to.mkdir(parents=True, exist_ok=True)
+        make_private_dirs(extract_to)
         try:
             os.chmod(extract_to, 0o700)
         except OSError:
@@ -612,6 +636,7 @@ def main():
     stop = None                      # why the sweep ended before the end of its range, when it did
     resume_at = None                 # the offset to give as `start` for the rest
     result_bytes = 0
+    extract_bytes = 0                # what the slices cut out so far take: counted with the hit list toward max_results_bytes
     results_digest = hashlib.sha256()
 
     # Where every hit goes. An explicit results_to holds all of them; without one, a
@@ -632,8 +657,19 @@ def main():
         if len(problems) < MAX_PROBLEMS:
             problems.append({"offset": offset, "kind": kind, "problem": text})
 
+    def limit_reached():
+        """Why the sweep must stop now, or None."""
+        if time.monotonic() >= deadline:
+            return "time limit: max_seconds %d was reached" % max_seconds
+        if result_bytes + extract_bytes >= max_result_bytes:
+            return ("result size limit: the hit list and the slices cut out reached max_results_bytes %d (%d bytes of hit list, %d of slices)"
+                    % (max_result_bytes, result_bytes, extract_bytes))
+        return None
+
     finished = False
     interrupted = None
+    sweep_end = end                  # where the sweep really ends: the end of the range, or where the file ended first
+    accept_lo = start
     try:
         with open(path, "rb") as fh, open(path, "rb") as side:
             def read_at(offset, n):
@@ -648,23 +684,25 @@ def main():
                 return read_at(offset, n)
 
             position, tail, tail_at, accept_lo = start, b"", start, start
-            while position < end and stop is None:
-                if time.monotonic() >= deadline:
+            while position < sweep_end and stop is None:
+                # The first window of a call is never given up: a call always moves resume_start forward.
+                if position > start and time.monotonic() >= deadline:
                     stop, resume_at = "time limit: max_seconds %d was reached" % max_seconds, accept_lo
                     break
                 fh.seek(position)
-                block = fh.read(min(WINDOW, end - position))
+                block = fh.read(min(WINDOW, sweep_end - position))
                 if not block:
                     ended = ("early end of file: a read at offset %d returned no bytes, %d bytes before the end of the range"
-                             % (position, end - position))
-                    break
+                             % (position, sweep_end - position))
+                    # What was read is all there is: the signatures in its last bytes (held back for the next window) are reported now.
+                    sweep_end = position
                 bytes_read += len(block)
                 buf, base = tail + block, tail_at
                 block_end = position + len(block)
                 # A signature that starts before accept_hi lies wholly inside buf; one that
                 # starts later may be cut by the end of the block, and is found in the next
                 # buffer, which begins at accept_hi. Every hit is found once, in offset order.
-                accept_hi = end if block_end >= end else max(accept_lo, block_end - overlap)
+                accept_hi = sweep_end if block_end >= sweep_end else max(accept_lo, block_end - overlap)
                 found_here = []
                 finds = 0
                 for index, (signature, _name, _cut) in enumerate(signatures):
@@ -679,7 +717,7 @@ def main():
                             break
                         found_here.append((absolute, index))
                         finds += 1
-                        if finds % FIND_CHECK_EVERY == 0 and time.monotonic() >= deadline:
+                        if finds % FIND_CHECK_EVERY == 0 and position > start and time.monotonic() >= deadline:
                             stop, resume_at = "time limit: max_seconds %d was reached" % max_seconds, accept_lo
                             break
                     if stop:
@@ -688,11 +726,13 @@ def main():
                     break                # nothing of this window was reported: the rest starts at its first byte
                 found_here.sort()
                 for absolute, index in found_here:
-                    if (hit_count % CHECK_EVERY) == 0 and (time.monotonic() >= deadline or result_bytes >= max_result_bytes):
-                        stop = ("time limit: max_seconds %d was reached" % max_seconds if time.monotonic() >= deadline
-                                else "result size limit: the hit list reached max_results_bytes %d" % max_result_bytes)
-                        resume_at = absolute
-                        break
+                    # Looked at every 4,096th hit, and before every hit that may cut a slice (up to 64 MiB). The first hit of a call is always reported.
+                    cutting = bool(extract_to) and extraction["extracted"] + extraction["refused"] + extraction["failed"] < max_extract
+                    if ((hit_count % CHECK_EVERY) == 0 or cutting) and (hit_count > 0 or accept_lo > start):
+                        why = limit_reached()
+                        if why:
+                            stop, resume_at = why, absolute
+                            break
                     GUARD["depth"] += 1
                     try:
                         _signature, name, cut = signatures[index]
@@ -759,6 +799,7 @@ def main():
                                         out.write(piece)
                                     entry["extracted_to"] = str(target)
                                     entry["extracted_bytes"] = len(piece)
+                                    extract_bytes += len(piece)
                                     manifest.add({"row": "extract", "kind": name, "signature_offset": absolute,
                                                   "object_offset": object_offset, "file": safe, "bytes": len(piece),
                                                   "sha256": hashlib.sha256(piece).hexdigest()})
@@ -853,7 +894,7 @@ def main():
     else:
         paged = {}
 
-    covered_to = resume_at if resume_at is not None else end
+    covered_to = resume_at if resume_at is not None else sweep_end
     partial_reasons = []
     if stop:
         partial_reasons.append(stop)
@@ -927,6 +968,7 @@ def main():
     if manifest is not None:
         manifest.close()
         extraction["manifest"] = str(manifest.path) if manifest.path else None
+        extraction["extracted_bytes"] = extract_bytes
         result["extraction"] = extraction
     if results_to:
         result["complete_results"] = str(results_to)

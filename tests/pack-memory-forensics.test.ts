@@ -216,7 +216,7 @@ test("mem_carve extracts the earliest candidates when max_extract is smaller tha
     assert.equal(out.hits[1].extracted_to, undefined);
     assert.equal(out.extracted, 1);
     const { manifest, ...rest } = out.extraction as Record<string, unknown>;
-    assert.deepEqual(rest, { max_extract: 1, extracted: 1, not_extracted: 1, refused: 0, failed: 0 });
+    assert.deepEqual(rest, { max_extract: 1, extracted: 1, not_extracted: 1, refused: 0, failed: 0, extracted_bytes: 0x4000 - 0x200 });
     assert.match(manifest as string, /extract-manifest\.jsonl$/);
   });
 });
