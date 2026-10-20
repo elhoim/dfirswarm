@@ -1405,6 +1405,8 @@ def main():
                       "secret_values has each export's size and sha256. A file that was not exported, or only in part, "
                       "is named in items with its status: an export that is not complete says so in complete. "
                       "Names are shown by shape: see boundary.")
+    answer = sealed(answer)
+    answer["boundary"] = boundary_summary()
     if BOUNDARY["backstop_replaced"]:
         answer["status"] = "partial"
         answer["status_basis"] += "; the backstop replaced %d string(s) it found secret-shaped (boundary)" % BOUNDARY["backstop_replaced"]

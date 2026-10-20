@@ -831,7 +831,7 @@ def elf_header(head):
 def lime_ranges(fh, size):
     """Walk a LiME file range by range: each is a 32-byte header and then the bytes it frames."""
     page = LosslessPage("mem_profile", [os.path.realpath(fh.name), "lime ranges"], RANGE_PAGE)
-    problems, position, total, version, previous_end = [], 0, 0, None, None
+    problems, position, total, version, previous_start, previous_end = [], 0, 0, None, None, None
     while position < size and page.total < LIME_WALK_CAP:
         fh.seek(position)
         head = fh.read(LIME_HEADER)
@@ -854,8 +854,8 @@ def lime_ranges(fh, size):
         data_at = position + LIME_HEADER
         if previous_end is not None and start <= previous_end:
             problems.append("the range at offset %d starts at 0x%x, not after the end of the range before it (0x%x): the ranges are %s" %
-                            (position, start, previous_end, "out of order" if start < previous_end else "overlapping"))
-        previous_end = end
+                            (position, start, previous_end, "out of order" if start < previous_start else "overlapping"))
+        previous_start, previous_end = start, end
         page.add({"physical_start": start, "physical_end": end, "bytes": length, "file_offset": data_at})
         total += length
         if data_at + length > size:
@@ -1068,7 +1068,6 @@ def main():
             "large image; raise scan_mb before concluding anything from it.")
     if build_withheld is not None:
         out["kernel_build_withheld"] = build_withheld
-    out["boundary"] = boundary_summary()
     if scan_stopped is not None:
         out["scan_stopped_at"] = scan_stopped
         out["notes"].append("The sampling ran out of time (SCAN_SECONDS %d) at offset %d: the counts cover what was read before that, and the "
@@ -1079,6 +1078,8 @@ def main():
         out["status"] = "complete"
         out["status_basis"] = ("the header was read and the sample ranges named in sampled_ranges were scanned in full; this is a first pass, "
                                "not a validation of the capture")
+    out = sealed(out)
+    out["boundary"] = boundary_summary()
     if BOUNDARY["backstop_replaced"]:
         out["status"] = "partial"
         out["status_basis"] += "; the backstop replaced %d string(s) it found secret-shaped (boundary)" % BOUNDARY["backstop_replaced"]
