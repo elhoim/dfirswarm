@@ -162,9 +162,9 @@ function lyingZip(n: number, declaredBytes?: bigint): Buffer {
   return Buffer.concat([cd, zip64Tail(BigInt(n), declaredBytes ?? BigInt(cd.length), 0n, { entries: 1, bytes: 47, offset: 0 })]);
 }
 
-// --- archive_probe: P1-1 ---------------------------------------------------------------------------------------------------------
+// --- archive_probe ----------------------------------------------------------------------------------------------------
 
-test("archive_probe follows a Zip64 locator whatever the End record says, and refuses a directory over its bound (P1-1)", async () => {
+test("archive_probe follows a Zip64 locator whatever the End record says, and refuses a directory over its bound", async () => {
   // The End record said "1 entry, 47 bytes"; the Zip64 record said 1,000. The tool read the End record only, found the bound kept, and
   // zipfile then loaded all of them: a 141 MB file with 3,000,000 entries took 16 CPU s and 1.1 GB. The locator is followed always.
   await withCwd(async (cwd) => {
@@ -203,7 +203,7 @@ out = json.loads(p.stdout)
 print(json.dumps({"code": p.returncode, "rss_mib": rss / 2**20, "listing": out.get("listing"), "count": out.get("entry_count")}))
 `;
 
-test("archive_probe does not load a 40 MB lying directory, and lists a large honest one in flat memory (P1-1)", async () => {
+test("archive_probe does not load a 40 MB lying directory, and lists a large honest one in flat memory", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "lie40.zip"), lyingZip(850_000));
     const lie = await runPySnippet(MEMORY_DRIVER, [PROBE, join(cwd, "work", "lie40.zip"), cwd], null);
@@ -239,9 +239,9 @@ test("archive_probe reads a Zip64 directory whose End record holds the 0xFFFF ma
   });
 });
 
-// --- archive_probe: P2-8, P2-7, P2-12, P2-11 ---------------------------------------------------------------------------------------
+// --- archive_probe ----------------------------------------------------------------------------------------------------
 
-test("archive_probe lists the other members when one name is not valid UTF-8 (P2-8)", async () => {
+test("archive_probe lists the other members when one name is not valid UTF-8", async () => {
   await withCwd(async (cwd) => {
     const zip = buildZip([{ name: "secret.docx", flags: 0x0001 }, { nameBytes: Buffer.from([0xff, 0xfe, 0x62, 0x61, 0x64]), flags: 0x0800 }, { name: "plain.txt" }]);
     await writeFile(join(cwd, "work", "bad.zip"), zip);
@@ -259,7 +259,7 @@ test("archive_probe lists the other members when one name is not valid UTF-8 (P2
   });
 });
 
-test("archive_probe withholds recovery-password, key-id and password shapes in member names, header strings, diagnostics and paths (P2-7)", async () => {
+test("archive_probe withholds recovery-password, key-id and password shapes in member names, header strings, diagnostics and paths", async () => {
   await withCwd(async (cwd, bin) => {
     const key = recoveryKey();
     const aws = awsKeyId();
@@ -302,7 +302,7 @@ exit 1
   });
 });
 
-test("archive_probe answers carry status and status_basis, errors included (P2-12)", async () => {
+test("archive_probe answers carry status and status_basis, errors included", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "a.zip"), buildZip([{ name: "a.txt" }]));
     await writeFile(join(cwd, "work", "r.rar"), Buffer.concat([Buffer.from("Rar!\x1a\x07\x00", "latin1"), Buffer.alloc(40)]));
@@ -318,7 +318,7 @@ test("archive_probe answers carry status and status_basis, errors included (P2-1
   });
 });
 
-test("archive_probe reports a file it cannot read as JSON, not a traceback (P2-9)", async (t) => {
+test("archive_probe reports a file it cannot read as JSON, not a traceback", async (t) => {
   if (process.getuid?.() === 0) return t.skip("root reads any file");
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "locked.zip"), buildZip([{ name: "a" }]));
@@ -329,7 +329,7 @@ test("archive_probe reports a file it cannot read as JSON, not a traceback (P2-9
   });
 });
 
-test("recovery_key_scan survives a file name that is not UTF-8 in its paging and values files (P2-11)", async (t) => {
+test("recovery_key_scan survives a file name that is not UTF-8 in its paging and values files", async (t) => {
   if (!LINUX) return t.skip("a name that is not UTF-8 can only be made where the file system allows it (Linux)");
   await withCwd(async (cwd) => {
     const dir = Buffer.from(join(cwd, "work", "ev"));
@@ -349,7 +349,7 @@ test("recovery_key_scan survives a file name that is not UTF-8 in its paging and
   });
 });
 
-// --- archive_probe: P2-9, P2-13 ----------------------------------------------------------------------------------------------------
+// --- archive_probe ----------------------------------------------------------------------------------------------------
 
 /** A 7z stand-in that records its pid and then waits: the tool is stopped while it runs. */
 async function sleepingSeven(bin: string, cwd: string): Promise<string> {
@@ -368,7 +368,7 @@ const SEVEN_HEADER = (() => {
 })();
 
 for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as const) {
-  test(`archive_probe stops on ${name} with one JSON answer, exit ${128 + num}, and ends the 7z it started (P2-9, P2-13)`, async () => {
+  test(`archive_probe stops on ${name} with one JSON answer, exit ${128 + num}, and ends the 7z it started`, async () => {
     await withCwd(async (cwd, bin) => {
       const pidFile = await sleepingSeven(bin, cwd);
       await writeFile(join(cwd, "work", "s.7z"), SEVEN_HEADER);
@@ -384,7 +384,7 @@ for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as con
   });
 }
 
-test("archive_probe keeps its own clock: max_seconds ends a 7z that runs long, and the answer says so (P2-9)", async () => {
+test("archive_probe keeps its own clock: max_seconds ends a 7z that runs long, and the answer says so", async () => {
   await withCwd(async (cwd, bin) => {
     const pidFile = await sleepingSeven(bin, cwd);
     await writeFile(join(cwd, "work", "s.7z"), SEVEN_HEADER);
@@ -399,7 +399,7 @@ test("archive_probe keeps its own clock: max_seconds ends a 7z that runs long, a
   });
 });
 
-test("archive_probe's 7z does not outlive the tool when the tool is killed (P2-13, Linux: PR_SET_PDEATHSIG)", async (t) => {
+test("archive_probe's 7z does not outlive the tool when the tool is killed (Linux: PR_SET_PDEATHSIG)", async (t) => {
   if (!LINUX) return t.skip("the parent-death signal is Linux's");
   await withCwd(async (cwd, bin) => {
     const pidFile = await sleepingSeven(bin, cwd);
@@ -411,7 +411,7 @@ test("archive_probe's 7z does not outlive the tool when the tool is killed (P2-1
   });
 });
 
-test("archive_probe never replaces a result file that is there, and names the one it kept (E4)", async () => {
+test("archive_probe never replaces a result file that is there, and names the one it kept", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "many.zip"), buildZip(Array.from({ length: 6 }, (_, i) => ({ name: `m${i}.txt` }))));
     const first = answer(await tool(PROBE, cwd, { path: "work/many.zip", limit: 2 }));
@@ -459,7 +459,7 @@ function luks1(cipher: string, mode: string, hash: string, uuid: string): Buffer
   return h;
 }
 
-test("crypto_id prints header text only when it is what the format says: closed lists, the UUID form, withheld free text (P2-5)", async () => {
+test("crypto_id prints header text only when it is what the format says: closed lists, the UUID form, withheld free text", async () => {
   await withCwd(async (cwd) => {
     const key = recoveryKey().replaceAll("-", "");
     const pw = passwordAssignment();
@@ -485,7 +485,7 @@ test("crypto_id prints header text only when it is what the format says: closed 
   });
 });
 
-test("crypto_id answers carry status, say a cut header is partial, and fail as JSON (P2-12, P2-9)", async (t) => {
+test("crypto_id answers carry status, say a cut header is partial, and fail as JSON", async (t) => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "cut.img"), luks1("aes", "xts-plain64", "sha256", "2f4a8e0c-1b5d-4c3a-9e7f-0a1b2c3d4e5f").subarray(0, 300));
     const cut = answer(await tool(ID, cwd, { path: "work/cut.img" }));
@@ -514,7 +514,7 @@ builtins.open = slow
 `;
 
 for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as const) {
-  test(`crypto_id stops on ${name} with one JSON answer and exit ${128 + num} (P2-9)`, async () => {
+  test(`crypto_id stops on ${name} with one JSON answer and exit ${128 + num}`, async () => {
     await withCwd(async (cwd) => {
       await writeFile(join(cwd, "work", "slow.bin"), "x".repeat(2048));
       await mkdir(join(cwd, "site"));
@@ -532,7 +532,7 @@ for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as con
 
 const BIG_PEM_TYPE = ["-----BEGIN ", "A".repeat(3 << 20), "PRIVATE KEY-----"].join("");
 
-test("recovery_key_scan reports a private key's type from a short closed list, and echoes none of the file's text (P2-6)", async () => {
+test("recovery_key_scan reports a private key's type from a short closed list, and echoes none of the file's text", async () => {
   await withCwd(async (cwd) => {
     await mkdir(join(cwd, "work", "ev"), { recursive: true });
     for (let i = 0; i < 6; i++) await writeFile(join(cwd, "work", "ev", `big${i}.txt`), BIG_PEM_TYPE);
@@ -587,7 +587,7 @@ for _ in range(int(sys.argv[3])):
 print(json.dumps({"bad": bad, "found": total}))
 `;
 
-test("recovery_key_scan finds exactly what the look-behind patterns found, searching by the dash (P1-2)", async () => {
+test("recovery_key_scan finds exactly what the look-behind patterns found, searching by the dash", async () => {
   const run = await runPySnippet(ORACLE, [SCAN, "11", "400"], null);
   assert.equal(run.code, 0, run.stderr);
   const got = JSON.parse(run.stdout) as { bad: number; found: number };
@@ -605,7 +605,7 @@ def monotonic():
 time.monotonic = monotonic
 `;
 
-test("recovery_key_scan has its own clock: at max_seconds it stops, names every file and directory it did not read, and says partial (P1-2)", async () => {
+test("recovery_key_scan has its own clock: at max_seconds it stops, names every file and directory it did not read, and says partial", async () => {
   await withCwd(async (cwd) => {
     for (const d of ["a", "b", "c"]) {
       await mkdir(join(cwd, "work", "ev", d), { recursive: true });
@@ -661,7 +661,7 @@ async function slowTree(cwd: string, files = 8): Promise<Record<string, string>>
 }
 
 for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as const) {
-  test(`recovery_key_scan stops on ${name}: one partial JSON answer, exit ${128 + num}, a closed values file, no temporary file (P1-2, P2-9)`, async () => {
+  test(`recovery_key_scan stops on ${name}: one partial JSON answer, exit ${128 + num}, a closed values file, no temporary file`, async () => {
     await withCwd(async (cwd) => {
       const env = await slowTree(cwd);
       const outDir = join(cwd, "out");
@@ -684,7 +684,7 @@ for (const [name, num] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as con
   });
 }
 
-test("recovery_key_scan stops hard when a read never returns: the temporary files go, the answer says interrupted (P2-9)", async () => {
+test("recovery_key_scan stops hard when a read never returns: the temporary files go, the answer says interrupted", async () => {
   await withCwd(async (cwd) => {
     const env = await slowTree(cwd, 4);
     for (let i = 0; i < 6; i++) await writeFile(join(cwd, "work", "ev", `n${i}.txt`), `${recoveryKey()}\n`);
@@ -698,7 +698,7 @@ test("recovery_key_scan stops hard when a read never returns: the temporary file
   });
 });
 
-test("recovery_key_scan answers carry status and status_basis, and a clean tree is complete (P2-12)", async () => {
+test("recovery_key_scan answers carry status and status_basis, and a clean tree is complete", async () => {
   await withCwd(async (cwd) => {
     await mkdir(join(cwd, "work", "ev"), { recursive: true });
     await writeFile(join(cwd, "work", "ev", "a.txt"), "nothing here\n");
@@ -712,7 +712,7 @@ test("recovery_key_scan answers carry status and status_basis, and a clean tree 
   });
 });
 
-test("recovery_key_scan withholds identifier- and secret-shaped path components, as the names block says (P2-2)", async () => {
+test("recovery_key_scan withholds identifier- and secret-shaped path components, as the names block says", async () => {
   await withCwd(async (cwd) => {
     const id = pick("0123456789abcdef", 32);
     const dec = pick(DIGITS, 12);
@@ -732,7 +732,7 @@ test("recovery_key_scan withholds identifier- and secret-shaped path components,
   });
 });
 
-test("recovery_key_scan never replaces a paging file that is there with a smaller one (E4)", async () => {
+test("recovery_key_scan never replaces a paging file that is there with a smaller one", async () => {
   await withCwd(async (cwd) => {
     await mkdir(join(cwd, "work", "ev"), { recursive: true });
     for (let i = 0; i < 6; i++) await writeFile(join(cwd, "work", "ev", `n${i}.txt`), `${recoveryKey()}\n`);
