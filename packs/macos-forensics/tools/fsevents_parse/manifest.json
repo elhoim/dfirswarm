@@ -1,6 +1,6 @@
 {
   "name": "fsevents_parse",
-  "description": "Read /.fseventsd record files: the per-volume change log, gzip (one or more members) holding pages of 1SLD or 2SLD records. Returns each path with its event id, raw and decoded flags, node id (2SLD only) and where in the file it was (gzip member, page and record offsets in the decompressed stream), and the log's own identity from fseventsd-uuid. A change-notification history, not an audit: records are coalesced and logs roll off; there is no timestamp in the format, so event ids give order within one log, not time; a Renamed flag means the path took part in a rename and pairs no old and new name. Only 1SLD and 2SLD pages are read: another page magic (3SLD, say) is reported unsupported with the magic seen and the rest of that file is not decoded. Nothing is guessed or dropped silently: per file the state is parsed, partial, empty, unsupported or failed; per gzip member complete, truncated or failed with its compressed offset; per page parsed, unsupported, invalid length or truncated; per record decoded, empty path or incomplete; bytes that could not be placed in a page are counted and located, and a flag bit with no name is reported as flags_undecoded. status is complete only when every file is parsed or empty. Decoding is streamed and expansion is capped (max_expanded_bytes per file; a file that hits it is partial and says so). Records are written to out_file as they are decoded (an existing file or link there is refused); otherwise the page is `limit` records and the whole is in a file under tool-output that the answer names. The inline answer is bounded by bytes (max_inline_bytes) as well as by count, and says so (inline_bounded_by_bytes). Trailing NUL bytes of a page are padding_bytes in the coverage, not records: a record that is all zero is padding, not an empty-path record. A rerun that finds fewer records does not replace a larger earlier page file: it writes a new name and says which it kept.",
+  "description": "Read /.fseventsd record files: the per-volume change log, gzip (one or more members) holding pages of 1SLD or 2SLD records. Returns each path with its event id, raw and decoded flags, node id (2SLD only) and where in the file it was (gzip member, page and record offsets in the decompressed stream), and the log's own identity from fseventsd-uuid. A change-notification history, not an audit: records are coalesced and logs roll off; there is no timestamp in the format, so event ids give order within one log, not time; a Renamed flag means the path took part in a rename and pairs no old and new name. Only 1SLD and 2SLD pages are read: another page magic (3SLD, say) is reported unsupported with the magic seen and the rest of that file is not decoded. Nothing is guessed or dropped silently: per file the state is parsed, partial, empty, unsupported or failed; per gzip member complete, truncated or failed with its compressed offset; per page parsed, unsupported, invalid length or truncated; per record decoded, empty path or incomplete; bytes that could not be placed in a page are counted and located, and a flag bit with no name is reported as flags_undecoded. status is complete only when every file is parsed or empty, partial when some file was read, and failed when none was (a file in a format the tool does not read is still counted unsupported in files_by_state); status_basis says what it rests on, and every refusal carries both. Decoding is streamed and expansion is capped (max_expanded_bytes per file; a file that hits it is partial and says so). Records are written to out_file (mode 0600) as they are decoded (an existing file or link there is refused); otherwise the page is `limit` records and the whole is in a file under tool-output that the answer names. The inline answer is bounded by bytes (max_inline_bytes) as well as by count, and says so (inline_bounded_by_bytes). Trailing NUL bytes of a page are padding_bytes in the coverage, not records: a record that is all zero is padding, not an empty-path record. A rerun that finds fewer records does not replace a larger earlier page file: it writes a new name and says which it kept. A file of many gzip members is read in linear time (a lookup of the member of a page is a bisect). The tool has a clock of its own, max_seconds (default 200, at most 250, below the 300 seconds of the manifest): when it passes, the file in hand is closed as partial at the page it was reading (problems names the offset), the files after it are counted not_attempted and listed in per_file, time_limit says how to go on, and what was decoded is in the file. SIGTERM, SIGINT and SIGHUP end it the same way: one JSON answer with status partial and interrupted set to the signal's name, exit 128 plus the signal, every record already written whole in the file. contains is a regular expression run only in a restricted subset (at most 256 characters; no back-reference, conditional, lookaround, atomic group or possessive repeat; no repeat of 9 or more inside any repeat, no repeat at all and no alternation inside a repeat of 9 or more; at most two repeats of 9 or more and at most eight repeats of any size), refused as JSON with the reason otherwise (a pattern such as (a|aa)+$ took 37 seconds over a path of 40 characters), and each search runs under a timer of 0.5 second: a path that runs past it is counted in filters.contains_timeouts and the answer is partial. contains is matched against the path as the answer prints it (after the boundary), never against a path or a piece of a path that is withheld, so it cannot be used to test a guess of a withheld name; a record that is not matched and has text withheld in its path is counted in filters.contains_blind_records and the answer is partial, because the needle may be in what is withheld. The count is the same whatever the needle is. The answer says whether a pattern was given, not what it was. SENSITIVE: a path is evidence text and can hold an identifier or a secret (a user or share name, a mail attachment, a token in a file name). WITHHOLDING (one boundary on every way out). The windows-forensics pack's shared boundary block, copied byte for byte (a test holds the copies equal), judges every key and value of the answer, of an error answer, and of every row of every file this tool writes, by the type of the field it fills: a name, path, key or URL is shown as it is only when it fits a plain grammar (a path component by component; GUIDs, SIDs, addresses, 0x numbers, times and hexadecimal ids up to 24 digits are plain); free text has token-shaped runs, user-info, the value after a secret's name, vendor-prefixed tokens, padded base64 and PEM keys withheld; and a second check, written apart from the first, reads it all once more, the text as the evidence wrote it as well as the text shown (a string it replaces makes a complete answer partial and is listed under boundary.replaced_at). A withheld text is <withheld N characters: reason>. Past the judging time (10 seconds for an answer or a row, and never past the seal stop of the tool) the strings the evidence supplied are no longer judged: each is replaced whole and the answer is partial, except the names this tool wrote itself and a string of 15 characters or fewer made only of letters, digits, _ and . that does not start like a vendor token. write_values: true writes the originals of everything the boundary withheld to fsevents_parse-values.jsonl under $OUT (mode 0600, created first, never replaced) and is accepted only in a job the harness runs as secret output (the manifest declares it; SECRET_OUTPUT=1), refused as JSON anywhere else before anything is made. Measured on random plants in the path of a record (rates, not guarantees, from one seeded run of 1,000 plants per shape; tests/pack-macos-forensics-boundary.test.ts plants 300 per shape and asserts the bounds). Of the 21 shapes the boundary claims (GitHub, GitLab, Stripe, SendGrid, Google and npm tokens, AWS key ids, JWT, PEM private keys, user-info with an @ in the password, Password= and password: values, NUL and zero-width splits, base64 keys of 16, 20 and 32 bytes, AWS-shaped keys of 40 characters, random base62 of 24 and 40 characters) 20 were printed whole in 0 of 1,000 plants and random base62 of 24 characters in 1 of 1,000 (0.1%); a piece of 12 characters of an AWS-shaped key and of a random base62 token was printed in 1 of 1,000 plants each. The shapes it does not claim are printed: a plain password, a four-word passphrase and a UUID-shaped key, 1,000 of 1,000. On 60,000 real paths of a development Mac (applications, libraries, caches) 1.2% of the 30,658 paths outside Library/Caches had a component withheld and 31.8% of the 29,342 under it (hash-named cache entries); 7.1% of all paths were replaced whole by the backstop, so a log full of cache entries ends partial. NOT recognised, by design: a secret that does not look like one (a plain password or passphrase, a pronounceable passphrase, a UUID-shaped key, a hexadecimal secret of up to 24 digits in a name, random bytes with no text in them, anything under 16 characters in a name): withholding is by shape, so a file whose secrets matter is read in a job run with secret_output: true. Strings the shape rules change that are not secrets: path components that are hash-named (cache entries), numbers of 19 digits or more, unlabelled hexadecimal runs of 32 digits or more, and camel-case identifiers of 16 characters or more with no word the block knows. Paths longer than 262,144 characters are cut there and the rest is withheld whole. ",
   "params": {
     "path": {
       "type": "string",
@@ -8,7 +8,7 @@
     },
     "contains": {
       "type": "string",
-      "description": "Case-insensitive regex over the path"
+      "description": "Case-insensitive regular expression over the path as the answer prints it, in a restricted subset (at most 256 characters; no back-reference, lookaround, atomic group or possessive repeat; no nested or alternated long repeat; at most two repeats of 9 or more and eight of any size); refused as JSON otherwise. Each search is given 0.5 second"
     },
     "flags": {
       "type": "array",
@@ -20,7 +20,7 @@
     },
     "out_file": {
       "type": "string",
-      "description": "JSONL path for every matching record, written as each is decoded. The tool does not overwrite: an existing file or link at that name is refused"
+      "description": "JSONL path for every matching record (each row judged by the boundary), written as each is decoded, mode 0600. The tool does not overwrite: an existing file or link at that name is refused"
     },
     "max_expanded_bytes": {
       "type": "integer",
@@ -33,6 +33,14 @@
     "max_inline_bytes": {
       "type": "integer",
       "description": "The inline records are cut at this many bytes as well as at `limit` records (default 1048576): the page is the records before the first that does not fit (one path can be megabytes); the whole is in out_file or the file the answer names"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "The tool's own clock (default 200, at most 250): when it passes, the file in hand is partial and the files after it are not_attempted, named; a larger value is clamped and the answer says so"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write the originals of everything the boundary withheld to $OUT/fsevents_parse-values.jsonl (mode 0600, created first, never replaced): only in a job run with secret_output: true, refused anywhere else; default false"
     }
   },
   "runtime": "python3",
@@ -41,8 +49,8 @@
   "example": "{\"path\": \"work/extracted/.fseventsd\", \"flags\": [\"Removed\"], \"out_file\": \"work/<your id>/fsevents.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 3,
-  "sha256": "d8580027b5913e4095aee43c6885aa78f885557bb96b112ec4fe159c0989d824",
+  "version": 4,
+  "sha256": "49b1844ec94e64ebcdfdc52a7e5d5b19bb0582934b412f890a6c8fbeec636586",
   "use": {
     "magic": [
       {
@@ -56,6 +64,11 @@
     ],
     "names": [
       "fseventsd-uuid"
+    ]
+  },
+  "secret_output": {
+    "when_args": [
+      "write_values"
     ]
   }
 }
