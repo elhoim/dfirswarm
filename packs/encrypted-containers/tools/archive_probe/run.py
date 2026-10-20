@@ -99,6 +99,7 @@ class LosslessPage:
             "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
                      "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
             "status": "failed",
+            "status_basis": "the whole result could not be written, so the tool stopped with an error and returned no result",
         }) + "\n")
         _sys.exit(1)
 
@@ -395,15 +396,23 @@ def cell(value):
 # every string of what is about to be printed or paged once more, by rules of its own, and replaces a string the first layer let
 # through that still looks like a secret.
 #
-# WITHHELD, by shape: a recovery password (eight groups of six digits) in a path component, whole component; a run of 10 or more digits;
-# a run of 8 or more letters and digits that has a digit in it (System32 and a few such names of Windows are let through); a letters-only run of 8 or more that is not one word, a camel-case
-# word or all capitals; groups of 4 to 6 characters joined by one `-`, `_` or `.` (3 or more digit-only groups, or 4 or more groups that
-# each hold a digit or are all capitals), and four or more groups of exactly six digits joined by spaces; the value after password, secret, token,
-# api key, credential, auth (`password=...`); user-info; and the token shapes of the shared WITHHOLDING block above (vendor prefixes,
-# JWT, long hex, long mixed runs, base64 with `/`). A string is also judged after NFKC and with invisible characters taken out, and a
-# hit there that the string as written does not show withholds the whole string.
+# WITHHELD, by shape: a recovery password (eight groups of six digits, joined by none to three characters that are not letters or digits)
+# in a path component, whole component, and across the components of a path (the separators of a path join its groups); a run of 10 or
+# more digits; a run of 8 or more letters and digits that has a digit in it (System32 and a few such names of Windows are let through); a
+# letters-only run of 8 or more that is not one word, a camel-case word or all capitals; groups of 4 to 6 characters joined by one `-`, `_`
+# or `.` (3 or more digit-only groups, or 4 or more groups that each hold a digit or are all capitals), and four or more groups of exactly
+# six digits joined by spaces; the value after password, secret, token, api key, credential, auth (`password=...`); user-info; and the
+# token shapes of the shared WITHHOLDING block above (vendor prefixes, JWT, long hex, long mixed runs, base64 with `/`). A string is also
+# judged after NFKC, with invisible characters taken out and with the Cyrillic and Greek letters that look like Latin ones read as Latin,
+# and a hit there that the string as written does not show withholds the whole string.
 # NOT WITHHELD, by design: an identifier of 7 characters or fewer, a lowercase-only random run (it reads as a word), a secret that does
-# not look like one, an all-capital letters-only run, groups of other sizes, and anything in the data a tool reads rather than prints.
+# not look like one, an all-capital letters-only run of any length, groups of other sizes (three groups of 4 to 6 letters and digits are
+# printed), a recovery password cut into pieces by anything else than the separators above, and anything in the data a tool reads rather
+# than prints.
+# BOUNDED: the token rule of the WITHHOLDING block re-reads the text in front of a `/` once for each flagged piece after it, so its time
+# grows with the square of a long run of name characters. What that block is given is therefore bounded first (_unjudgeable): a string of
+# more than MAX_JUDGED characters, as written or after NFKC, or one that holds a `/` and a run of name characters of more than MAX_RUN, is
+# withheld whole and not judged. The block itself is repaired at its source in a change of its own, for every pack that copies it.
 # Measured on random draws and on real directory trees: tests/pack-encrypted-containers-names.test.ts and the manifests give the rates.
 import unicodedata
 
@@ -413,8 +422,10 @@ ID_TEXT = "<identifier-shaped text withheld>"
 SECRET_TEXT = "<secret-shaped text withheld>"
 LONG_TEXT = "<text too long to judge withheld>"
 CHECKED = "<withheld by the output check>"
-MAX_JUDGED = 1 << 16
-_RECOVERY_SHAPE = re.compile(r"(?<![0-9])[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}(?![0-9])")
+MAX_JUDGED = 4096        # characters judged in one string (a name, a component, a header string); longer is withheld whole
+MAX_RUN = 256            # the longest run of name characters judged in a string that holds a `/`
+_NAME_RUN = re.compile(r"[A-Za-z0-9_+%-]+")
+_RECOVERY_SHAPE = re.compile(r"(?<![0-9])[0-9]{6}(?:[^0-9A-Za-z]{0,3}[0-9]{6}){7}(?![0-9])")
 _SIX_SPACED = re.compile(r"(?<![0-9])(?:[0-9]{6} ){3,}[0-9]{6}(?![0-9])")
 _GROUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{4,6}(?![A-Za-z0-9])")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{8,}")
@@ -423,6 +434,7 @@ _WORD_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _NAMED = re.compile(r"(?i)(?<![A-Za-z0-9])(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
                     r"[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*([^\s\"'&;,/\\<][^\s\"'&;,/\\]*)")
 _CACHE = {}
+_CACHE_BYTES = [0]
 
 
 def _chains(text):
@@ -489,20 +501,36 @@ def _spans(text):
     return merged
 
 
+# Cyrillic and Greek letters that are written like Latin ones: a pair is (the letter, the Latin letter it is read as).
+_LOOKALIKE_PAIRS = ("\u0430a\u0441c\u0435e\u043eo\u0440p\u0445x\u0443y\u0456i\u0458j\u0455s\u0501d\u04bbh\u0410A\u0412B\u0415E\u041aK\u041cM\u041dH"
+                    "\u041eO\u0420P\u0421C\u0422T\u0425X\u0406I\u0408J\u0405S\u0423Y\u0391A\u0392B\u0395E\u0396Z\u0397H\u0399I\u039aK\u039cM"
+                    "\u039dN\u039fO\u03a1P\u03a4T\u03a5Y\u03a7X\u03bfo\u03bdv\u03b9i\u03c1p")
+_LOOKALIKES = {ord(_LOOKALIKE_PAIRS[i]): _LOOKALIKE_PAIRS[i + 1] for i in range(0, len(_LOOKALIKE_PAIRS), 2)}
+
+
 def _fold(text):
-    return unicodedata.normalize("NFKC", "".join(c for c in text if unicodedata.category(c) != "Cf"))
+    if text.isascii():
+        return text
+    return unicodedata.normalize("NFKC", "".join(c for c in text if unicodedata.category(c) != "Cf")).translate(_LOOKALIKES)
+
+
+def _unjudgeable(text):
+    """A string the token rule of the WITHHOLDING block must not be given: too long, or a long run of name characters beside a `/`."""
+    return len(text) > MAX_JUDGED or ("/" in text and any(len(run) > MAX_RUN for run in _NAME_RUN.findall(text)))
 
 
 def _judge(text, whole):
     """(the text as it may be shown, whether anything was withheld). `whole`: a recovery-password shape withholds the whole string."""
     if len(text) < 6:
         return text, False
-    if len(text) > MAX_JUDGED:
+    if _unjudgeable(text):
         return LONG_TEXT, True
     key = (text, whole)
     if key in _CACHE:
         return _CACHE[key]
     folded = _fold(text)
+    if folded is not text and _unjudgeable(folded):
+        return _remember(key, (LONG_TEXT, True))
     hit = False
     if _RECOVERY_SHAPE.search(text) or _RECOVERY_SHAPE.search(folded):
         if whole:
@@ -524,8 +552,10 @@ def _judge(text, whole):
 
 
 def _remember(key, out):
-    if len(_CACHE) < 100000:
+    # bounded by the number of strings and by their size: 100,000 strings of a few kilobytes each are not a cache
+    if len(_CACHE) < 100000 and _CACHE_BYTES[0] < (16 << 20):
         _CACHE[key] = out
+        _CACHE_BYTES[0] += len(key[0]) + len(out[0])
     return out
 
 
@@ -543,8 +573,17 @@ def shown(path, count=True):
     """A path or a member name as it may be printed: every component judged by itself, a separator kept."""
     if not isinstance(path, str):
         return path
-    pieces = re.split(r"([/\\])", path)
+    if len(path) > 2 * MAX_JUDGED:      # a path is judged piece by piece: a name of a few such pieces is not a name
+        NAMES["strings"] += 1 if count else 0
+        return LONG_TEXT
     hit = False
+    # A recovery password cut at the separators of the path ("123456-123456/123456-..."): the separators of a path join its groups.
+    for candidate in ((path,) if path.isascii() else (path, _fold(path))):
+        cut = _RECOVERY_SHAPE.sub(lambda m: RECOVERY_NAME if ("/" in m.group() or "\\" in m.group()) else m.group(), candidate)
+        if cut != candidate:
+            path, hit = cut, True
+            break
+    pieces = re.split(r"([/\\])", path)
     for i in range(0, len(pieces), 2):
         pieces[i], one = _judge(pieces[i], True)
         hit = hit or one
@@ -554,12 +593,14 @@ def shown(path, count=True):
 
 
 # Layer 2: written apart from the rules above, over everything that is written. A string it finds suspect is replaced whole.
-_CHECK_QUICK = re.compile(r"(?i)[0-9]{6}|PRIVATE KEY|[A-Za-z0-9+_=-]{24}|pass|pwd|secret|token|api[_-]?key|AKIA|ASIA|gh.?_|github_pat|xox|eyJ|sk-|AIza|glpat|npm_")
+_CHECK_QUICK = re.compile(r"(?i)[0-9]{6}|PRIVATE KEY|[A-Za-z0-9+_=-]{24}|[0-9a-f]{16}|//[^/?#\s@]+@|pass|pwd|secret|token|api[_-]?key|AKIA|ASIA|gh.?_|github_pat|xox|eyJ|sk-|AIza|glpat|npm_")
 _CHECK_PREFIX = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{12}|gh[pousr]_[A-Za-z0-9]{16}|github_pat_[A-Za-z0-9_]{16}|xox[abeprs]-[A-Za-z0-9]{8}|eyJ[A-Za-z0-9_-]{8}"
                            r"|sk-[A-Za-z0-9_-]{16}|AIza[0-9A-Za-z_-]{16}|glpat-[A-Za-z0-9_-]{12}|npm_[A-Za-z0-9]{16}")
 _CHECK_DIGITS = re.compile(r"(?<![0-9])(?:[0-9]{6}[-_. ]?){8}(?![0-9])")
 _CHECK_PEM = re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY|PRIVATE KEY-----")
 _CHECK_RUN = re.compile(r"[A-Za-z0-9+_=-]{24,}")
+_CHECK_HEX = re.compile(r"(?<![0-9A-Za-z])(?=[0-9]*[a-fA-F])(?=[a-fA-F]*[0-9])[0-9a-fA-F]{16,}(?![0-9A-Za-z])")     # 16 or more hex digits, letters and digits both
+_CHECK_USERINFO = re.compile(r"(?<=//)[^/?#\s@]{1,128}@")
 _CHECK_VALUE = re.compile(r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key)[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*[^\s\"'<>]{6,}")
 OWN_KEYS = {"all_results", "values_file", "paths_note"}      # strings the tool made itself
 
@@ -568,9 +609,12 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 
 
 def _suspect(text):
+    if not text.isascii():      # full-width and invisible forms are read as the text they imitate
+        text = unicodedata.normalize("NFKC", "".join(c for c in text if unicodedata.category(c) != "Cf"))
     if not _CHECK_QUICK.search(text) or _UUID.fullmatch(text):
         return False
-    if _CHECK_DIGITS.search(text) or _CHECK_PEM.search(text) or _CHECK_VALUE.search(text) or _CHECK_PREFIX.search(text):
+    if _CHECK_DIGITS.search(text) or _CHECK_PEM.search(text) or _CHECK_VALUE.search(text) or _CHECK_PREFIX.search(text) \
+            or _CHECK_HEX.search(text) or _CHECK_USERINFO.search(text):
         return True
     for m in _CHECK_RUN.finditer(text):
         run = m.group()
@@ -609,17 +653,57 @@ def seal(value, key=None):
 # (cooperative) only notes the signal: the scan reads stop_wanted() between windows and files, finishes its pages and prints a partial
 # answer. If it is not finished GRACE_SECONDS later (a read that never returns), or a second signal comes, the stop is hard: the cleanup
 # steps run (a program the tool started is killed, a values file is closed), the temporary files of the pages are removed, the last word
-# is printed and the process ends. The tool's own clock (set_deadline) is below the manifest's timeout.
+# is printed and the process ends. The tool's own clock (set_deadline) is below the manifest's timeout and is backed by the same hard stop:
+# GRACE_SECONDS after the deadline a read that has not returned (a file on a volume that is not there, a pipe nobody writes) no longer holds
+# the tool. SIGALRM ends it when the read can be interrupted, and a watchdog thread, which needs neither a signal nor the read to return,
+# ends it when not; either prints ONE JSON answer, status partial, and exits 0. A page fault in a mapped file can be ended by neither (it
+# holds the interpreter): a tool that maps a file reads the part it maps through a descriptor first, where the thread can run.
 import signal
+import threading
 import time
 
 GRACE_SECONDS = 5
-STOP = {"signal": None, "deadline": None, "limit": None, "last_word": None, "cooperative": False, "cleanup": [], "answered": False}
+STOP = {"signal": None, "deadline": None, "limit": None, "last_word": None, "cooperative": False, "cleanup": [], "answered": False,
+        "owner": None, "hard_due": None}
+_STOP_LOCK = threading.RLock()
+_STOP_DONE = threading.Event()
 
 
 def set_deadline(seconds):
     STOP["limit"] = seconds
     STOP["deadline"] = time.monotonic() + seconds
+    arm_hard_stop(seconds + GRACE_SECONDS)
+    threading.Thread(target=_watchdog, name="hard-stop", daemon=True).start()
+
+
+def arm_hard_stop(seconds):
+    """The hard stop is due in `seconds` at the latest (an earlier one stays): as SIGALRM, and as the time the watchdog waits for."""
+    due = time.perf_counter() + seconds
+    if STOP["hard_due"] is None or due < STOP["hard_due"]:
+        STOP["hard_due"] = due
+    left = signal.getitimer(signal.ITIMER_REAL)[0]
+    signal.setitimer(signal.ITIMER_REAL, seconds if left <= 0 else min(seconds, left))
+
+
+def disarm_stop():
+    """No hard stop is wanted any more (the answer is going out, or the tool ends with an error): the timer and the watchdog stand down."""
+    STOP["hard_due"] = None
+    _STOP_DONE.set()
+    signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def _watchdog():
+    while not _STOP_DONE.wait(0.2):
+        due = STOP["hard_due"]
+        if due is not None and time.perf_counter() >= due:
+            hard_stop(STOP["signal"])
+
+
+def stand_by():
+    """When another thread is ending the tool, wait for it to do so: nothing else may print."""
+    if STOP["owner"] not in (None, threading.get_ident()):
+        while True:
+            time.sleep(3600)
 
 
 def out_of_time():
@@ -648,6 +732,18 @@ def remove_pending_pages():
 
 
 def hard_stop(signum):
+    """End the tool now. `signum` is the signal that asked for it; None when the clock did: the answer is then partial and the exit status 0."""
+    with _STOP_LOCK:
+        if signum is None and STOP["answered"]:     # the answer is being written: let it be written
+            STOP["hard_due"] = None
+            return
+        if STOP["owner"] in (None, threading.get_ident()):
+            STOP["owner"] = threading.get_ident()
+            mine = True
+        else:
+            mine = False
+    if not mine:
+        stand_by()
     for step in list(STOP["cleanup"]):
         try:
             step()
@@ -659,19 +755,19 @@ def hard_stop(signum):
             STOP["last_word"](signum)
         except Exception:  # noqa: BLE001
             pass
-    os._exit(128 + signum)
+    os._exit(128 + signum if signum else 0)
 
 
 def _on_stop_signal(signum, _frame):
     if STOP["cooperative"] and STOP["signal"] is None:
         STOP["signal"] = signum
-        signal.alarm(GRACE_SECONDS)
+        arm_hard_stop(GRACE_SECONDS)
         return
     hard_stop(STOP["signal"] or signum)
 
 
 def _on_stop_alarm(_signum, _frame):
-    hard_stop(STOP["signal"] or signal.SIGTERM)
+    hard_stop(STOP["signal"])
 
 
 def install_stop(last_word=None, cooperative=False):
@@ -682,6 +778,13 @@ def install_stop(last_word=None, cooperative=False):
 
 
 def interrupted_answer(signum, **extra):
+    if signum is None:       # the clock ran out, and then GRACE_SECONDS more, with a read that had not returned
+        print(json.dumps({"status": "partial", "partial": True, "interrupted": True, "hard_stopped": True,
+                          "stopped_by": "the tool's time limit (%s seconds) was reached" % STOP["limit"],
+                          "status_basis": "the tool's time limit (%s seconds) and %d seconds more passed while a read had not returned (a file on a "
+                                          "volume or share that is not available, or a pipe); the tool was ended there, and nothing it had read is "
+                                          "an answer" % (STOP["limit"], GRACE_SECONDS), **extra}), flush=True)
+        return
     print(json.dumps({"error": "stopped by signal %d before the answer was complete" % signum, "status": "interrupted",
                       "status_basis": "the tool was stopped by signal %d; nothing it had read is an answer" % signum,
                       "signal": signum, **extra}), flush=True)
@@ -689,10 +792,15 @@ def interrupted_answer(signum, **extra):
 
 def emit(answer):
     """Print the answer once, with the stop signals held back until it is out, and leave with 128 + the signal if one was noted."""
-    signal.alarm(0)
-    held = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+    disarm_stop()
+    held = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM}
     signal.pthread_sigmask(signal.SIG_BLOCK, held)
-    STOP["answered"] = True
+    with _STOP_LOCK:
+        mine = STOP["owner"] in (None, threading.get_ident())
+        if mine:
+            STOP["answered"] = True
+    if not mine:
+        stand_by()
     text = json.dumps(seal(answer), indent=2, ensure_ascii=True)
     sys.stdout.write(text + "\n")
     sys.stdout.flush()
@@ -917,6 +1025,8 @@ SEARCH = {"cut": False}
 
 
 def fail(message, **extra):
+    stand_by()
+    disarm_stop()
     remove_pending_pages()
     print(json.dumps(seal({"error": message, "status": "failed",
                            "status_basis": "the tool stopped with an error (see error); no container was read", **extra}), ensure_ascii=True))
@@ -925,6 +1035,28 @@ def fail(message, **extra):
 
 def describe(exc):
     return withhold("%s: %s" % (type(exc).__name__, getattr(exc, "strerror", None) or str(exc)))
+
+
+WINDOW = 8 << 20
+
+
+def touch(fd, start, end):
+    """Read [start, end) through the descriptor, a megabyte at a time, and drop it: the pages are in memory before the mapping is used.
+
+    A page of a mapped file that is not in memory (a file kept on a cloud volume, on a share that does not answer) stops the whole
+    interpreter until it comes: no signal handler and no other thread, the watchdog included, can run in the meantime. A read stops only
+    itself, and the watchdog ends the tool if it does not return. True when all of it was read; False when the clock or a signal
+    stopped the reading; an OSError when the file ends before `end` (it shrank after it was mapped).
+    """
+    pos = start
+    while pos < end:
+        if stop_wanted():
+            return False
+        got = os.pread(fd, min(1 << 20, end - pos), pos)
+        if not got:
+            raise OSError("the file ends before the %d bytes that were mapped: it changed while it was read" % end)
+        pos += len(got)
+    return True
 
 
 def extra_fields(extra):
@@ -973,26 +1105,29 @@ def aes_of(fields):
     return {"ae_version": version, "strength_bits": {1: 128, 2: 192, 3: 256}.get(strength), "method": method}
 
 
-def read_eocd(path, size):
-    """The End Of Central Directory record from the last 64 KiB, or None.
+EOCD_SIGNATURE = b"PK\x05\x06"
+
+
+def end_record_at(tail, at, tail_start):
+    """The End record whose signature is at `at` in `tail` (the last bytes of the file, which start at `tail_start`), or None when its 22 bytes do not fit.
 
     The Zip64 end record is read wherever a Zip64 locator sits right before the End
     record, whatever the End record says (a reader that follows the locator only
     when the End record holds 0xFFFF or 0xFFFFFFFF can be told "one entry" while the
     Zip64 record says millions: Python's zipfile follows the locator always, and so
     does this). The record is taken from the 56 bytes before the locator, as zipfile
-    does, and the locator's own offset is checked against it.
+    does, and the locator's own offset is checked against it. `after_comment` is the
+    number of bytes between the end of the record's comment and the end of the file:
+    0 for a record that ends the file, negative when the comment is declared longer
+    than the file holds.
     """
-    tail_len = min(size, 65535 + 22 + 20 + 56)
-    with open(path, "rb") as fh:
-        fh.seek(size - tail_len)
-        tail = fh.read(tail_len)
-    at = tail.rfind(b"PK\x05\x06")
-    if at < 0 or at + 22 > len(tail):
+    if at + 22 > len(tail):
         return None
-    _sig, _disk, _cd_disk, n_disk, n_total, cd_size, cd_offset, comment_len = struct.unpack_from("<IHHHHIIH", tail, at)
+    _sig, _disk, _cd_disk, _n_disk, n_total, cd_size, cd_offset, comment_len = struct.unpack_from("<IHHHHIIH", tail, at)
+    after = len(tail) - (at + 22 + comment_len)
     out = {"entries": n_total, "cd_bytes": cd_size, "cd_offset": cd_offset, "comment_bytes": comment_len,
-           "zip64": False, "eocd_at": size - tail_len + at}
+           "zip64": False, "eocd_at": tail_start + at, "after_comment": after,
+           "after_comment_zero": after > 0 and not tail[at + 22 + comment_len:].strip(b"\x00")}
     if at >= 20 and tail[at - 20:at - 16] == b"PK\x06\x07":
         out["zip64_locator"] = True
         rec = tail[at - 20 - 56:at - 20] if at - 20 - 56 >= 0 else b""
@@ -1003,6 +1138,67 @@ def read_eocd(path, size):
                 out["zip64_locator_disagrees"] = True
     out["zip64_unresolved"] = bool((n_total == 0xFFFF or cd_size == 0xFFFFFFFF or cd_offset == 0xFFFFFFFF) and not out["zip64"])
     return out
+
+
+def directory_starts(fh, record, size):
+    """Does the central directory this End record declares start with a central directory signature (or is it an empty archive's)?"""
+    if record["cd_bytes"] == 0:
+        return record["entries"] == 0
+    start = record["eocd_at"] - (76 if record["zip64"] else 0) - record["cd_bytes"]
+    if start < 0 or record["cd_bytes"] > size:
+        return False
+    fh.seek(start)
+    return fh.read(4) == b"PK\x01\x02"
+
+
+def read_eocd(path, size):
+    """The End Of Central Directory record of the file, or None.
+
+    A comment may hold anything, an End record included, so the last signature in the
+    file is not necessarily the archive's own (a reader that takes it lists the
+    comment's record: 0 entries for an archive that holds some). The records whose
+    comment ends exactly at the end of the file, and whose directory starts with a
+    directory signature, are the candidates; with several, the one that declares the
+    most entries is read, and the others are named in `other_records`, so that the
+    caller can say that they disagree. With none, the last signature is read as
+    before and `after_comment` says that no record ends the file.
+    """
+    tail_len = min(size, 65535 + 22 + 20 + 56)
+    with open(path, "rb") as fh:
+        fh.seek(size - tail_len)
+        tail = fh.read(tail_len)
+        records, at = [], tail.rfind(EOCD_SIGNATURE)
+        while at >= 0:
+            record = end_record_at(tail, at, size - tail_len)
+            if record is not None:
+                records.append(record)         # the last one in the file first
+            at = tail.rfind(EOCD_SIGNATURE, 0, at + 3)
+        sound = [r for r in records if directory_starts(fh, r, size)]
+    if not records:
+        return None
+    exact = [r for r in records if r["after_comment"] == 0]
+    good = [r for r in sound if r["after_comment"] == 0]
+    if good:
+        chosen = min(good, key=lambda r: (-r["entries"], r["eocd_at"]))
+    elif exact:
+        chosen = exact[0]
+    elif sound:
+        chosen = sound[0]
+    else:
+        chosen = records[0]
+    pool = good
+    if chosen["entries"] == 0 and chosen["cd_bytes"] == 0:
+        # An empty archive's record at the end of a file that holds a sound, non-empty one before it (7-Zip lists that one): the
+        # record that is not empty is read, and the other is named.
+        pool = sound
+        richer = [r for r in sound if r["entries"] > 0]
+        if richer:
+            chosen = min(richer, key=lambda r: (-r["entries"], r["eocd_at"]))
+    others = [r for r in pool if r is not chosen and (r["entries"], r["cd_bytes"]) != (chosen["entries"], chosen["cd_bytes"])]
+    chosen["other_record_count"] = len(others)
+    chosen["other_records"] = [{"offset": r["eocd_at"], "entries": r["entries"], "central_directory_bytes": r["cd_bytes"],
+                                "comment_bytes": r["comment_bytes"]} for r in others[:8]]
+    return chosen
 
 
 class CentralDirectory:
@@ -1061,6 +1257,24 @@ def probe_zip(path, size, limit, max_metadata):
     out["central_directory_bytes"] = eocd["cd_bytes"]
     if eocd.get("zip64"):
         out["zip64"] = True
+    # What makes the End record less than certain: another record that ends the file (a comment can hold one) and says something else,
+    # or no record that ends it (bytes after the comment, or a comment declared longer than the file).
+    doubts = []
+    if eocd["other_record_count"]:
+        out["end_records_disagree"] = {"read": {"offset": eocd["eocd_at"], "entries": eocd["entries"], "central_directory_bytes": eocd["cd_bytes"]},
+                                       "others": eocd["other_records"], "others_counted": eocd["other_record_count"]}
+        doubts.append("the end of the file holds %d other End record%s with a different directory (an End record can sit in another's comment): "
+                      "the one that declares the most entries was read" % (eocd["other_record_count"], "" if eocd["other_record_count"] == 1 else "s"))
+    if eocd["after_comment"] > 0 and eocd["after_comment_zero"]:
+        out["trailing_zero_bytes"] = eocd["after_comment"]
+    elif eocd["after_comment"] > 0:
+        out["trailing_bytes_after_comment"] = eocd["after_comment"]
+        doubts.append("%d bytes that are not zeros follow the End record's comment, so no End record ends the file: the last one was read" % eocd["after_comment"])
+    elif eocd["after_comment"] < 0:
+        out["end_record_comment_overruns_by"] = -eocd["after_comment"]
+        doubts.append("the End record declares a comment %d bytes longer than the file holds: it may be cut short or not an End record" % -eocd["after_comment"])
+    if doubts:
+        out["end_record_doubts"] = doubts
     # The bound is on what the archive DECLARES, whatever record it is declared in: a directory over the limit, over the file, or
     # claiming more entries than the limit can hold (46 bytes at least each) is not read.
     reason = None
@@ -1089,7 +1303,7 @@ def probe_zip(path, size, limit, max_metadata):
     with open(path, "rb") as fh:
         cd = CentralDirectory(fh, cd_start, eocd["cd_bytes"])
         while consumed < eocd["cd_bytes"]:
-            if count % 1000 == 0 and stop_wanted():
+            if stop_wanted():       # every entry: a name that takes a moment to judge is bounded, but not the number of them
                 problem = "%s after %d entries" % (stop_cause(), count)
                 break
             fixed = cd.take(46)
@@ -1160,14 +1374,27 @@ def probe_zip(path, size, limit, max_metadata):
         out["protected"] = True if encrypted else None
         out["status"] = "partial"
         out["status_basis"] = "the member list stops after %d of %d declared entries: %s" % (count, eocd["entries"], problem)
+        if doubts:
+            out["status_basis"] += "; " + "; ".join(doubts)
         out["not_determined"].insert(0, "the members after the point where the directory could not be read")
         out["partial"] = True
     else:
-        out["protected"] = encrypted > 0
         matches = out["entry_count_matches_declared"]
-        out["status"] = "complete" if matches else "partial"
-        out["status_basis"] = ("every central directory entry was read and the count agrees with the End record" if matches else
-                               "every central directory entry was read, but the count (%d) differs from the %d the End record declares" % (count, eocd["entries"]))
+        sure = matches and not doubts
+        # `protected: false` is said only of a list that is whole and of an End record nothing contradicts.
+        out["protected"] = True if encrypted else (False if sure else None)
+        out["status"] = "complete" if sure else "partial"
+        if sure:
+            out["status_basis"] = "every central directory entry was read and the count agrees with the End record"
+        else:
+            reasons = list(doubts)
+            if not matches:
+                reasons.insert(0, "every central directory entry was read, but the count (%d) differs from the %d the End record declares" % (count, eocd["entries"]))
+            else:
+                reasons.insert(0, "every central directory entry was read and the count agrees with the End record read")
+            out["status_basis"] = "; ".join(reasons)
+        if doubts:
+            out["not_determined"].insert(0, "which End record is the archive's, and so whether the list is the archive's whole list")
     return out
 
 
@@ -1225,7 +1452,7 @@ def list_with_7z(path, limit):
                 kill_tree(proc)
                 break
             line = raw.rstrip("\r\n")
-            if ENCRYPTED_ARCHIVE.search(line):
+            if not in_members and ENCRYPTED_ARCHIVE.search(line):       # 7z's own message, not a member name that says the same
                 encrypted_message = True
             if re.match(r"^(ERROR|WARNING|Errors|Warnings)\b", line) and len(diagnostics) < 5:
                 diagnostics.append(withhold(line))
@@ -1270,7 +1497,7 @@ def list_with_7z(path, limit):
     return {**info, "status": "failed", "reason": "7z could not list this file (exit %s)" % code}, None
 
 
-def probe_7z(view, path, limit, max_metadata):
+def probe_7z(view, fd, path, limit, max_metadata):
     """The 32-byte start header points at the real header, at the end of the file.
 
     That header is either plain (0x01), where the names sit in the clear, or
@@ -1279,12 +1506,15 @@ def probe_7z(view, path, limit, max_metadata):
     out = {"container": "7-Zip", "names_readable": None, "protected": None,
            "protection": "7z's own listing where it could read the archive; otherwise a heuristic from the start header"}
     # The header is read in place, through the mapping: nothing of it is copied,
-    # and what is searched is the first `searched` bytes from `at`.
-    at, searched = 0, 0
+    # and what is searched is the first `searched` bytes from `at`. Each part is read through
+    # the descriptor first (touch), so that a stall is a stalled read, which the watchdog ends.
+    at, searched, header_cut = 0, 0, None
     out["start_header"] = {}
     sh = out["start_header"]
     if len(view) < 32:
         sh["problem"] = "the file is shorter than the 32-byte start header"
+    elif not touch(fd, 0, 32):
+        header_cut = stop_cause()
     else:
         start_crc, = struct.unpack_from("<I", view, 8)
         sh["crc_ok"] = zlib.crc32(view[12:32]) == start_crc
@@ -1294,7 +1524,9 @@ def probe_7z(view, path, limit, max_metadata):
         out["header_offset"], out["header_bytes"] = at, next_size
         if next_size and at + next_size <= len(view):
             searched = min(next_size, max_metadata)
-            if searched < next_size:
+            if not touch(fd, at, at + searched):
+                header_cut, searched = stop_cause(), 0
+            elif searched < next_size:
                 sh["search_truncated"] = True
                 sh["search_note"] = "the header is %d bytes: only the first %d (max_metadata_bytes) were searched" % (next_size, searched)
             else:
@@ -1321,7 +1553,11 @@ def probe_7z(view, path, limit, max_metadata):
                              "parse of the coder graph")
         else:
             hint["header_kind"] = "unknown (0x%02x)" % kind
-    listing, members = list_with_7z(path, limit)
+    if header_cut:
+        out["header_read_cut"] = "%s before the header was read" % header_cut
+        listing, members = {"status": "not attempted", "reason": out["header_read_cut"]}, None
+    else:
+        listing, members = list_with_7z(path, limit)
     out["listing"] = listing
     status = listing["status"]
     if members is not None:
@@ -1358,7 +1594,7 @@ def probe_7z(view, path, limit, max_metadata):
         cut = False
         if searched:
             for _start, text in heapq.merge(ascii_runs, wide_runs, key=lambda found: found[0]):
-                if strings.total % 1024 == 0 and stop_wanted():
+                if stop_wanted():       # every string: one of them may take a moment to judge
                     cut = True
                     break
                 strings.add(withhold(text))
@@ -1394,18 +1630,41 @@ def probe_rar(blob):
             "note": "A RAR may encrypt its data, and in RAR5 its names as well; this tool reads neither."}
 
 
-def markers(blob, needle):
-    """Offsets of a byte string in the whole file: the first few, and the count (capped)."""
-    offsets, count, at = [], 0, blob.find(needle)
-    while at >= 0 and count < MARKER_COUNT_CAP:
-        if count % 256 == 0 and stop_wanted():
+def markers(blob, fd, needle):
+    """Offsets of a byte string in the whole file: the first few, and the count (capped). Searched a window at a time, each read first (touch)."""
+    offsets, count, capped, pos, size = [], 0, False, 0, len(blob)
+    while pos < size and not capped:
+        end = min(size, pos + WINDOW)
+        if not touch(fd, pos, end):
             SEARCH["cut"] = True
             break
-        count += 1
-        if len(offsets) < MARKER_OFFSETS:
-            offsets.append(at)
-        at = blob.find(needle, at + 1)
-    return {"found": count > 0, "count": count, "count_capped": at >= 0, "first_offsets": offsets}
+        stop_at = min(size, end + len(needle) - 1)       # a match that starts in this window may end in the next
+        at = blob.find(needle, pos, stop_at)
+        while 0 <= at < end:
+            if count >= MARKER_COUNT_CAP:
+                capped = True
+                break
+            count += 1
+            if len(offsets) < MARKER_OFFSETS:
+                offsets.append(at)
+            at = blob.find(needle, at + 1, stop_at)
+        pos = end
+    return {"found": count > 0, "count": count, "count_capped": capped, "first_offsets": offsets}
+
+
+def first_match(blob, fd, pattern):
+    """The first match of a compiled pattern in the whole file (None when there is none or the search was cut), a window at a time, each read first."""
+    pos, size = 0, len(blob)
+    while pos < size:
+        end = min(size, pos + WINDOW)
+        if not touch(fd, pos, end):
+            SEARCH["cut"] = True
+            return None
+        m = pattern.search(blob, pos, min(size, end + 128))      # a match across the window's end is found from this window
+        if m is not None and m.start() < end:
+            return m
+        pos = end
+    return None
 
 
 def whole_search(blob):
@@ -1423,8 +1682,11 @@ def heuristic_status(out, what):
     return out
 
 
-def probe_pdf(blob):
-    encrypt = markers(blob, b"/Encrypt")
+PDF_V, PDF_R, PDF_P = re.compile(rb"/V\s+(\d+)"), re.compile(rb"/R\s+(\d+)"), re.compile(rb"/P\s+(-?\d+)")
+
+
+def probe_pdf(blob, fd):
+    encrypt = markers(blob, fd, b"/Encrypt")
     out = {"container": "PDF", "protected": None, "protection": "heuristic: a byte search for the /Encrypt marker",
            "encrypt_marker": encrypt,
            "next_reader": NEXT_DOCUMENT_READER,
@@ -1434,8 +1696,7 @@ def probe_pdf(blob):
                               "the permission restrictions (a separate setting from the opening password)",
                               "the security handler and its revision"]}
     if encrypt["found"] and not SEARCH["cut"]:
-        version, revision, permissions = (re.search(rb"/V\s+(\d+)", blob), re.search(rb"/R\s+(\d+)", blob),
-                                          re.search(rb"/P\s+(-?\d+)", blob))
+        version, revision, permissions = (first_match(blob, fd, PDF_V), first_match(blob, fd, PDF_R), first_match(blob, fd, PDF_P))
         out["unresolved_hints"] = {
             "v": int(version.group(1)) if version else None, "r": int(revision.group(1)) if revision else None,
             "p": int(permissions.group(1)) if permissions else None,
@@ -1447,14 +1708,14 @@ def probe_pdf(blob):
     return heuristic_status(out, "the file was searched for the /Encrypt marker")
 
 
-def probe_ole(blob):
+def probe_ole(blob, fd):
     wanted = [("EncryptionInfo", "an Office 2007-and-later encrypted document's stream"),
               ("EncryptedPackage", "an Office 2007-and-later encrypted document's stream"),
               ("DataSpaces", "the storage that records an encrypted package's transforms")]
     found = []
     for name, meaning in wanted:
         for encoding, needle in (("UTF-16LE", name.encode("utf-16-le")), ("ASCII", name.encode("ascii"))):
-            m = markers(blob, needle)
+            m = markers(blob, fd, needle)
             if m["found"]:
                 found.append({"name": name, "encoding": encoding, "meaning": meaning, **m})
     out = {**whole_search(blob), "container": "OLE compound file", "protected": None,
@@ -1521,15 +1782,16 @@ def main():
                 # PDF is usually its trailer, and a 7-Zip header sits at the end.
                 if size == 0:
                     fail("the file is empty", path=shown(path))
+                # Every part of the mapping is read through the descriptor before it is used (touch), see there.
                 with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as view:
                     if head[:6] == b"7z\xbc\xaf\x27\x1c":
-                        body = probe_7z(view, path, limit, max_metadata)
+                        body = probe_7z(view, fh.fileno(), path, limit, max_metadata)
                     elif head[:4] == b"Rar!":
                         body = probe_rar(view)
                     elif head[:5] == b"%PDF-":
-                        body = probe_pdf(view)
+                        body = probe_pdf(view, fh.fileno())
                     else:
-                        body = probe_ole(view)
+                        body = probe_ole(view, fh.fileno())
         # A ZIP is recognised from its own bytes (a local header or an End record), never from a library's yes or no.
         if body is None and (head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08") or read_eocd(path, size) is not None):
             body = probe_zip(path, size, limit, max_metadata)

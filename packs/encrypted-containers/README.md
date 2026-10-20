@@ -23,7 +23,7 @@ rule, and is the one line a run shows for the pack when its skills index is over
 `crypto_id` names the scheme from the first bytes of a volume or file and reads
 what a header holds without a key: the LUKS1 key-slot fields, the LUKS2 binary
 header (version, label, UUID). It prints no raw bytes of the file, and header text
-only when it is what the format says. It does not read LUKS2 keyslots, BitLocker
+only when it is what the format says (the header's numbers and the sample's entropy are printed). It does not read LUKS2 keyslots, BitLocker
 protectors or the encryption state of an APFS volume, and it names the reader
 that does. `archive_probe` lists a ZIP's members with per-member encryption, and
 says what it can and cannot establish about 7-Zip, RAR, PDF and OLE documents; a

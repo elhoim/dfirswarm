@@ -32,8 +32,8 @@ recognised" is not "not encrypted".
 
 Only if you name a particular format's protection (BitLocker, LUKS, Apple, VeraCrypt and TrueCrypt, archives, Office, PDF, phone backups): `identify/by-format`.
 
-**Sensitive output.** `crypto_id` prints no raw bytes of the file, so a possible key
-file is identified by its size and entropy and never shown; to see bytes, use a hex viewer
+**Sensitive output.** `crypto_id` prints no raw bytes of the file (it does print the header's numbers and the
+sample's entropy), so a possible key file is identified by its size and entropy and never shown; to see bytes, use a hex viewer
 on the evidence copy and do not copy them into the report or the ledger. Run any job that
 may emit secret material with `secret_output: true`, and record locations and sealed
 references, never values or hashes. Withholding of header text and names is by shape:

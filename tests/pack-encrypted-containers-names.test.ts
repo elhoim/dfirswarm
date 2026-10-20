@@ -90,6 +90,24 @@ const groups = (n: number, k: number, sep: string, alphabet: string) => Array.fr
 const six = (sep: string) => groups(8, 6, sep, DIGITS);
 const joinParts = (...parts: string[]) => parts.join("");
 
+/** Sixteen or more hexadecimal digits with both letters and digits in them. */
+function hexWithBoth(n: number): string {
+  for (;;) {
+    const s = pick(HEX, n);
+    if (/[a-f]/.test(s) && /[0-9]/.test(s)) return s;
+  }
+}
+const fullWidth = (s: string) => Array.from(s).map((c) => (c >= "!" && c <= "~" ? String.fromCharCode(c.charCodeAt(0) - 0x21 + 0xff01) : c)).join("");
+const LOOK_ALIKES: Record<string, string> = { a: "\u0430", c: "\u0441", e: "\u0435", o: "\u043e", p: "\u0440", x: "\u0445", y: "\u0443", A: "\u0410", B: "\u0412", E: "\u0415", K: "\u041a", M: "\u041c", H: "\u041d", O: "\u041e", P: "\u0420", C: "\u0421", T: "\u0422", X: "\u0425" };
+/** Half of the letters that have a look-alike written as the Cyrillic letter. */
+const lookAlikes = (s: string) => Array.from(s).map((c) => (LOOK_ALIKES[c] && rnd() < 0.5 ? LOOK_ALIKES[c] : c)).join("");
+function constrained(n: number): string {
+  for (;;) {
+    const s = pick(ALNUM, n);
+    if (/[A-Z]/.test(s) && /[a-z]/.test(s) && /[0-9]/.test(s)) return s;
+  }
+}
+
 /** [shape, builder, the share of draws the rule may let through, written in the manifests (percent, the measured rate plus margin)]. */
 const SHAPES: Array<[string, () => string, number]> = [
   ["hex16", () => pick(HEX, 16), 0],
@@ -111,6 +129,19 @@ const SHAPES: Array<[string, () => string, number]> = [
   ["recovery password, dots", () => six("."), 0],
   ["recovery password, underscores", () => six("_"), 0],
   ["recovery password, no separator", () => six(""), 0],
+  // Any one to three characters that are not letters or digits join the groups; a path's separators do too.
+  ...[["en dash", "\u2013"], ["em dash", "\u2014"], ["hyphen U+2010", "\u2010"], ["non-breaking hyphen", "\u2011"], ["minus sign", "\u2212"], ["middle dot", "\u00b7"],
+      ["comma", ","], ["semicolon", ";"], ["colon", ":"], ["plus", "+"], ["pipe", "|"], ["tab", "\t"], ["two spaces", "  "]].map(([label, sep]): [string, () => string, number] =>
+    [`recovery password, ${label}`, () => six(sep), 0]),
+  ["recovery password, two groups to a component over four components", () => Array.from({ length: 4 }, () => groups(2, 6, "-", DIGITS)).join("/"), 0],
+  ["recovery password, two groups to a component over four components with backslashes", () => Array.from({ length: 4 }, () => groups(2, 6, "-", DIGITS)).join("\\"), 0],
+  ["recovery password, one group to a component", () => six("/"), 0],
+  ["recovery password, full-width", () => fullWidth(six("-")), 0],
+  ["12 letters and digits, half of the letters Cyrillic look-alikes", () => lookAlikes(pick(ALNUM, 12)), 3],
+  ["16 letters and digits, half of the letters Cyrillic look-alikes", () => lookAlikes(pick(ALNUM, 16)), 2],
+  ["mixed-case letters and digits of 8 with a capital, a small letter and a digit", () => constrained(8), 0],
+  ["mixed-case letters and digits of 12 with a capital, a small letter and a digit", () => constrained(12), 0],
+  ["mixed-case letters and digits of 40 with a capital, a small letter and a digit", () => constrained(40), 0],
   ["aws access key id", () => joinParts("AK", "IA", pick(UPPER_DIGITS, 16)), 0],
   ["password assignment", () => joinParts("pass", "word=", pick(ALNUM, 14)), 0],
   ["api key assignment", () => joinParts("api", "_key: ", pick(ALNUM, 24)), 0],
@@ -122,6 +153,10 @@ const NOT_RECOGNISED: Array<[string, () => string]> = [
   ["7-character identifier", () => pick(ALNUM, 7)],
   ["9-digit number", () => pick(DIGITS, 9)],
   ["lowercase-only word-length run", () => pick("abcdefghijklmnopqrstuvwxyz", 14)],
+  ["all-capital letters-only run of 24", () => pick("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 24)],
+  ["all-capital letters-only run of 40", () => pick("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 40)],
+  ["three groups of four capitals and digits", () => groups(3, 4, "-", UPPER_DIGITS)],
+  ["three groups of five capitals and digits", () => groups(3, 5, ".", UPPER_DIGITS)],
 ];
 const DRAWS = 300;
 
@@ -244,8 +279,11 @@ test("the output check replaces what the first layer would have let through (san
   const strings = [
     `docs/${six("-")}.txt`, `docs/${six("_")}.txt`, joinParts("docs/pass", "word=", pick(ALNUM, 14), ".txt"), joinParts("AK", "IA", pick(UPPER_DIGITS, 16)),
     joinParts("-----BEGIN RSA PRIV", "ATE KEY-----"), pick(HEX, 40), pick(ALNUM, 40) + pick(DIGITS, 6),
+    // what the check alone did not catch: hexadecimal of 16 to 24 digits, user-info, a full-width or invisibly split recovery password
+    `docs/${hexWithBoth(16)}.bin`, `docs/${hexWithBoth(20)}.bin`, joinParts("https://us", "er:", pick(ALNUM, 10), "@host/x"), joinParts("//", pick(ALNUM, 9), "@host"),
+    `docs/${fullWidth(six("-"))}.txt`, `docs/${six("-").slice(0, 20)}\u200b${six("-").slice(20)}.txt`,
   ];
-  const fine = ["README.txt", "docs/Quarterly Report 2024.docx", "e1f2a3b4-1111-4222-8333-444455556666"];
+  const fine = ["README.txt", "docs/Quarterly Report 2024.docx", "e1f2a3b4-1111-4222-8333-444455556666", "dos_date=0x2e6e dos_time=0x4d96", "https://example.org/a/b?c=d"];
   for (const path of [RKS, AP, CID]) {
     const run = await runPySnippet(BACKSTOP, [path], { strings: [...strings, ...fine] });
     assert.equal(run.code, 0, run.stderr);
@@ -255,4 +293,103 @@ test("the output check replaces what the first layer would have let through (san
     assert.match(got.kept, /^store\/jobs\/j000001\/out\/tool-output\//);
     assert.equal(got.replaced, strings.length);
   }
+});
+
+// --- what the layer-2 check alone does not catch, said as a test so that the manifests' sentence cannot drift ---------------------------
+
+test("the output check alone does not catch a number of 10 to 20 digits or an identifier of up to 23 characters: only the rule withholds them", async () => {
+  const strings = [`docs/${pick(DIGITS, 12)}.bin`, `docs/${pick(DIGITS, 20)}.bin`, `docs/${pick(ALNUM, 12)}Qz1.bin`];
+  for (const path of [RKS, AP, CID]) {
+    const run = await runPySnippet(BACKSTOP, [path], { strings });
+    assert.equal(run.code, 0, run.stderr);
+    const got = JSON.parse(run.stdout) as { rows: Array<{ name: string }>; replaced: number };
+    assert.equal(got.replaced, 0, path);
+    strings.forEach((s, i) => assert.equal(got.rows[i].name, s));
+  }
+});
+
+// --- the rule is given bounded text -----------------------------------------------------------------------------------------
+
+const LONG = "<text too long to judge withheld>";
+
+const BOUNDS = String.raw`
+import json, re, sys, time, unicodedata
+text = open(sys.argv[1], encoding="utf-8").read()
+ns = {"re": re}
+for name in ("WITHHOLDING", "NAMES"):
+    b, e = "# BEGIN SHARED " + name, "# END SHARED " + name
+    exec(text[text.index(b):text.index(e)], ns)
+S = "／"
+flagged = "AK" + "IA" + "A" * 16
+rows = {}
+def timed(label, fn, arg):
+    ns["_CACHE"].clear()
+    t0 = time.process_time(); out = fn(arg); rows[label] = [round(time.process_time() - t0, 3), out[:40]]
+# the two families of the review, at the sizes of a ZIP name and of a 7z header string
+timed("run+solidus", ns["shown"], "a" * 30000 + "!" + S + (flagged + "!" + S) * 20)
+timed("pieces+solidus", ns["shown"], ("ab12" + S) * 9000 + flagged)
+timed("run+slash, free text", ns["withhold"], "a" * 40000 + "!/" + (flagged + "!/") * 60)
+timed("pieces+slash, free text", ns["withhold"], "ab12/" * 12000 + flagged)
+# the worst a judged string can be: runs just inside the bound, with as many flagged spans behind them as fit
+worst = 0.0
+for run in (100, 200, 256):
+    for sep in ("/", S):
+        s = ("a" * run + "!" + sep + (flagged + "!" + sep) * 200)[:4096]
+        for fn in ("shown", "withhold"):
+            ns["_CACHE"].clear()
+            t0 = time.process_time(); ns[fn](s); worst = max(worst, time.process_time() - t0)
+rows["worst inside the bound"] = [round(worst, 3), ""]
+# what the bound does and does not take
+ns["_CACHE"].clear()
+rows["verdicts"] = [0, [ns["withhold"]("x" * 4097), ns["withhold"]("a" * 300 + "/" + "b" * 10), ns["withhold"]("a" * 300), ns["shown"]("d/" * 5000 + "f.txt"),
+                        ns["withhold"]("ﷺ" * 300), ns["shown"]("ab/" * 3000)]]
+print(json.dumps(rows))
+`;
+
+test("names: strings the token rule of the shared block would take quadratic time on are withheld whole, and nothing inside the bound takes long", async () => {
+  for (const path of [RKS, AP, CID]) {
+    const run = await runPySnippet(BOUNDS, [path], null);
+    assert.equal(run.code, 0, run.stderr);
+    const rows = JSON.parse(run.stdout) as Record<string, [number, unknown]>;
+    for (const [label, [cpu]] of Object.entries(rows)) assert.ok(cpu < 1, `${label}: ${cpu} CPU s in ${path}`);
+    const verdicts = rows.verdicts[1] as string[];
+    assert.equal(verdicts[0], LONG, "longer than 4096 characters");
+    assert.equal(verdicts[1], LONG, "a run of more than 256 name characters beside a /");
+    assert.notEqual(verdicts[2], LONG, "the same run without a / is judged: by shape, not as unjudged text");
+    assert.equal(verdicts[3], LONG, "a path of more than 8192 characters");
+    assert.equal(verdicts[4], LONG, "a text that folds to more than the bound (U+FDFA is 18 characters)");
+    assert.equal(verdicts[5], LONG, "a path of 9000 characters");
+  }
+});
+
+const CACHE = String.raw`
+import json, re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+ns = {"re": re}
+for name in ("WITHHOLDING", "NAMES"):
+    b, e = "# BEGIN SHARED " + name, "# END SHARED " + name
+    exec(text[text.index(b):text.index(e)], ns)
+for i in range(6000):
+    ns["shown"]("%05d" % i + "x" * 3990)
+print(json.dumps({"entries": len(ns["_CACHE"]), "bytes": ns["_CACHE_BYTES"][0]}))
+`;
+
+test("names: the cache of judged strings is bounded by size, not only by the number of strings", async () => {
+  for (const path of [RKS, AP, CID]) {
+    const run = await runPySnippet(CACHE, [path], null);
+    assert.equal(run.code, 0, run.stderr);
+    const got = JSON.parse(run.stdout) as { entries: number; bytes: number };
+    assert.ok(got.bytes < 17 << 20, `${got.bytes} bytes held in ${path}`);
+    assert.ok(got.entries < 6000, "the cache stopped taking strings");
+  }
+});
+
+test("names: a Cyrillic or Greek letter that is written like a Latin one is read as the Latin one", async () => {
+  const cyrillicId = lookAlikes("aeoc9QxK4pYh");
+  assert.ok(!/^[\x00-\x7f]*$/.test(cyrillicId));
+  const [out] = await call("shown", [`docs/${cyrillicId}.txt`]);
+  assert.equal(out, "docs/<identifier-shaped text withheld>", "a hit that only the folded text shows withholds the whole component");
+  // A word in a script of its own is not touched.
+  const words = ["docs/Документ.txt", "docs/Πλάνο 2024.txt", "docs/研究レポート.docx"];
+  assert.deepEqual(await call("shown", words), words);
 });
