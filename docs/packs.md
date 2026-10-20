@@ -737,7 +737,9 @@ import each other), and holds to this:
   of every row, and a few hundred calls confirm a guess. The values-to-file
   mode takes the table, not the query (`sqlite_query` with `write_values`), or
   lets the expression narrow only what goes into the sealed file and never what
-  the answer counts (`sqlite_freespace`'s `contains`). A position is not free of
+  the answer counts (`sqlite_freespace`'s `contains`, which runs only as an
+  expression of bounded cost and reports no time-out: how long an expression runs
+  on text you cannot see is a bit as well). A position is not free of
   the values by itself, either. A range over a key is a filter over that key
   when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
   KEY` column, so `sqlite_query` refuses a rowid range on such a table, never

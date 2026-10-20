@@ -86,9 +86,10 @@ VALUES_FORMAT = "not used"
 #   1. The answer carries presence, kind, location (file and offset or path), length and counts.
 #      It carries no value, no characters of one, no masked shape and no digest of one.
 #   2. A value is written only on `write_values: true`, only when the tool runs as a job
-#      (JOB_ID and OUT are set), and only to a file under $OUT: JSON Lines, mode 0600, created
-#      exclusively before anything is read. The skill that sends the agent here says the job runs
-#      with `secret_output: true`. Outside a job the request is refused and nothing is written.
+#      (JOB_ID and OUT are set) that the harness ran as secret output (SECRET_OUTPUT=1, which the
+#      manifest's `secret_output` declaration makes the job service set), and only to a file under
+#      $OUT: JSON Lines, mode 0600, created exclusively before anything is read. Outside such a job
+#      the request is refused as JSON and nothing is written.
 #   3. A secret is never on a command line: these tools take a path and flags only.
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
@@ -150,7 +151,23 @@ OPEN_VALUES = []
 NONCE = "%d-%d" % (os.getpid(), time.time_ns())
 
 
-def fail(message, **extra):
+# Things the run made that a failure or a stop must not leave behind (a working copy of an evidence file). Each is a
+# callable that removes what the tool itself created; it is run once, by fail() and by a stop signal.
+CLEANUP = []
+
+
+def run_cleanup():
+    while CLEANUP:
+        step = CLEANUP.pop()
+        try:
+            step()
+        except Exception:
+            pass
+
+
+def wrap_up(answer):
+    """What an answer that ends the run early carries: the pages already written are closed and named, the values
+    file is closed and counted, and what the tool made as scratch is removed."""
     kept = []
     for page in OPEN_PAGES:
         if page._out is not None:
@@ -158,15 +175,50 @@ def fail(message, **extra):
                 kept.append(page.finish().get("all_results"))
             except Exception:
                 pass
-    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
     if kept:
         answer["rows_read_before_the_failure_kept_in"] = kept
     for values in OPEN_VALUES:
         values.close()
         if values.written:
             answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
-    print(dumps(answer))
+    run_cleanup()
+    return answer
+
+
+def fail(message, **extra):
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    print(dumps(wrap_up(answer)))
     raise SystemExit(1)
+
+
+class Interrupted(BaseException):
+    """A stop signal (SIGTERM, SIGINT or SIGHUP) arrived. A BaseException, so that no `except Exception` of a tool
+    swallows it; run_main answers for it once, at the top."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+STOP_SIGNALS = [getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)]
+
+
+def stop_handler(signum, frame):
+    # The answer to the first signal is written once: a second signal while it is written changes nothing.
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
+def stopped(signum):
+    """One JSON answer for a run a signal ended, then exit 128 + the signal. The pages and the values file are closed
+    and named, the scratch the tool made is removed, and nothing is said about what the tool had read."""
+    name = signal.Signals(signum).name
+    answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
+                      "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
+                      "interrupted": name})
+    print(dumps(answer))
+    raise SystemExit(128 + signum)
 
 
 class Timeout(Exception):
@@ -314,6 +366,12 @@ class SecretValues:
                 "file, not a sealed secret output. Run this as job_run tool=%s with "
                 "secret_output: true, and ask again there. Nothing was written." % TOOL
             )
+        if os.environ.get("SECRET_OUTPUT") != "1":
+            raise SecretValuesRefused(
+                "write_values is refused in a job that is not run as secret output (SECRET_OUTPUT is not 1): the values file would "
+                "be sealed as ordinary output. The harness sets SECRET_OUTPUT=1 for a secret job's process and it is not set here. "
+                "Run this as job_run tool=%s with secret_output: true, and ask again there. Nothing was written." % TOOL
+            )
         self.path = Path(self.out) / VALUES_NAME
         self.shown = "store/jobs/%s/out/%s" % (safe_name(self.job), VALUES_NAME)
         # Created now, before anything is read: a file or a link already at that name is refused
@@ -402,12 +460,17 @@ def send(result):
 
 
 def run_main(main):
+    for number in STOP_SIGNALS:
+        signal.signal(number, stop_handler)
     try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
-        fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+        try:
+            main()
+        except SystemExit:
+            raise
+        except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
+            fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+    except Interrupted as stop:
+        stopped(stop.signum)
 # --- shared with the pack's other tools: end -----------------------------------------------
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -420,6 +483,7 @@ MAX_SECONDS_CAP = 270       # manifest.json timeout_seconds (300) less the time 
 BACKUP_FILES = ("Manifest.plist", "Info.plist", "Status.plist")
 UNIX_2007 = 1167609600      # 2007-01-01T00:00:00Z: before the first iPhone
 MAX_PLIST_BYTES = 32 << 20
+MAX_ARCHIVE_BYTES = 1 << 20   # the keyed archive in a `file` cell; a real one is a few hundred bytes. A larger cell is never read
 MAX_REF_DEPTH = 12
 KINDS = {1: "file", 2: "directory", 4: "symlink"}
 EPOCH_BASE = {"unix": 0, "apple": APPLE_EPOCH_UNIX}
@@ -634,6 +698,9 @@ def stage(db, companions):
         parent = Path("work") / safe_name(os.environ.get("AGENT_ID") or "tool") / "tool-output"
     parent.mkdir(parents=True, exist_ok=True)
     directory = tempfile.mkdtemp(prefix="manifest_db-working-copy-", dir=str(parent))
+    # The copy is the answer's to cite when the run ends well; a failure or a stop signal removes it (only this directory, which
+    # this call made).
+    CLEANUP.append(lambda: shutil.rmtree(directory, ignore_errors=True))
     target = os.path.join(directory, "Manifest.db")
     shutil.copyfile(db, target)
     for suffix in companions:
@@ -848,11 +915,15 @@ def main():
             counts["files_in_manifest"] = connection.execute("SELECT count(*) FROM Files NOT INDEXED").fetchone()[0]
         except sqlite3.Error as exc:
             observations.append("the rows of the Files table could not be counted (%s): the listing goes as far as the table can be read" % type(exc).__name__)
+        # The `file` cell is read only when it is a BLOB of at most MAX_ARCHIVE_BYTES: its type and its length are
+        # taken from the record's header, so a cell of any size costs no memory when it is not read.
+        file_cell = ("typeof(file), CASE typeof(file) WHEN 'blob' THEN length(file) END, "
+                     "CASE WHEN typeof(file) = 'blob' AND length(file) <= %d THEN file END" % MAX_ARCHIVE_BYTES)
         try:
-            cursor = connection.execute("SELECT rowid, fileID, domain, relativePath, flags, file FROM Files NOT INDEXED")
+            cursor = connection.execute("SELECT rowid, fileID, domain, relativePath, flags, %s FROM Files NOT INDEXED" % file_cell)
             with_rowid = True
         except sqlite3.OperationalError:
-            cursor = connection.execute("SELECT fileID, domain, relativePath, flags, file FROM Files NOT INDEXED")
+            cursor = connection.execute("SELECT fileID, domain, relativePath, flags, %s FROM Files NOT INDEXED" % file_cell)
             with_rowid = False
         listing = {"available": True, "reason": None}
         rows = iter(cursor)
@@ -870,16 +941,18 @@ def main():
                 break
             counts["rows_read"] += 1
             rowid = row[0] if with_rowid else None
-            file_id, domain, relative, flags, blob = (row[1:] if with_rowid else row)
+            file_id, domain, relative, flags, file_type, file_length, blob = (row[1:] if with_rowid else row)
             file_id = file_id if isinstance(file_id, str) else ("" if file_id is None else str(file_id))
             domain = domain if isinstance(domain, str) else ("" if domain is None else str(domain))
             relative = relative if isinstance(relative, str) else ("" if relative is None else str(relative))
             domains[domain] = domains.get(domain, 0) + 1
-            if domain_filter and domain != domain_filter:
+            # Both filters look at the text the answer prints: a path component shaped like a recovery password is already
+            # withheld there. A filter on the real text would tell, one call at a time, whether the withheld component matches.
+            if domain_filter and shown(domain, False) != domain_filter:
                 continue
             if pattern is not None:
                 try:
-                    if not timed_search(pattern, relative, max(0.01, min(2.0, deadline - time.monotonic()))):
+                    if not timed_search(pattern, shown(relative, False), max(0.01, min(2.0, deadline - time.monotonic()))):
                         continue
                 except Timeout:
                     contains_timeouts += 1      # that row is counted and not matched
@@ -893,7 +966,14 @@ def main():
             counts["blobs"][state_b] = counts["blobs"].get(state_b, 0) + 1
             if layout and state_b == "present":
                 counts["layouts"][layout] = counts["layouts"].get(layout, 0) + 1
-            meta = metadata(blob, base, extra)
+            if file_type == "blob" and blob is None:
+                meta = {"metadata_status": "too_large",
+                        "metadata_reason": "the file column is %d bytes, over the %d this tool reads: the cell was not read" % (file_length, MAX_ARCHIVE_BYTES)}
+            elif file_type not in ("blob", "null"):
+                meta = {"metadata_status": "malformed",
+                        "metadata_reason": "the file column is a %s, not a blob" % {"text": "str", "integer": "int", "real": "float"}.get(file_type, file_type)}
+            else:
+                meta = metadata(blob, base, extra)
             counts["metadata"][meta["metadata_status"]] = counts["metadata"].get(meta["metadata_status"], 0) + 1
             if meta.get("has_wrapped_file_key"):
                 counts["wrapped_file_keys"] += 1
@@ -916,8 +996,15 @@ def main():
     for name, span in sorted(extra["times"].items()):
         time_range[name] = {"earliest": span["low"][1] if span["low"] else None, "latest": span["high"][1] if span["high"] else None,
                             "values": span["values"], "zero_values_left_out": span["zero"]}
+    if stopped_at_row is not None:
+        observations.append("max_seconds (%g) passed after %d rows: the rest of the Files table is not listed, and the counts cover only the rows read"
+                            % (max_seconds, stopped_at_row))
     if contains_timeouts:
         observations.append("contains ran past its time on %d path(s): those rows are counted and were not matched" % contains_timeouts)
+    unreadable = sum(n for k, n in counts["metadata"].items() if k != "ok")
+    if unreadable:
+        observations.append("%d listed row(s) have no readable metadata (counts.metadata says why, and each row carries metadata_status): "
+                            "they are listed with their path and blob state only" % unreadable)
     complete = (listing["available"] and stopped_at_row is None and read_error is None and not skipped_companions
                 and not cut and not contains_timeouts and completion["state"] != "not_finished")
     if listing["available"] and (extra["checks"]["after_backup_date"] or extra["checks"]["before_2007"]):
@@ -928,12 +1015,32 @@ def main():
     if state == "encrypted" and not listing["available"]:
         complete = False
     status = "complete" if complete else "partial"
+    if complete:
+        status_basis = "the Files table was read to its end, the backup finished, and nothing in the file or its companions was left out"
+    else:
+        reasons = []
+        if not listing["available"]:
+            reasons.append("the listing is not available")
+        if stopped_at_row is not None:
+            reasons.append("the time limit stopped the listing")
+        if read_error is not None:
+            reasons.append("a damaged page ended the listing")
+        if cut:
+            reasons.append("Manifest.db is cut short")
+        if skipped_companions:
+            reasons.append("a companion that is a link was not applied")
+        if contains_timeouts:
+            reasons.append("contains ran out of time on a path")
+        if completion["state"] == "not_finished":
+            reasons.append("the backup did not finish")
+        status_basis = "partial because " + ("; ".join(reasons) if reasons else "the encryption state or the listing is not settled") + " (see observations)"
     result = {
         "path": shown(path),
         "backup_root": shown(root),
         "manifest_db": shown(db),
         "parser": PARSER,
         "status": status,
+        "status_basis": status_basis,
         "encrypted": True if state == "encrypted" else (False if state == "not_encrypted" else None),
         "encryption": {
             "state": state, "basis": scrub(basis),
@@ -988,6 +1095,7 @@ def main():
                 "contains ran out of time on a row, a companion that is a link was not applied, or Status.plist says the backup did not finish "
                 "(completion). completion is unknown, not a failure, when there is no Status.plist or it has no SnapshotState.",
     }
+    CLEANUP.clear()     # the run ended well: the working copy the answer names stays
     send(result)
 
 

@@ -36,7 +36,8 @@ opens a `Manifest.db`'s `-wal` and `-journal` in a working copy, with the file.
   `Manifest.db` is listed when it opens as SQLite (with `payload_encrypted` set),
   and when it does not the answer says the listing is not available and what the
   file was. Key material (the key bag, the manifest key) is a presence and a
-  length, never a value. Times are converted from the epoch you name (`unix` by
+  length, never a value. `contains` and `domain` filter the path and domain as the
+  answer prints them, so a withheld component cannot be guessed through a filter. Times are converted from the epoch you name (`unix` by
   default, or `apple`), with the raw seconds beside them: the tool does not guess,
   and `epoch.consistency` counts the times that fall after the backup's own date or
   before 2007 under the epoch applied (the wrong epoch is a 31-year shift). The
@@ -52,14 +53,18 @@ opens a `Manifest.db`'s `-wal` and `-journal` in a working copy, with the file.
   says so. A `-wal` or a `-journal` beside the file is listed and not read, so what
   only the WAL holds is absent, and the status is partial while one holds bytes.
   `contains` only narrows the values file (it needs `write_values`): the answer
-  lists every fragment and does not say which matched.
+  lists every fragment and does not say which matched, and it is accepted only as
+  an expression of bounded cost (no `*`, `+` or `{m,}`, no nested repeat, no
+  lookaround, no back reference), so that how long it takes says nothing about the
+  text. A job that asks for `write_values` is run as secret output.
 - `protobuf_peek` reads the wire structure of a protobuf message without its
   schema: field numbers, wire types, absolute offsets and field paths, numbers
   raw with their zigzag reading. It does not say what a field means. A group makes
   a message `unsupported`, a structural error names its offset, and a bounded
   window is read, not a whole file. Only a top-level varint is printed, and only for
-  a window that is a message (it parses whole and meets a stated rule, so that a
-  window aimed at a string or a token is not read back as numbers): the text of a
+  a window that is a message (it parses whole, is not printable text and meets a
+  stated rule, which is stricter for a window aimed with `offset` or `length`, so
+  that a window aimed at a string or a token is not read back as numbers): the text of a
   string, the bytes of a bytes field, a number under a length-delimited field and a
   fixed-width value go to the job's sealed values file on request.
 

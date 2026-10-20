@@ -50,6 +50,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:  # Python 3.11 and later; the module was sre_parse before
+    from re import _constants as sre_constants, _parser as sre_parse
+except ImportError:  # pragma: no cover
+    import sre_constants, sre_parse
+
 PARSER = "sqlite_freespace/2"
 TOOL = "sqlite_freespace"
 VALUES_NAME = "sqlite-freespace-values.jsonl"
@@ -68,9 +73,10 @@ VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, file (the real path), page,
 #   1. The answer carries presence, kind, location (file and offset or path), length and counts.
 #      It carries no value, no characters of one, no masked shape and no digest of one.
 #   2. A value is written only on `write_values: true`, only when the tool runs as a job
-#      (JOB_ID and OUT are set), and only to a file under $OUT: JSON Lines, mode 0600, created
-#      exclusively before anything is read. The skill that sends the agent here says the job runs
-#      with `secret_output: true`. Outside a job the request is refused and nothing is written.
+#      (JOB_ID and OUT are set) that the harness ran as secret output (SECRET_OUTPUT=1, which the
+#      manifest's `secret_output` declaration makes the job service set), and only to a file under
+#      $OUT: JSON Lines, mode 0600, created exclusively before anything is read. Outside such a job
+#      the request is refused as JSON and nothing is written.
 #   3. A secret is never on a command line: these tools take a path and flags only.
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
@@ -132,7 +138,23 @@ OPEN_VALUES = []
 NONCE = "%d-%d" % (os.getpid(), time.time_ns())
 
 
-def fail(message, **extra):
+# Things the run made that a failure or a stop must not leave behind (a working copy of an evidence file). Each is a
+# callable that removes what the tool itself created; it is run once, by fail() and by a stop signal.
+CLEANUP = []
+
+
+def run_cleanup():
+    while CLEANUP:
+        step = CLEANUP.pop()
+        try:
+            step()
+        except Exception:
+            pass
+
+
+def wrap_up(answer):
+    """What an answer that ends the run early carries: the pages already written are closed and named, the values
+    file is closed and counted, and what the tool made as scratch is removed."""
     kept = []
     for page in OPEN_PAGES:
         if page._out is not None:
@@ -140,15 +162,50 @@ def fail(message, **extra):
                 kept.append(page.finish().get("all_results"))
             except Exception:
                 pass
-    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
     if kept:
         answer["rows_read_before_the_failure_kept_in"] = kept
     for values in OPEN_VALUES:
         values.close()
         if values.written:
             answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
-    print(dumps(answer))
+    run_cleanup()
+    return answer
+
+
+def fail(message, **extra):
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    print(dumps(wrap_up(answer)))
     raise SystemExit(1)
+
+
+class Interrupted(BaseException):
+    """A stop signal (SIGTERM, SIGINT or SIGHUP) arrived. A BaseException, so that no `except Exception` of a tool
+    swallows it; run_main answers for it once, at the top."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+STOP_SIGNALS = [getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)]
+
+
+def stop_handler(signum, frame):
+    # The answer to the first signal is written once: a second signal while it is written changes nothing.
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
+def stopped(signum):
+    """One JSON answer for a run a signal ended, then exit 128 + the signal. The pages and the values file are closed
+    and named, the scratch the tool made is removed, and nothing is said about what the tool had read."""
+    name = signal.Signals(signum).name
+    answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
+                      "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
+                      "interrupted": name})
+    print(dumps(answer))
+    raise SystemExit(128 + signum)
 
 
 class Timeout(Exception):
@@ -296,6 +353,12 @@ class SecretValues:
                 "file, not a sealed secret output. Run this as job_run tool=%s with "
                 "secret_output: true, and ask again there. Nothing was written." % TOOL
             )
+        if os.environ.get("SECRET_OUTPUT") != "1":
+            raise SecretValuesRefused(
+                "write_values is refused in a job that is not run as secret output (SECRET_OUTPUT is not 1): the values file would "
+                "be sealed as ordinary output. The harness sets SECRET_OUTPUT=1 for a secret job's process and it is not set here. "
+                "Run this as job_run tool=%s with secret_output: true, and ask again there. Nothing was written." % TOOL
+            )
         self.path = Path(self.out) / VALUES_NAME
         self.shown = "store/jobs/%s/out/%s" % (safe_name(self.job), VALUES_NAME)
         # Created now, before anything is read: a file or a link already at that name is refused
@@ -384,12 +447,17 @@ def send(result):
 
 
 def run_main(main):
+    for number in STOP_SIGNALS:
+        signal.signal(number, stop_handler)
     try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
-        fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+        try:
+            main()
+        except SystemExit:
+            raise
+        except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
+            fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+    except Interrupted as stop:
+        stopped(stop.signum)
 # --- shared with the pack's other tools: end -----------------------------------------------
 
 MAGIC = b"SQLite format 3\x00"
@@ -398,7 +466,15 @@ DEFAULT_LIMIT = 200
 DEFAULT_MAX_SECONDS = 240
 MAX_SECONDS_CAP = 270       # manifest.json timeout_seconds (300) less the time to write the answer
 INLINE_BYTES = 1 << 20
-REGEX_SECONDS = 2.0
+REGEX_SECONDS = 2.0         # one fragment: a pattern inside the cost bound below never gets near it
+REGEX_TOTAL_SECONDS = 10.0  # all fragments together; past it the rest are written without the expression being run
+# `contains` runs only on text nobody can see, so how long it takes must not depend on that text. Python's re backtracks, and
+# a pattern with nested repeats, a lookahead or a back reference can be made to run for seconds on a fragment that holds a
+# guess and for microseconds on one that does not: one bit per call. Only patterns of a cost the tool can bound are accepted
+# (see linear_pattern); the clocks above are a second line, and neither is ever reported.
+MAX_PATTERN_CHARS = 256
+MAX_PATTERN_COST = 16384
+MAX_REPEAT_COUNT = 4096
 PROBLEMS_INLINE = 200
 TEXT_ENCODINGS = {1: "UTF-8", 2: "UTF-16LE", 3: "UTF-16BE"}
 WIDE_MINIMUM = 8
@@ -473,6 +549,71 @@ def tokens(region, parity, little):
     out[0::2] = high.translate(HIGH_TABLE)
     out[1::2] = low.translate(LOW_TABLE)
     return bytes(out)
+
+
+def linear_pattern(source):
+    """(pattern, None) for a `contains` expression whose matching cost the tool can bound, else (None, reason).
+
+    Accepted: literals, classes, `.`, anchors and `\\b`, groups, alternation outside any repeat, and repeats of one
+    deterministic piece with a finite upper bound (`{m,n}`, `?`). Refused: an unbounded repeat (`*`, `+`, `{m,}`),
+    a repeat that holds a choice (a nested repeat or an alternation), lookahead and lookbehind, back references, conditionals,
+    atomic groups and possessive repeats, and any pattern whose worst case (the number of ways it can match from one start
+    times the work in each) is over MAX_PATTERN_COST. The reason names a construct, never the text.
+    """
+    if len(source) > MAX_PATTERN_CHARS:
+        return None, "contains is at most %d characters" % MAX_PATTERN_CHARS
+    try:
+        tree = sre_parse.parse(source, re.I)
+    except (re.error, RecursionError, OverflowError) as exc:
+        return None, "contains is not a valid regex (%s)" % type(exc).__name__
+    unbounded = sre_constants.MAXREPEAT
+
+    class Refused(Exception):
+        pass
+
+    def walk(items):
+        """(ways, steps) for a sequence: the paths the engine may try from one start, and the work along one path."""
+        ways, steps = 1, 0
+        for op, av in items:
+            name = str(op)
+            if name in ("LITERAL", "NOT_LITERAL", "ANY", "IN", "AT"):
+                w, st = 1, 1
+            elif name == "SUBPATTERN":
+                w, st = walk(av[3])
+            elif name == "BRANCH":
+                parts = [walk(branch) for branch in av[1]]
+                w, st = sum(p[0] for p in parts), max(p[1] for p in parts)
+            elif name in ("MAX_REPEAT", "MIN_REPEAT"):
+                low, high, body = av
+                if high == unbounded:
+                    raise Refused("an unbounded repeat (*, + or {m,}) is not accepted: give it a bound, for example {1,64}")
+                if high > MAX_REPEAT_COUNT:
+                    raise Refused("a repeat count above %d is not accepted" % MAX_REPEAT_COUNT)
+                body_ways, body_steps = walk(body)
+                if low == high:
+                    w, st = body_ways ** low if low else 1, body_steps * low
+                else:
+                    if body_ways != 1:
+                        raise Refused("a repeat of a nested repeat or an alternation is not accepted")
+                    w, st = high - low + 1, body_steps * high
+            elif name in ("ASSERT", "ASSERT_NOT"):
+                raise Refused("lookahead and lookbehind are not accepted")
+            elif name in ("GROUPREF", "GROUPREF_EXISTS"):
+                raise Refused("back references and conditionals are not accepted")
+            else:
+                raise Refused("this construct (%s) is not accepted" % name.lower())
+            ways *= w
+            steps += st
+            if ways * max(steps, 1) > MAX_PATTERN_COST:
+                raise Refused("the expression can take too many steps on a long fragment (its worst case is over %d); "
+                              "shorten it, or bound its repeats lower" % MAX_PATTERN_COST)
+        return ways, steps
+
+    try:
+        walk(tree)
+    except Refused as why:
+        return None, str(why)
+    return re.compile(source, re.I), None
 
 
 class OutOfTime(Exception):
@@ -599,12 +740,11 @@ def main():
     contains = args.get("contains")
     pattern = None
     if contains:
-        if not isinstance(contains, str) or len(contains) > 1000:
-            fail("contains must be a regular expression of at most 1000 characters")
-        try:
-            pattern = re.compile(contains, re.I)
-        except re.error as exc:
-            fail("contains is not a valid regex", reason=str(exc))
+        if not isinstance(contains, str):
+            fail("contains must be a regular expression")
+        pattern, why = linear_pattern(contains)
+        if pattern is None:
+            fail("contains is refused: " + why, contains_refused=True)
     limit = positive(args, "limit", DEFAULT_LIMIT)
     max_seconds = seconds(args, "max_seconds", DEFAULT_MAX_SECONDS, MAX_SECONDS_CAP)
     deadline = started + max_seconds
@@ -727,8 +867,11 @@ def main():
                   "pages_partial": 0, "lock_byte_pages_skipped": 0, "pointer_map_pages_skipped": 0,
                   "freelist_trunk_pages": 0, "freelist_leaf_pages": 0, "freeblocks": 0, "unallocated_gaps": 0,
                   "regions_scanned": 0, "bytes_scanned": 0, "fragments_found": 0,
-                  "fragments_unverified": 0, "candidates_dropped_as_overlapping": 0, "pages_not_reached": 0,
-                  "contains_timeouts": 0}
+                  "fragments_unverified": 0, "candidates_dropped_as_overlapping": 0, "pages_not_reached": 0}
+        regex_spent = [0.0]        # seconds spent running contains; not counted against max_seconds, so the page where a run stops never depends on the text
+
+        def out_of_time():
+            return time.monotonic() - regex_spent[0] > deadline
         stopped_at = None
         serial = 0
 
@@ -739,7 +882,7 @@ def main():
             found, dropped = runs_in(region, patterns, encodings, wide_minimum)
             counts["candidates_dropped_as_overlapping"] += dropped
             for start, end, encoding in found:
-                if time.monotonic() > deadline:
+                if out_of_time():
                     raise OutOfTime()
                 raw = region[start:end]
                 text = decode(raw, encoding)
@@ -749,13 +892,13 @@ def main():
                 # the expression says: a list of the fragments that matched would answer, for each fragment, whether text
                 # you cannot see matches, and a few hundred calls rebuild a token.
                 hit = True
-                if pattern is not None:
+                if pattern is not None and regex_spent[0] < REGEX_TOTAL_SECONDS:
+                    began = time.monotonic()
                     try:
-                        hit = timed_search(pattern, text, max(0.01, min(REGEX_SECONDS, deadline - time.monotonic()))) is not None
+                        hit = timed_search(pattern, text, min(REGEX_SECONDS, REGEX_TOTAL_SECONDS - regex_spent[0])) is not None
                     except Timeout:
-                        hit = False
-                        counts["contains_timeouts"] += 1
-                        problems.add("contains took too long", "the expression ran past its time on a fragment: that fragment is not written to the values file", False)
+                        hit = True      # not decided: written to the sealed file, and nothing about it is reported
+                    regex_spent[0] += time.monotonic() - began
                 absolute = (number - 1) * page_size + base_in_page + start
                 verify.seek(absolute)
                 again = verify.read(len(raw))
@@ -777,7 +920,7 @@ def main():
         number = 0
         try:
             for number in range(1, in_file + 1):
-                if time.monotonic() > deadline:
+                if out_of_time():
                     raise OutOfTime()
                 page = scan.read(page_size)
                 if number == lock_page and file_bytes > LOCK_BYTE_OFFSET:
@@ -849,10 +992,22 @@ def main():
     corrupt = any(kind in CORRUPT_KINDS for kind in problems.kinds)
     complete = problems.unexamined == 0 and stopped_at is None
     status = "corrupt" if corrupt else ("complete" if complete else "partial")
+    if corrupt:
+        status_basis = "the file's structure disagreed with itself where problems says; the fragments found are still reported"
+    elif complete:
+        status_basis = "every page was examined, nothing in the structure was inconsistent and no companion was left unread"
+    else:
+        why = []
+        if stopped_at is not None:
+            why.append("the time limit stopped the scan before page %d" % stopped_at)
+        if problems.unexamined:
+            why.append("%d region(s), pages or companions were not examined (see problems)" % problems.unexamined)
+        status_basis = "partial because " + "; ".join(why or ["part of the file was not examined (see problems)"])
     send({
         "db": shown(db),
         "parser": PARSER,
         "status": status,
+        "status_basis": status_basis,
         "database": {
             "page_size": page_size, "usable_size": usable, "reserved_bytes": h["reserved_bytes"],
             "bytes": file_bytes, "pages_in_file": in_file, "pages_declared": h["pages_declared"],
@@ -872,7 +1027,8 @@ def main():
         "fragments": fragments.page,
         "fragment_count": counts["fragments_found"],
         "filter": scrub(contains) if contains else None,
-        "filter_narrows": "the values file only (the fragments listed here are all of them, whatever the expression matched)" if contains else None,
+        "filter_narrows": ("the values file only (the fragments listed here are all of them, whatever the expression matched; a fragment the "
+                           "expression could not be decided on within its time limit is written as if it had matched, and that is not reported)") if contains else None,
         "pages": paging,
         "companions": companions,
         "secret_values": {**values.summary(), "written": None, "contains_secret_values": None,
@@ -894,7 +1050,10 @@ def main():
                 "counted under scanned, and says nothing about a vacuumed database or one that used secure_delete. "
                 "contains is accepted only with write_values: it narrows the sealed values file, and the list in this "
                 "answer is every fragment whatever it matched (how many matched is not shown), since a list of the "
-                "matches would answer, fragment by fragment, whether text you cannot see matches. Status is complete (every page examined, nothing inconsistent, no companion left unread), "
+                "matches would answer, fragment by fragment, whether text you cannot see matches. contains is accepted only as an expression "
+                "of bounded cost (no unbounded repeat, no nested repeat, no lookaround, no back reference): how long it runs on text you "
+                "cannot see must not tell you about the text, so a fragment it could not be decided on in time is written as if it had "
+                "matched and nothing reports it. Status is complete (every page examined, nothing inconsistent, no companion left unread), "
                 "partial (a limit, a companion not read, or pages or regions not examined) or corrupt (the file's "
                 "structure disagreed with itself where problems says; the fragments found are still reported, and "
                 "a corrupt chain means text beyond it was not reached). A fragment is a candidate to corroborate, "

@@ -23,13 +23,18 @@ and it is never reported as valid.
 WHEN ROWS ARE PRINTED. What the field numbers, wire types, lengths and varints of a window show is
 derived from its bytes: aimed at the payload of a string or a token, the tool would hand the
 characters back as numbers, one call or a sliding window at a time. So rows are printed only for a
-window that is a message: it parses whole, is at least eight bytes with at least two fields, writes every varint in its shortest
-form, orders its field numbers ascending and keeps them at 300 or below (random bytes pass about once in
-3,300; real Biome messages 17,871 times in 17,872). A window that is not one, which includes any window
-aimed at the payload of a field this tool withheld, gets a status and counts, no row, no field number,
-no varint and no number in a reason; its rows are in the job's values file on request. The same rule
-decides whether a length-delimited field is read as a nested message; printable text is text, never a
-nested message (a tag byte is a printable character).
+window that is a message: it parses whole, is at least eight bytes with at least two fields, is not entirely printable
+text, writes every varint in its shortest form, orders its field numbers ascending and keeps them at 300 or below (random
+bytes pass about once in 3,400; real Biome messages 17,871 times in 17,872). A window the caller aimed (an offset past the
+start of the message, or a length) must also be at least sixteen bytes with at least four fields: the first answer names where
+each withheld field's payload is, and a window slid across a token would otherwise print the token's characters as keys, lengths
+and varints (measured with the plain rule on a token inside a message: between 13 and 99 percent of 12- to 64-character tokens
+had a window that was shown, and 3 to 20 percent of a token's characters were derivable from what was printed; with this rule 0
+to 1.2 percent of tokens have such a window and at most 0.2 percent of a token's characters are derivable, never a whole token). A window that is not
+accepted, which includes most windows aimed at the payload of a field this tool withheld, gets a status and counts, no row, no
+field number, no varint and no number in a reason; its rows are in the job's values file on request. The same rule decides
+whether a length-delimited field is read as a nested message; printable text is text, never a nested message (a tag byte is a
+printable character).
 
 THE SHAPE IS NOT THE MEANING. `read_as` is a guess between a nested message, text and bytes. A varint
 is returned raw, with its zigzag reading and, where it has the top bit set, its two's-complement
@@ -84,9 +89,10 @@ VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, source (the real file), fie
 #   1. The answer carries presence, kind, location (file and offset or path), length and counts.
 #      It carries no value, no characters of one, no masked shape and no digest of one.
 #   2. A value is written only on `write_values: true`, only when the tool runs as a job
-#      (JOB_ID and OUT are set), and only to a file under $OUT: JSON Lines, mode 0600, created
-#      exclusively before anything is read. The skill that sends the agent here says the job runs
-#      with `secret_output: true`. Outside a job the request is refused and nothing is written.
+#      (JOB_ID and OUT are set) that the harness ran as secret output (SECRET_OUTPUT=1, which the
+#      manifest's `secret_output` declaration makes the job service set), and only to a file under
+#      $OUT: JSON Lines, mode 0600, created exclusively before anything is read. Outside such a job
+#      the request is refused as JSON and nothing is written.
 #   3. A secret is never on a command line: these tools take a path and flags only.
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
@@ -148,7 +154,23 @@ OPEN_VALUES = []
 NONCE = "%d-%d" % (os.getpid(), time.time_ns())
 
 
-def fail(message, **extra):
+# Things the run made that a failure or a stop must not leave behind (a working copy of an evidence file). Each is a
+# callable that removes what the tool itself created; it is run once, by fail() and by a stop signal.
+CLEANUP = []
+
+
+def run_cleanup():
+    while CLEANUP:
+        step = CLEANUP.pop()
+        try:
+            step()
+        except Exception:
+            pass
+
+
+def wrap_up(answer):
+    """What an answer that ends the run early carries: the pages already written are closed and named, the values
+    file is closed and counted, and what the tool made as scratch is removed."""
     kept = []
     for page in OPEN_PAGES:
         if page._out is not None:
@@ -156,15 +178,50 @@ def fail(message, **extra):
                 kept.append(page.finish().get("all_results"))
             except Exception:
                 pass
-    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
     if kept:
         answer["rows_read_before_the_failure_kept_in"] = kept
     for values in OPEN_VALUES:
         values.close()
         if values.written:
             answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
-    print(dumps(answer))
+    run_cleanup()
+    return answer
+
+
+def fail(message, **extra):
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    print(dumps(wrap_up(answer)))
     raise SystemExit(1)
+
+
+class Interrupted(BaseException):
+    """A stop signal (SIGTERM, SIGINT or SIGHUP) arrived. A BaseException, so that no `except Exception` of a tool
+    swallows it; run_main answers for it once, at the top."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+STOP_SIGNALS = [getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)]
+
+
+def stop_handler(signum, frame):
+    # The answer to the first signal is written once: a second signal while it is written changes nothing.
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
+def stopped(signum):
+    """One JSON answer for a run a signal ended, then exit 128 + the signal. The pages and the values file are closed
+    and named, the scratch the tool made is removed, and nothing is said about what the tool had read."""
+    name = signal.Signals(signum).name
+    answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
+                      "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
+                      "interrupted": name})
+    print(dumps(answer))
+    raise SystemExit(128 + signum)
 
 
 class Timeout(Exception):
@@ -312,6 +369,12 @@ class SecretValues:
                 "file, not a sealed secret output. Run this as job_run tool=%s with "
                 "secret_output: true, and ask again there. Nothing was written." % TOOL
             )
+        if os.environ.get("SECRET_OUTPUT") != "1":
+            raise SecretValuesRefused(
+                "write_values is refused in a job that is not run as secret output (SECRET_OUTPUT is not 1): the values file would "
+                "be sealed as ordinary output. The harness sets SECRET_OUTPUT=1 for a secret job's process and it is not set here. "
+                "Run this as job_run tool=%s with secret_output: true, and ask again there. Nothing was written." % TOOL
+            )
         self.path = Path(self.out) / VALUES_NAME
         self.shown = "store/jobs/%s/out/%s" % (safe_name(self.job), VALUES_NAME)
         # Created now, before anything is read: a file or a link already at that name is refused
@@ -400,12 +463,17 @@ def send(result):
 
 
 def run_main(main):
+    for number in STOP_SIGNALS:
+        signal.signal(number, stop_handler)
     try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
-        fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+        try:
+            main()
+        except SystemExit:
+            raise
+        except Exception as exc:  # never an empty or clean answer for a failure, and never a traceback
+            fail("unexpected failure: " + (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+    except Interrupted as stop:
+        stopped(stop.signum)
 # --- shared with the pack's other tools: end -----------------------------------------------
 
 WIRE = {0: "varint", 1: "64-bit", 2: "length-delimited", 3: "start group", 4: "end group", 5: "32-bit"}
@@ -421,13 +489,23 @@ DEFAULT_SECONDS = 60
 MAX_SECONDS_CAP = 90          # manifest.json timeout_seconds (120) less the time to write the answer
 # A message is accepted (its rows are shown, or a length-delimited field is read as one) only when it parses
 # whole, has at least two fields, writes every varint in its shortest form, orders its field numbers
-# ascending and keeps them up to this. Real messages do; the bytes of a token or a string rarely do (about one
-# random 16-byte value in 3,300), and what an accepted reading shows is derived from those bytes.
+# ascending and keeps them up to this. Real messages do. Random bytes rarely do (29 of 100,000 random 16-byte values, 4 of
+# 100,000 random 32-byte values), and printable text never reaches the rule (it is text, see window_accepted_by). What an
+# accepted reading shows is derived from those bytes.
 NESTED_FIELD_MAX = 300
-# A window that is aimed at a payload is accepted only from this many bytes: in four bytes a printable text is a
-# two-field message about one time in a hundred (a space and a letter are a key and a value), and in eight about
-# one in a hundred thousand.
+# A window is judged by a stricter rule when the caller aimed it (an offset past the start, or a length). The first
+# answer names where every withheld field's payload is, so a caller can aim a window at a token and slide it, and
+# the rows of an accepted sub-window are the token's own characters read as keys, lengths and varints. A window is
+# shown only if
+#   - it is not entirely printable text: a message is not, and every window inside a string or a token is,
+#   - it is at least MIN_AIMED_BYTES long and holds at least MIN_AIMED_FIELDS fields when it was aimed,
+#   - and it meets the rule above.
+# A window that was not aimed (offset 0, no length) is held to the rule above, to MIN_WINDOW_BYTES and to the
+# printable-text test.
 MIN_WINDOW_BYTES = 8
+MIN_AIMED_BYTES = 16
+MIN_AIMED_FIELDS = 4
+CONTROL_FREE = bytes([0x09, 0x0A, 0x0D]) + bytes(range(0x20, 0x7F)) + bytes(range(0x80, 0x100))
 NUMBER_KEYS = ("value", "as_bool", "zigzag_reading", "twos_complement_reading", "hex", "float_reading", "double_reading")
 TEXT_FILTER = str.maketrans("", "", "\n\r\t")
 
@@ -588,6 +666,19 @@ def parse(ctx, start, end, depth, path):
     return rows, "ok", None, shape
 
 
+def window_accepted_by(blob, state, shape, aimed):
+    """Whether the rows of the whole window may be printed: the acceptance rule, a length and a field count that depend on
+    whether the caller aimed the window, and the test that it is not text."""
+    if len(blob) < (MIN_AIMED_BYTES if aimed else MIN_WINDOW_BYTES):
+        return False
+    if aimed and shape["fields"] < MIN_AIMED_FIELDS:
+        return False
+    # A control byte other than tab and the line ends means it is not text: the common case, decided without decoding.
+    if not blob.translate(None, CONTROL_FREE) and text_characters(memoryview(blob)) is not None:
+        return False
+    return accepted(state, shape)
+
+
 def accepted(state, shape):
     """The acceptance rule, for a nested reading and for the whole window alike. A parse the budget stopped
     is judged on what it read; one that hit an error or a group is not accepted."""
@@ -662,7 +753,8 @@ def main():
 
     ctx = Context(blob, offset, max_depth, max_fields, started + max_seconds)
     rows, state, problem, shape = parse(ctx, 0, len(blob), 0, [])
-    window_accepted = len(blob) >= MIN_WINDOW_BYTES and accepted(state, shape)
+    aimed = offset > 0 or length is not None
+    window_accepted = window_accepted_by(blob, state, shape, aimed)
 
     counters = {"fields": 0, "varint": 0, "64-bit": 0, "32-bit": 0, "length-delimited": 0, "nested_messages": 0,
                 "text_values_withheld": 0, "bytes_values_withheld": 0, "nested_payloads_withheld": 0,
@@ -740,17 +832,29 @@ def main():
                      "rows_withheld": True}
     else:
         structure = {"status": "not_accepted",
-                     "reason": "the window does not parse whole as a message of at least %d bytes with at least two fields, shortest-form varints, "
-                               "ascending field numbers and none above %d: no row, field number or varint is printed, since "
-                               "what they show may be the bytes themselves" % (MIN_WINDOW_BYTES, NESTED_FIELD_MAX),
+                     "reason": "the window is not a message the rules show: it must parse whole, be at least %d bytes (%d when offset or length was given) with at "
+                               "least two fields (%d when offset or length was given), not be entirely printable text, write shortest-form varints, "
+                               "order its field numbers ascending and keep them at %d or below: no row, field number or varint is printed, since "
+                               "what they show may be the bytes themselves"
+                               % (MIN_WINDOW_BYTES, MIN_AIMED_BYTES, MIN_AIMED_FIELDS, NESTED_FIELD_MAX),
                      "rows_withheld": True}
     structure["bytes_in_window"] = len(blob)
     structure["consistent_with_protobuf_wire_format"] = bool(window_accepted and state == "ok")
     if ctx.depth_limited:
         structure["fields_not_tried_as_nested_at_max_depth"] = ctx.depth_limited
+    if structure["status"] == "valid":
+        status, status_basis = "complete", "the whole window parsed as protobuf wire format and meets the acceptance rule"
+    elif structure["status"] == "partial":
+        status, status_basis = "partial", "a budget or the clock stopped the parse (resume_offset says where): " + structure["reason"]
+    elif structure["status"] == "empty":
+        status, status_basis = "partial", "the window holds no bytes, so nothing was read"
+    else:
+        status, status_basis = "partial", "no row is printed for this window (structure.status %s): " % structure["status"] + structure["reason"]
     send({
         "source": source,
         "parser": PARSER,
+        "status": status,
+        "status_basis": status_basis,
         "window": window,
         "structure": structure,
         "fields": fields.page if fields is not None else [],
@@ -765,7 +869,8 @@ def main():
         "paths_withheld": PATHS_WITHHELD[0],
         "note": "This is wire structure, not meaning: no field name, unit, enum or signedness is known without the .proto "
                 "file. Rows, field numbers and varints are printed only for a window that parses whole as a message "
-                "(at least eight bytes and two fields, shortest-form varints, ascending field numbers, none above 300); any other window, "
+                "(at least eight bytes and two fields, not entirely printable text, shortest-form varints, ascending field numbers, none above 300; "
+                "sixteen bytes and four fields when offset or length was given); any other window, "
                 "which includes one aimed at the payload of a field the answer withheld, gets a status and counts, and its "
                 "rows are in the values file when write_values was asked for in a job run with secret_output: true. In a "
                 "printed window a top-level varint is printed raw, with its zigzag reading (and, where the top bit is set, "
@@ -774,8 +879,11 @@ def main():
                 "fixed-width value. Each has its offset, length and reading and a finding id. read_as is a guess between a "
                 "nested message, text and bytes: printable text is always text, and a nested reading needs the acceptance "
                 "rule; a binary value that is accepted shows that structure (field numbers, wire types, lengths), which is "
-                "derived from its bytes: rare for a key or a token (about one random 16-byte value in 3,300), and not "
-                "impossible. A group makes the window `unsupported`. Offsets are absolute in the file.",
+                "derived from its bytes: rare for a key or a token (about one random 16-byte value in 3,400), and not "
+                "impossible. A window slid across a token is held to the stricter rule for a window with an offset or a length, and a "
+                "residual remains: in a measurement on tokens inside a message, 0 to 1.2 percent of 12- to 64-character tokens had a window "
+                "that was shown, and at most 0.2 percent of a token's characters were derivable from it. A group makes the window `unsupported`. "
+                "Offsets are absolute in the file.",
     })
 
 

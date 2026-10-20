@@ -51,10 +51,13 @@ async function tool(script: string, cwd: string, args: unknown, env: Record<stri
   return runPy(script, cwd, args, bin, { ...AGENT, ...env });
 }
 
-/** The tool as a job runs it: JOB_ID and OUT set, OUT inside the run directory. `name` keeps two runs apart. */
-async function asJob(script: string, cwd: string, args: unknown, name = "out", job = "j-1"): Promise<Run> {
+/**
+ * The tool as a job runs it: JOB_ID and OUT set, OUT inside the run directory, and SECRET_OUTPUT=1 as the job service sets it
+ * for a job run with secret_output (or one whose manifest declares write_values). `name` keeps two runs apart.
+ */
+async function asJob(script: string, cwd: string, args: unknown, name = "out", job = "j-1", secret = true): Promise<Run> {
   await mkdir(join(cwd, name), { recursive: true });
-  return tool(script, cwd, args, { JOB_ID: job, OUT: join(cwd, name) });
+  return tool(script, cwd, args, { JOB_ID: job, OUT: join(cwd, name), ...(secret ? { SECRET_OUTPUT: "1" } : {}) });
 }
 
 function body<T>(out: Run): T {
@@ -610,17 +613,104 @@ test("sqlite_freespace prints none of a file that is not SQLite, only its size a
   });
 });
 
-test("sqlite_freespace stops at max_seconds even when a filter that backtracks runs on every fragment", async () => {
-  // The regular expression was bounded per fragment and the clock only between pages: 7 fragments of a runaway
-  // expression took 35 seconds against a limit of 1.
+test("sqlite_freespace refuses a filter that backtracks, so it cannot run for seconds on a fragment and never on another", async () => {
+  // A filter that backtracks only when a lookahead holds ran 2 seconds on a fragment that held a guess and microseconds on one that did
+  // not, and the answer counted the slow ones (scanned.contains_timeouts, problem_kinds): one bit about text nobody could see, per call.
+  // Run against the code before the fix, the first expression is accepted and the run is slow.
   await withCwd(async (cwd) => {
     const db = join(cwd, "work", "regex.db");
     await build(FREELIST_DB, db, "REGEX-MARKER");
-    const started = Date.now();
-    const { answer } = await freespace(cwd, db, { contains: "(w+)+z", max_seconds: 1, min_length: 20 });
-    assert.ok(Date.now() - started < 12000, `took ${Date.now() - started} ms`);
-    assert.equal(answer.status, "partial");
-    assert.ok(answer.stopped_before_page !== null || answer.scanned.contains_timeouts >= 1);
+    const refusals: [string, RegExp][] = [
+      ["^(?=.*token=Zq7K)(?:.*)*Y$", /lookahead and lookbehind/],
+      ["(w+)+z", /unbounded repeat/],
+      ["(w{1,8})+z", /unbounded repeat/],
+      ["(w{1,8}){1,9}z", /nested repeat or an alternation/],
+      ["(a|aa){1,30}$", /nested repeat or an alternation/],
+      ["(a)\\1", /back references/],
+      ["(?<=a)b", /lookahead and lookbehind/],
+      ["x*", /unbounded repeat/],
+      ["a.+b", /unbounded repeat/],
+      ["a{5000}", /repeat count above 4096/],
+      ["(?:ab|cd){12}c", /too many steps/],
+      [".{0,63}.{0,63}z", /too many steps/],
+      ["w".repeat(257), /at most 256 characters/],
+    ];
+    for (const [pattern, why] of refusals) {
+      const err = refused(await asJob(FREESPACE, cwd, { db, write_values: true, contains: pattern, min_length: 20 }, "refused-" + sha256(pattern).slice(0, 8)));
+      assert.match(err.error, why, pattern);
+      assert.equal(err.contains_refused, true, pattern);
+      assert.equal(err.fragments, undefined, "nothing was scanned: " + pattern);
+    }
+    // What people write for a token or a number is accepted, and narrows the file.
+    const free = await freespace(cwd, db, { min_length: 20 }, "all-regex");
+    for (const pattern of ["REGEX-MARKER-0[0-9]{2}", "marker|nothing", "^REGEX", "[A-Z]{5}-[A-Z]{6}-[0-9]{3}", "w{800}", "(?:REGEX|XEGER)-MARKER", "colou?r|REGEX"]) {
+      const run = await freespace(cwd, db, { contains: pattern, min_length: 20 }, "ok-" + sha256(pattern).slice(0, 8));
+      assert.equal(run.answer.fragment_count, free.answer.fragment_count, pattern);
+      assert.ok(run.values.length <= free.values.length, pattern);
+    }
+    assert.ok((await freespace(cwd, db, { contains: "REGEX-MARKER-0[0-9]{2}", min_length: 20 }, "n1")).values.length >= 1);
+  });
+});
+
+/**
+ * The tool with `linear_pattern` replaced by a plain re.compile (as if a pattern that backtracks had got past the check) and a short clock
+ * for one fragment: what the second line of defence does. The args are on stdin; env and paths are on argv.
+ */
+const FREESPACE_UNCHECKED = String.raw`
+import importlib.util, os, re, sys
+sys.dont_write_bytecode = True      # the pack is sealed: no __pycache__ beside its tools
+spec = importlib.util.spec_from_file_location("fs", sys.argv[1]); fs = importlib.util.module_from_spec(spec); spec.loader.exec_module(fs)
+if hasattr(fs, "linear_pattern"):
+    fs.linear_pattern = lambda source: (re.compile(source, re.I), None)
+fs.REGEX_SECONDS = 0.25
+os.chdir(sys.argv[2])
+os.environ.update(JOB_ID="j-1", OUT=sys.argv[3], SECRET_OUTPUT="1", AGENT_ID="s1")
+os.makedirs(sys.argv[3], exist_ok=True)
+fs.run_main(fs.main)
+`;
+
+test("sqlite_freespace's clocks on contains decide nothing the answer says: a fragment it could not decide is written, and nothing reports it", async () => {
+  // Past the cost check, a pattern can still be slow. The second line of defence: a fragment on which it ran out of time goes to the sealed file
+  // as if it had matched, no count and no problem names it, and the pages read do not depend on it.
+  await withCwd(async (cwd) => {
+    const guess = ["token", "=", "Zq7K"].join("");
+    const present = join(cwd, "work", "present.db");
+    const absent = join(cwd, "work", "absent.db");
+    await build(FREEBLOCK_DB, present, guess + "p2mR9xT4", "utf-8");
+    await build(FREEBLOCK_DB, absent, ["token", "=", "Zq7J"].join("") + "p2mR9xT4", "utf-8");
+    const slow = "^(?=.*" + guess + ")(?:.*)*Y$";
+    const answers: Free[] = [];
+    const written: number[] = [];
+    for (const [name, db] of [["present", present], ["absent", absent]] as const) {
+      const out = join(cwd, "unchecked-" + name);
+      const run = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, out], { db, write_values: true, contains: slow, min_length: 20 });
+      const answer = body<Free>(run);
+      answers.push(answer);
+      written.push((await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl"))).length);
+      const text = JSON.stringify(answer);
+      assert.equal(text.includes("contains_timeouts"), false, name);
+      assert.equal(/took too long/.test(text), false, name);
+      assert.equal(answer.status, "complete", name + ": " + JSON.stringify(answer.problems));
+      assert.deepEqual(answer.problem_kinds, {}, name);
+      assert.equal(answer.stopped_before_page, null);
+    }
+    // The two answers differ only in the file's name: the same counts, the same fragments, the same problems.
+    const strip = (a: Free) => JSON.stringify({ ...a, db: "-", fragments: a.fragments.map((f) => ({ ...f, source: "-" })), pages: "-" });
+    assert.equal(strip(answers[0]), strip(answers[1]));
+    assert.ok(written[0] >= 1, "the fragment the expression ran out of time on is in the sealed file");
+  });
+});
+
+test("sqlite_freespace holds the pages it reads apart from the time contains takes", async () => {
+  // The page where max_seconds stops a run must not depend on how long an expression ran on text nobody can see.
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "pages.db");
+    await build(FREELIST_DB, db, "PAGES-MARKER");
+    const plain = (await freespace(cwd, db, { min_length: 20, max_seconds: 60 }, "p1")).answer;
+    const filtered = (await freespace(cwd, db, { contains: "PAGES-MARKER-0[0-9]{2}", min_length: 20, max_seconds: 60 }, "p2")).answer;
+    assert.equal(filtered.stopped_before_page, null);
+    assert.deepEqual(filtered.scanned, plain.scanned);
+    assert.equal("contains_timeouts" in filtered.scanned, false);
   });
 });
 
@@ -665,16 +755,6 @@ test("sqlite_freespace's contains narrows the sealed values file, and nothing in
   });
 });
 
-test("sqlite_freespace's contains cannot be used to learn which fragment is slow: a time-out is counted, not placed", async () => {
-  await withCwd(async (cwd) => {
-    const db = join(cwd, "work", "slowrx.db");
-    await build(FREELIST_DB, db, "REGEX-MARKER");
-    const { answer } = await freespace(cwd, db, { contains: "(w+)+z", max_seconds: 8, min_length: 20 }, "slow");
-    assert.ok(answer.scanned.contains_timeouts >= 0);
-    for (const problem of answer.problems) if (/contains took too long/.test(problem.kind)) assert.equal((problem as unknown as { page?: number }).page, undefined);
-  });
-});
-
 test("sqlite_freespace's time limit is finite and below the tool's own, and says so as JSON", async () => {
   // NaN and Infinity switched the clock off, and a limit above the harness's 300 seconds ended the tool with no answer.
   await withCwd(async (cwd) => {
@@ -708,6 +788,8 @@ def archive(e):
     objects = ["$null"]
     root = {"$class": UID(2), "Size": e.get("size", 10), "Mode": 33188, "UserID": 501, "GroupID": 501,
             "ProtectionClass": 4, "InodeNumber": 7}
+    if e.get("pad"):
+        root["Padding"] = b"\0" * e["pad"]      # a keyed archive of the given size: a hostile cell, not a real MBFile
     for key, name in (("birth", "Birth"), ("modified", "LastModified"), ("changed", "LastStatusChange")):
         if key in e:
             root[name] = e[key]
@@ -924,7 +1006,10 @@ test("manifest_db stops at max_seconds even when contains backtracks on every pa
     const { answer } = await manifest(cwd, dir, { contains: "(a|aa)+$", max_seconds: 3 });
     assert.ok(Date.now() - started < 20000, `took ${Date.now() - started} ms`);
     assert.equal(answer.status, "partial");
-    assert.ok(answer.observations.some((o) => /contains ran past its time on \d+ path\(s\)|time limit/.test(o)), answer.observations.join("\n"));
+    // The stop is in the observations whether the deadline fell inside a row's expression or between two rows (it was only said in the first
+    // case, and the test failed on CI whenever the three seconds ended between rows).
+    assert.notEqual(answer.stopped_at_row, null);
+    assert.ok(answer.observations.some((o) => /max_seconds \(3\) passed after \d+ rows: the rest of the Files table is not listed/.test(o)), answer.observations.join("\n"));
     for (const bad of ["NaN", "Infinity", "1e308", "100000", "0", "-1"]) {
       const r = await rawTool(MANIFEST, cwd, `{"path":${JSON.stringify(dir)},"max_seconds":${bad}}`);
       assert.match(refused(r).error, /max_seconds/, bad);
@@ -1266,6 +1351,7 @@ test("manifest_db withholds a path shaped like a recovery password, and a time l
     const slow = (await manifest(cwd, dir, { max_seconds: 1e-9 })).answer;
     assert.equal(slow.status, "partial");
     assert.equal(slow.stopped_at_row, 0);
+    assert.ok(slow.observations.some((o) => /^max_seconds \(1e-09\) passed after 0 rows: the rest of the Files table is not listed/.test(o)), slow.observations.join("\n"));
     // A file that is not a backup is refused in JSON, and no traceback.
     assert.match(refused(await tool(MANIFEST, cwd, { path: join(cwd, "work") })).error, /no Manifest.db/);
   });
@@ -1359,7 +1445,8 @@ test("protobuf_peek reads a bounded window of a large file, and says what lies a
   // whole takes more than 200 MB for the file below, and this one stays under 64 MB.
   await withCwd(async (cwd) => {
     const big = join(cwd, "work", "big.bin");
-    const message = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello")]);
+    // Aimed with an offset and a length, so the window must be a message of at least 16 bytes and 4 fields to be shown.
+    const message = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello"), varintField(3, 300), lenDelimited(4, "world!")]);
     await writeFile(big, Buffer.concat([Buffer.alloc(100), message]));
     // 200 MiB, sparse: only the message and the end of the file hold bytes.
     const fd = await import("node:fs/promises").then((m) => m.open(big, "r+"));
@@ -1715,4 +1802,326 @@ test("the shared helper block of the three tools is byte for byte one", async ()
   }));
   assert.equal(blocks[0], blocks[1]);
   assert.equal(blocks[0], blocks[2]);
+});
+
+// --- review fixes: filters on the text that is printed, bounded cells, secret output, signals, windows ---------
+
+const WITHHELD = "<recovery-password-shaped name withheld>";
+/** A recovery password shaped name from pieces: eight groups of six digits, from a seeded generator, never a fixed literal. */
+function recoveryName(seed: number): string {
+  let x = seed >>> 0;
+  const next = (): number => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x; };
+  return Array.from({ length: 8 }, () => String(next() % 1000000).padStart(6, "0")).join("-");
+}
+
+test("manifest_db applies contains and domain to the path it prints, so a withheld component cannot be guessed digit by digit", async () => {
+  // contains and domain ran on the real relative path: `Documents/<prefix>` matched while the printed path said the component was withheld, and
+  // entry_count told, call by call, whether the guessed prefix was right (10 calls a digit, 480 for a 48-digit key).
+  await withCwd(async (cwd) => {
+    const keys = [recoveryName(11), recoveryName(12)];
+    const dir = await backup(cwd, "oracle", { entries: [
+      { id: ID_A, path: `Documents/${keys[0]}/note.txt`, blob: "none" },
+      { id: ID_B, path: `Documents/${keys[1]}/note.txt`, blob: "none", domain: `AppDomain-${keys[1]}` },
+      { id: ID_C, path: "Documents/other/note.txt", blob: "none" },
+    ] });
+    const base = (await manifest(cwd, dir)).answer;
+    assert.equal(base.entry_count, 3);
+    const counts: Record<string, number> = {};
+    for (const [name, rx] of [["right prefix", `Documents/${keys[0].slice(0, 6)}`], ["wrong prefix", `Documents/${keys[0].slice(0, 5)}x`], ["whole key", keys[0]], ["its second group", keys[0].slice(7, 13)], ["a digit class", `Documents/[0-9]{6}-`]] as const) {
+      const r = await manifest(cwd, dir, { contains: rx });
+      counts[name] = r.answer.entry_count;
+      assert.equal(r.run.stdout.includes(keys[0]), false);
+      assert.equal(r.run.stdout.includes(keys[1]), false);
+    }
+    // Every guess about the withheld text gets the same answer: no row.
+    assert.deepEqual(counts, { "right prefix": 0, "wrong prefix": 0, "whole key": 0, "its second group": 0, "a digit class": 0 });
+    // What is printed can be filtered on, the placeholder included.
+    assert.equal((await manifest(cwd, dir, { contains: "withheld>/note" })).answer.entry_count, 2);
+    assert.equal((await manifest(cwd, dir, { contains: "other/note" })).answer.entry_count, 1);
+    // domain: the printed domain is the placeholder; the real one matches nothing.
+    const real = await manifest(cwd, dir, { domain: `AppDomain-${keys[1]}` });
+    assert.equal(real.answer.entry_count, 0);
+    assert.equal(real.run.stdout.includes(keys[1]), false);
+    assert.equal((await manifest(cwd, dir, { domain: WITHHELD })).answer.entry_count, 1);
+    assert.equal((await manifest(cwd, dir, { domain: "HomeDomain" })).answer.entry_count, 2);
+    // The filter text is the caller's own and may be echoed, but the answer never carries a key.
+    // The expression is echoed with anything shaped like a recovery password withheld.
+    const echoed = JSON.stringify((await manifest(cwd, dir, { contains: keys[0] })).answer);
+    assert.equal(echoed.includes(keys[0]), false);
+    assert.equal(echoed.includes(keys[0].slice(0, 6)), false);
+  });
+});
+
+test("manifest_db does not read a keyed-archive cell above 1 MiB, and says so for that row", async () => {
+  // The whole cell was read and parsed: a 76 MB archive took 1.05 GB, and a larger cell has no limit but the machine's.
+  await withCwd(async (cwd) => {
+    const pad = 40 * 1024 * 1024;
+    const dir = await backup(cwd, "bigcell", { entries: [{ id: ID_A, path: "Library/a.db" }, { id: ID_B, path: "Library/big.db", pad }, { id: ID_C, path: "Library/c.db" }] });
+    const run = await measured(MANIFEST, cwd, { path: dir });
+    const answer = body<Manifest>(run.run);
+    const rows = Object.fromEntries(answer.entries.map((e) => [e.relative_path, e]));
+    assert.equal(rows["Library/big.db"].metadata_status, "too_large");
+    assert.match(rows["Library/big.db"].metadata_reason ?? "", /^the file column is \d+ bytes, over the 1048576 this tool reads: the cell was not read$/);
+    assert.equal(rows["Library/a.db"].metadata_status, "ok");
+    assert.equal(rows["Library/c.db"].metadata_status, "ok");
+    assert.equal(answer.counts.metadata.too_large, 1);
+    assert.equal(answer.status, "complete");
+    assert.ok(answer.observations.some((o) => /^1 listed row\(s\) have no readable metadata/.test(o)), answer.observations.join("\n"));
+    const base = await baseline(MANIFEST, cwd).catch(() => null);
+    const tiny = await measured(MANIFEST, cwd, { path: await backup(cwd, "tinycell", { entries: [{ id: ID_A, path: "Library/a.db" }] }) });
+    assert.ok(run.maxrss - tiny.maxrss < 80 * 1024 * 1024, `a 40 MiB cell cost ${run.maxrss - tiny.maxrss} bytes of resident memory more than a small one (${base ? "baseline measured" : "no baseline"})`);
+  });
+});
+
+test("manifest_db says what a cell that is not a blob is, without reading it", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "kinds", { entries: [{ id: ID_A, path: "Library/a.db" }, { id: ID_B, path: "Library/b.db", nometa: true }] });
+    const make = String.raw`
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("UPDATE Files SET file = 'text instead of a blob' WHERE fileID = ?", (sys.argv[2],))
+con.commit()
+`;
+    assert.equal((await runPySnippet(make, [join(dir, "Manifest.db"), ID_A], null)).code, 0);
+    const answer = (await manifest(cwd, dir)).answer;
+    const rows = Object.fromEntries(answer.entries.map((e) => [e.relative_path, e]));
+    assert.equal(rows["Library/a.db"].metadata_status, "malformed");
+    assert.equal(rows["Library/a.db"].metadata_reason, "the file column is a str, not a blob");
+    assert.equal(rows["Library/b.db"].metadata_status, "absent");
+  });
+});
+
+test("manifest_db, sqlite_freespace and protobuf_peek write their values only in a job run as secret output", async () => {
+  // The tools checked JOB_ID and OUT only: write_values in a plain job wrote the values file as an ordinary output.
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "secret.db");
+    await build(FREEBLOCK_DB, db, "SECRET-OUTPUT-MARKER", "utf-8");
+    const refusal = refused(await asJob(FREESPACE, cwd, { db, write_values: true }, "plain", "j-1", false));
+    assert.match(refusal.error, /not run as secret output \(SECRET_OUTPUT is not 1\)/);
+    assert.equal(refusal.write_values, "refused");
+    assert.equal(await exists(join(cwd, "plain", "sqlite-freespace-values.jsonl")), false, "nothing was written");
+    assert.equal(refused(await asJob(FREESPACE, cwd, { db, write_values: true, contains: "SECRET" }, "plain2", "j-2", false)).write_values, "refused");
+    // Without the flag nothing is asked of the job: the same tool answers.
+    assert.equal(body<Free>(await asJob(FREESPACE, cwd, { db }, "plain3", "j-3", false)).secret_values.requested, false);
+    const pb = join(cwd, "work", "pb.bin");
+    await writeFile(pb, Buffer.concat([varintField(1, 7), lenDelimited(2, "hello world"), varintField(3, 300), lenDelimited(4, "more text")]));
+    assert.match(refused(await asJob(PROTOBUF, cwd, { path: pb, write_values: true }, "plain4", "j-4", false)).error, /SECRET_OUTPUT is not 1/);
+    assert.equal(await exists(join(cwd, "plain4", "protobuf-values.jsonl")), false);
+    assert.equal(body<Pb>(await asJob(PROTOBUF, cwd, { path: pb, write_values: true }, "secret4", "j-5", true)).secret_values.written, 2);
+    // The manifests say so, for the harness: the job is secret output whenever write_values is asked for.
+    for (const name of ["sqlite_freespace", "protobuf_peek"]) {
+      const manifestJson = JSON.parse(await readFile(join(TOOLS, name, "manifest.json"), "utf8")) as { secret_output?: unknown };
+      assert.deepEqual(manifestJson.secret_output, { when_args: ["write_values"] }, name);
+    }
+  });
+});
+
+test("the three tools answer a stop signal with one JSON, exit 128 plus the signal, and leave nothing they made", async () => {
+  // A signal ended the tool with no output and left the working copy of Manifest.db and a hidden temporary page file behind.
+  await withCwd(async (cwd) => {
+    const prelude = String.raw`
+import importlib.util, os, sys, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("tool", sys.argv[1]); tool = importlib.util.module_from_spec(spec); spec.loader.exec_module(tool)
+os.chdir(sys.argv[2])
+os.environ.update(JOB_ID="j-1", OUT=sys.argv[3], SECRET_OUTPUT="1", AGENT_ID="s1")
+os.makedirs(sys.argv[3], exist_ok=True)
+def hang():
+    sys.stderr.write("READY\n"); sys.stderr.flush(); time.sleep(60)
+`;
+    const stop = async (name: string, patch: string, args: Record<string, unknown>, tool: string, sig: NodeJS.Signals) => {
+      const out = join(cwd, "stop-" + name + "-" + sig);
+      const result = await stoppedBy(prelude + patch + "\ntool.run_main(tool.main)\n", [tool, cwd, out], args, sig);
+      return { out, ...result };
+    };
+    const check = (r: Awaited<ReturnType<typeof stop>>, sig: NodeJS.Signals, number: number) => {
+      assert.equal(r.code, 128 + number, r.stderr + r.stdout);
+      assert.doesNotMatch(r.stderr, /Traceback/);
+      const answer = JSON.parse(r.stdout) as Record<string, unknown>;
+      assert.equal(answer.interrupted, sig);
+      assert.equal(answer.status, "failed");
+      assert.match(String(answer.status_basis), new RegExp(sig));
+      return answer;
+    };
+    const hidden = async (dir: string): Promise<string[]> => (await exists(dir)) ? (await readdir(dir)).filter((n) => n.startsWith(".")) : [];
+
+    // sqlite_freespace: the third fragment's text is being decoded; the first rows are in a page file, which is named, and the values file is closed.
+    const db = join(cwd, "work", "stop.db");
+    await build(FREEBLOCK_DB, db, "STOP-MARKER", "utf-8");
+    for (const [sig, number] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]] as const) {
+      const r = await stop("freespace", "real = tool.decode\ncount = [0]\ndef slow(raw, encoding):\n    count[0] += 1\n    if count[0] == 3: hang()\n    return real(raw, encoding)\ntool.decode = slow",
+        { db, write_values: true, limit: 1, min_length: 4 }, FREESPACE, sig);
+      const answer = check(r, sig, number);
+      const kept = (answer.rows_read_before_the_failure_kept_in as string[])[0];
+      assert.ok(kept, JSON.stringify(answer));
+      assert.ok((await readFile(join(r.out, "tool-output", kept.split("/").pop()!), "utf8")).split("\n").filter(Boolean).length >= 2);
+      assert.deepEqual(await hidden(join(r.out, "tool-output")), [], "no hidden temporary page file");
+      assert.equal((answer.values_written_before_the_failure as { rows: number }).rows, 2);
+      assert.equal(await exists(join(r.out, "sqlite-freespace-values.jsonl")), true);
+    }
+
+    // manifest_db: a WAL beside Manifest.db makes a working copy; the signal arrives while the third row's archive is read.
+    const dir = await backup(cwd, "stopbk", { entries: many(4), wal: many(2, (i) => ({ id: (i + 100).toString(16).padStart(40, "0") })) });
+    const m = await stop("manifest", "real = tool.metadata\ncount = [0]\ndef slow(*a):\n    count[0] += 1\n    if count[0] == 3: hang()\n    return real(*a)\ntool.metadata = slow",
+      { path: dir, limit: 1 }, MANIFEST, "SIGTERM");
+    const answer = check(m, "SIGTERM", 15);
+    assert.ok((answer.rows_read_before_the_failure_kept_in as string[])[0]);
+    assert.deepEqual((await exists(join(m.out, "tool-output")) ? await readdir(join(m.out, "tool-output")) : []).filter((n) => n.startsWith("manifest_db-working-copy-")), [], "the working copy was removed");
+    assert.deepEqual(await hidden(join(m.out, "tool-output")), []);
+
+    // protobuf_peek
+    const pb = join(cwd, "work", "stop.bin");
+    await writeFile(pb, Buffer.concat([varintField(1, 7), lenDelimited(2, "hello world"), varintField(3, 300), lenDelimited(4, "more text"), lenDelimited(5, "last text")]));
+    const p = await stop("protobuf", "real = tool.SecretValues.add\ncount = [0]\ndef slow(self, *a):\n    count[0] += 1\n    if count[0] == 3: hang()\n    return real(self, *a)\ntool.SecretValues.add = slow",
+      { path: pb, write_values: true, limit: 1 }, PROTOBUF, "SIGTERM");
+    const pa = check(p, "SIGTERM", 15);
+    assert.equal((pa.values_written_before_the_failure as { rows: number }).rows, 2);
+    assert.deepEqual(await hidden(join(p.out, "tool-output")), []);
+  });
+});
+
+/** A Python snippet run as a child: its stderr says READY when it is waiting, then it gets the signal. Args on stdin (JSON). */
+async function stoppedBy(code: string, argv: string[], stdin: unknown, sig: NodeJS.Signals): Promise<Run> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("python3", ["-c", code, ...argv], { env: { ...process.env, ...AGENT } });
+    const out: Buffer[] = [], err: Buffer[] = [];
+    let sent = false;
+    const guard = setTimeout(() => { child.kill("SIGKILL"); }, 60000);
+    child.stdout.on("data", (c: Buffer) => out.push(c));
+    child.stderr.on("data", (c: Buffer) => {
+      err.push(c);
+      if (!sent && Buffer.concat(err).toString("utf8").includes("READY")) { sent = true; child.kill(sig); }
+    });
+    child.on("error", reject);
+    child.on("close", (exit, signal) => {
+      clearTimeout(guard);
+      resolve({ code: exit ?? (signal ? 128 + 99 : null), stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify(stdin));
+  });
+}
+
+test("protobuf_peek shows a window aimed at a token only when it is a message of 16 bytes and 4 fields, and no window inside text at all", async () => {
+  // The rule held for the whole payload and not for sub-windows: the first answer names where a withheld payload is, and a window slid across
+  // a token was shown whenever its characters parsed as a message (the rows printed are the token's own bytes read as keys, lengths and varints).
+  const slide = String.raw`
+import importlib.util, json, random, string, sys, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("pb", sys.argv[1]); pb = importlib.util.module_from_spec(spec); spec.loader.exec_module(pb)
+rule = getattr(pb, "window_accepted_by", None)
+rng = random.Random(8)
+def varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F; n >>= 7
+        if n: out.append(b | 0x80)
+        else: out.append(b); return bytes(out)
+WIRE = {"varint": 0, "64-bit": 1, "length-delimited": 2, "32-bit": 5}
+def exposed(rows, mask):
+    # the bytes of the window that the printed rows give away: keys, lengths, and the value of a top-level varint
+    for r in rows:
+        at = r["offset"]; key = len(varint((r["field"] << 3) | WIRE[r["wire_type"]]))
+        for i in range(at, at + key): mask[i] = True
+        if r["wire_type"] == "varint" and r["depth"] == 0:
+            for i in range(at + key, at + key + len(varint(r["value"]))): mask[i] = True
+        elif r["wire_type"] == "length-delimited":
+            for i in range(at + key, r["payload_offset"]): mask[i] = True
+            if "_children" in r: exposed(r["_children"], mask)
+def derivable(blob, aimed):
+    ctx = pb.Context(blob, 0, 6, 100000, time.monotonic() + 60)
+    rows, state, problem, shape = pb.parse(ctx, 0, len(blob), 0, [])
+    ok = rule(blob, state, shape, aimed) if rule else (len(blob) >= pb.MIN_WINDOW_BYTES and pb.accepted(state, shape))
+    mask = [False] * len(blob)
+    if ok: exposed(rows, mask)
+    return mask
+kinds = {"base62-20": (string.ascii_letters + string.digits, 20), "hex-32": ("0123456789abcdef", 32), "hex-64": ("0123456789abcdef", 64)}
+result = {}
+for label, (alphabet, length) in kinds.items():
+    tokens = 0
+    for _ in range(int(sys.argv[2])):
+        token = "".join(rng.choice(alphabet) for _ in range(length)).encode()
+        prefix = b"\x08\x01\x12" + varint(length)
+        message = prefix + token + b"\x18\x02"
+        start, end = len(prefix), len(prefix) + length
+        hit = False
+        for offset in range(0, len(message) - 7):
+            for size in range(8, len(message) - offset + 1):
+                mask = derivable(message[offset:offset + size], offset > 0 or size != len(message))
+                if any(mask[i] for i in range(size) if start <= offset + i < end):
+                    hit = True
+        tokens += hit
+    result[label] = tokens
+print(json.dumps(result))
+`;
+  const count = 200;
+  const run = await runPySnippet(slide, [PROTOBUF, String(count)], null);
+  assert.equal(run.code, 0, run.stderr);
+  const hits = JSON.parse(run.stdout) as Record<string, number>;
+  // Before: about 46, 87 and 99 percent of these tokens had a shown window that gave bytes of the token away. After: at most 3 percent of them.
+  for (const [label, n] of Object.entries(hits)) assert.ok(n <= 0.03 * count, `${label}: ${n} of ${count} tokens had a window that was shown`);
+});
+
+test("protobuf_peek holds a window it was aimed at to 16 bytes and 4 fields, and shows no window of printable text", async () => {
+  await withCwd(async (cwd) => {
+    const small = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello"), varintField(3, 9)]);       // 3 fields, 12 bytes
+    const four = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello"), varintField(3, 300), lenDelimited(4, "world!")]);
+    await writeFile(join(cwd, "work", "small.bin"), Buffer.concat([Buffer.alloc(4), small]));
+    await writeFile(join(cwd, "work", "four.bin"), Buffer.concat([Buffer.alloc(4), four]));
+    // Not aimed (offset 0, no length): the plain rule, 8 bytes and 2 fields.
+    await writeFile(join(cwd, "work", "plain-small.bin"), small);
+    assert.equal((await peek(cwd, { path: "work/plain-small.bin" })).answer.structure.status, "valid");
+    // Aimed with an offset: the same bytes are not shown, and the reason carries no number from them.
+    const aimedSmall = (await peek(cwd, { path: "work/small.bin", offset: 4 })).answer;
+    assert.equal(aimedSmall.structure.status, "not_accepted");
+    assert.equal(aimedSmall.fields.length, 0);
+    assert.match(aimedSmall.structure.reason, /at least 8 bytes \(16 when offset or length was given\) with at least two fields \(4 when offset or length was given\)/);
+    assert.equal((await peek(cwd, { path: "work/plain-small.bin", length: small.length })).answer.structure.status, "not_accepted", "a length is aiming too");
+    assert.equal((await peek(cwd, { path: "work/four.bin", offset: 4 })).answer.structure.status, "valid");
+    assert.equal((await peek(cwd, { hex: four.toString("hex"), length: four.length })).answer.structure.status, "valid");
+    // A window of printable text is never a message, aimed or not: these are well-formed messages (printable tag bytes, one-byte varints) and the old rule
+    // showed them, field numbers and values included.
+    for (const printable of ["(A0B8C@D", "(A0B8C@DHEPF", " a(b0c8d@e"]) {
+      const answer = (await peek(cwd, { hex: Buffer.from(printable).toString("hex") })).answer;
+      assert.equal(answer.fields.length, 0, JSON.stringify(printable));
+      assert.equal(answer.structure.consistent_with_protobuf_wire_format, false);
+    }
+  });
+});
+
+test("the three tools say status_basis, and protobuf_peek says status", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "basis.db");
+    await build(FREEBLOCK_DB, db, "BASIS-MARKER", "utf-8");
+    const free = (await freespace(cwd, db, { min_length: 4 }, "basis")).answer as unknown as { status: string; status_basis: string };
+    assert.equal(free.status, "complete");
+    assert.match(free.status_basis, /every page was examined/);
+    const stopped = (await freespace(cwd, db, { min_length: 4, max_seconds: 1e-9 }, "basis2")).answer as unknown as { status: string; status_basis: string };
+    assert.equal(stopped.status, "partial");
+    assert.match(stopped.status_basis, /the time limit stopped the scan before page 1/);
+    const four = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello"), varintField(3, 300), lenDelimited(4, "world!")]);
+    const ok = (await peek(cwd, { hex: four.toString("hex") })).answer as unknown as { status: string; status_basis: string };
+    assert.equal(ok.status, "complete");
+    assert.match(ok.status_basis, /whole window parsed/);
+    const no = (await peek(cwd, { hex: "ff" })).answer as unknown as { status: string; status_basis: string };
+    assert.equal(no.status, "partial");
+    assert.match(no.status_basis, /no row is printed/);
+    const dir = await backup(cwd, "basis", { entries: many(2), snapshot: "uploadingFiles" });
+    const m = (await manifest(cwd, dir)).answer as unknown as { status: string; status_basis: string };
+    assert.equal(m.status, "partial");
+    assert.match(m.status_basis, /the backup did not finish/);
+    const done = (await manifest(cwd, await backup(cwd, "basis2", { entries: many(2) }))).answer as unknown as { status: string; status_basis: string };
+    assert.equal(done.status, "complete");
+    assert.match(done.status_basis, /read to its end/);
+  });
+});
+
+test("the helper's stdin: a child that never reads it is not an error, and null means no stdin at all", async () => {
+  // runPySnippet wrote its JSON to a child that had already exited (a fixture builder never reads stdin): the Writable emitted EPIPE with no
+  // listener, which became an uncaught exception that ended the whole test file on a loaded runner.
+  const big = "x".repeat(8 * 1024 * 1024);
+  const done = await runPySnippet("pass", [], { padding: big });
+  assert.equal(done.code, 0);
+  const nothing = await runPySnippet("import sys; print(repr(sys.stdin.read()))", [], null);
+  assert.equal(nothing.stdout.trim(), "''");
 });
