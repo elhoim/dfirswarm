@@ -24,7 +24,7 @@ places (LUKS1 slot table; LUKS2 version, label, UUID), the basis of the call, th
 reader, and what is not determined. A header text field that is not what the format says
 (a cipher or hash off the closed lists, a UUID field that is no UUID, a label shaped like
 an identifier or a secret) is not printed; `header_fields_withheld` names it, and
-`cryptsetup luksDump` on the evidence copy shows it to you.
+a header reader run on the evidence copy shows it to you.
 
 **Does not show.** BitLocker protectors, LUKS2 keyslots, whether an APFS volume is
 encrypted, document encryption, or whether any data is intact or openable. "No scheme
@@ -33,8 +33,8 @@ recognised" is not "not encrypted".
 Only if you name a particular format's protection (BitLocker, LUKS, Apple, VeraCrypt and TrueCrypt, archives, Office, PDF, phone backups): `identify/by-format`.
 
 **Sensitive output.** `crypto_id` prints no raw bytes of the file, so a possible key
-file is identified by its size and entropy and never shown; to see bytes, use `xxd` on
-the evidence copy and do not copy them into the report or the ledger. Run any job that
+file is identified by its size and entropy and never shown; to see bytes, use a hex viewer
+on the evidence copy and do not copy them into the report or the ledger. Run any job that
 may emit secret material with `secret_output: true`, and record locations and sealed
 references, never values or hashes. Withholding of header text and names is by shape:
 a secret of another shape is printed.

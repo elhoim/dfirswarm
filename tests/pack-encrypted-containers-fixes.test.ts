@@ -41,7 +41,7 @@ function refused(out: Run): Json {
 
 /** Run a tool, send it a signal when `ready` says so (or after `afterMs`), and say how it ended. */
 async function signalled(script: string, cwd: string, args: unknown, env: Record<string, string>, signal: NodeJS.Signals, ready: () => Promise<boolean>, bin?: string): Promise<Run & { signal: NodeJS.Signals | null; pid: number }> {
-  const e = { ...process.env, ...AGENT, ...env };
+  const e: Record<string, string | undefined> = { ...process.env, ...AGENT, ...env };
   if (bin) e.PATH = `${bin}:${e.PATH ?? ""}`;
   const child = spawn("python3", [script], { cwd, env: e });
   const stdout: Buffer[] = [];
