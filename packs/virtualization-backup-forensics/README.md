@@ -52,8 +52,8 @@ actor, a message) has token-shaped runs, user-info and the value after a name th
 says it is a secret withheld, and a second check, written apart from the first
 two, reads the serialised answer back. This is a heuristic, not a guarantee: a
 short password used alone as a name is not recognised (a flag with its value, such
-as `-password x`, and a secret's name followed by something that is not a word are
-withheld in a name), so the skills say to run the tools as jobs with
+as `-password x` or `--secret-key x`, and a secret's name followed by something that is not a
+word are withheld in a name), so the skills say to run the tools as jobs with
 `secret_output: true`.
 
 ## Two things the skills keep repeating

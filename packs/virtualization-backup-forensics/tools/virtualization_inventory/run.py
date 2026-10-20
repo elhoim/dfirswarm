@@ -810,6 +810,24 @@ _BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0
 _TOKEN_HEAD = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}"
                          r"|glpat-[A-Za-z0-9_-]{4,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{4,}|SG\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?|AIza[0-9A-Za-z_-]{8,}"
                          r"|npm_[A-Za-z0-9]{8,}|pypi-[A-Za-z0-9_-]{8,}|shpat_[A-Za-z0-9]{8,}|dop_v1_[A-Za-z0-9]{8,}|ya29\.[A-Za-z0-9_-]{8,})")
+# the pairs of letters that fewer than 50 words in 236,000 of an English word list hold (qz, jx, vk, ...): a word has none of them, random letters have some
+_RARE_PAIRS = frozenset((
+    "bg bk bq bw bx bz cb cd cf cg cj cm cp cv cw cx cz dk dq dx dz fb fc fd fg fh fj fk fm fn fp fq fs fv fw fx fz gc gj gk gp gq gv gx gz hg hj "
+    "hk hq hv hx hz jb jc jd jf jg jh jj jk jl jm jn jp jq jr js jt jv jw jx jy jz kc kd kg kj kq kv kx kz lj lq lx lz md mg mh mj mk mq mt mv mx "
+    "mz pd pg pj pk pq pv px pz qa qb qc qd qe qf qg qh qi qj qk ql qm qn qo qp qq qr qs qt qv qw qx qy qz rx sj sx sz tj tk tq tv tx uj uq uu uw "
+    "vb vc vd vf vg vh vj vk vl vm vn vp vq vr vs vt vv vw vx vz wc wg wj wp wq wv wx wz xb xd xf xg xj xk xl xm xn xq xr xv xw xx xz yj yk yq yv "
+    "yy zb zc zd zf zg zh zj zk zm zn zp zq zr zs zt zv zw zx "
+).split())
+
+# The pairs above as a pattern: a letter and one of the letters that rarely follow it (`b[gkqwxz]|c[bdfgjmpvwxz]|...`), for the words a placeholder is followed by.
+def _rare_alternatives():
+    by_first = {}
+    for pair in _RARE_PAIRS:
+        by_first.setdefault(pair[0], []).append(pair[1])
+    return "|".join("%s[%s]" % (first, "".join(sorted(by_first[first]))) for first in sorted(by_first))
+
+
+_RARE_RE = _rare_alternatives()
 # The value after a name that says it is a secret, found anywhere in the string: the secret word first (glued to whatever comes
 # before it, in any case: vncPassword, adminpass, dbPwd; `pass` not after by, com, over, under, tres, encom, sur or im, so that
 # bypass: and compass: are words), then `=` or `:` (quotes and a little space allowed), then the value and up to three more words
@@ -818,8 +836,17 @@ _TOKEN_HEAD = re.compile(r"(?i:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4
 # not (_PLACEHOLDER).
 _PLACEHOLDER = r"<(?i:redacted|hidden|masked|removed|omitted|secret|password|passwd|passphrase|pwd|pass|token|key|value|placeholder|empty|none|null|unset|your[ _-]?(?:password|secret|token|key)|\*{1,16})?>"
 # A placeholder ends where a token ends: `<redacted>Zq7kP2mR` is a value that starts with brackets, and so is `<redacted> Zq7kP2mR` when the word after it is
-# built like a secret (8 or more letters and digits with a digit in them, or a small letter before a capital); neither is the placeholder, the whole of it is the value.
-_PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!(?-i:[ \t]+(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}))"
+# built like a secret: 8 or more letters and digits with a digit in them or a small letter before a capital, 8 or more digits, or 8 or more letters of one case
+# that are not a word (a pair of letters that fewer than 50 words hold, or four consonants in a row: `<redacted> kqmzvtrb`). Neither is the placeholder, the whole of it is the value.
+# A word of one case that reads as a word (`<redacted> successfully`) leaves the placeholder as it is.
+_PH_TAIL = (r"(?-i:[ \t]+(?:(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}|[0-9]{8,40}(?![A-Za-z0-9])"
+            r"|(?=(?:[a-z]{8,40}|[A-Z]{8,40})(?![A-Za-z0-9]))(?=[A-Za-z]{0,38}(?i:" + _RARE_RE + r"|[b-df-hj-np-tv-xz]{4}))[A-Za-z]{8}))")
+_PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!" + _PH_TAIL + r")"
+# The name of a flag that takes a secret (`-password x`, `--token x`, `--api-key x`): the words below, any word with `secret` in it, `key` (`-key x`) or `Key` after a
+# lower-case letter (`--sshKey x`), also after up to four words joined by `-` or `_` (`--db-password x`, `--ssh-key x`, `--master-key x`, `--secret-access-key x`);
+# `--key-file x`, `--keyboard x` and `-keep-alive x` are not (the name ends where the flag's value begins).
+_FLAG_NAME = (r"(?:[A-Za-z0-9]{1,20}[-_]){0,4}(?:(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|[A-Za-z0-9]{0,20}secret[A-Za-z0-9]{0,20}|token|api[-_]?key|access[-_]?key|key|auth|bearer|psk)"
+              r"|[A-Za-z0-9]{1,20}(?-i:Key))")
 _NAMED_SECRET = re.compile(
     r"(?:(?i:pass[_-]?w(?:or)?d|passwd|passphrase|pwd|secret|token|credentials?|api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|master[_-]?key"
     r"|shared[_-]?key|signing[_-]?key|encryption[_-]?key|secret[_-]?key|authorization|bearer|dsn|webhook[_-]?url|connection[_-]?string|ssh[_-]?key"
@@ -827,12 +854,12 @@ _NAMED_SECRET = re.compile(
     r"|(?<![Bb]y)(?<![Cc]om)(?<![Oo]ver)(?<![Uu]nder)(?<![Tt]res)(?<![Ee]ncom)(?<![Ss]ur)(?<![Ii]m)(?i:pass)"
     r"|(?i:pw|auth|sig|sas|otp|psk|pin))s?[0-9]{0,2}(?:\\{0,3}[\"'])?[ \t]{0,2}[=:][ \t]{0,2}(?:\\{0,3}[\"'])?"
     r"((?!line[ \t]+[0-9])(?!" + _PLACEHOLDER + _PH_END + r")(?:(?:<[^<>\"'\n]{0,200}>[^\s\"'<>;,&\\]*|[^\s\"'>;,&\\][^\s\"'<>;,&]*)(?:[ \t]+[^\s\"'<>;,&=:]+){0,3}))")
-_NAMED_FLAG = re.compile(r"(?<![\w-])--?(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth|bearer|psk)(?:=|[ \t]+)(?!-)(?!" + _PLACEHOLDER + _PH_END + r")(<[^\s\"']*(?:[ \t]+[^\s\"'<>;,&=:]+)?|[^\s\"']+)")
+_NAMED_FLAG = re.compile(r"(?<![\w-])--?" + _FLAG_NAME + r"(?:=|[ \t]+)(?!-)(?!" + _PLACEHOLDER + _PH_END + r")(<[^\s\"']*(?:[ \t]+[^\s\"'<>;,&=:]+)?|[^\s\"']+)")
 _NAMED_SET = re.compile(r"(?<![\w-])(?i:set|enable)[ \t]+(?i:passw(?:or)?d|secret|passphrase|token)[ \t]+(?:[0-9][ \t]+)?(?!" + _PLACEHOLDER + _PH_END + r")(<[^\s\"']*(?:[ \t]+[^\s\"'<>;,&=:]+)?|[^\s\"']+)")
 _LONG_DIGITS = re.compile(r"(?<![0-9])[0-9]{19,}(?![0-9])")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)", re.S)
 # A string none of whose rules can match is passed without the slow path: every rule needs one of these.
-_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|-(?i:pass|pwd|secret|token|api|access|client|auth|bearer|psk)|-----BEGIN")
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s|(?i:set|enable)[ \t]+(?i:pass|secret|token)|[0-9]{19}|[=:]|-(?i:pass|pwd|secret|token|api|access|client|auth|bearer|psk)|(?i:key|secret)[ \t]|[a-z0-9]Key[ \t]|-----BEGIN")
 _PIECE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
 _DIGIT_PLUS = re.compile(r"[0-9+]")
 _SEALED = {}
@@ -936,6 +963,7 @@ def _spans_withheld(part, kind):
     spans += [m.span(1) + ("secret",) for m in _NAMED_FLAG.finditer(part)]
     spans += [m.span(1) + ("secret",) for m in _NAMED_SET.finditer(part)]
     spans += [m.span() + ("token-shaped text",) for m in _RUN_CAND.finditer(part) if _token_like(m.group(), False)]
+    spans += [(m.start(), m.start() + len(m.group().rstrip(".-")), "token-shaped text") for m in _ID_FREE.finditer(part) if not _id_plausible(m.group().rstrip(".-"))]
     spans += [m.span() + ("long number",) for m in _LONG_DIGITS.finditer(part)]
     spans += [m.span() + ("private key",) for m in _PRIVATE_KEY.finditer(part)]
     if not spans:
@@ -999,23 +1027,46 @@ _ID_SEGMENT = re.compile(r"[^_ ]+")
 
 # A piece of a t10. id of 16 to 24 characters that drives really carry and random text is not mistaken for by chance: a 16-digit hexadecimal id (an EUI-64) or a WWN of a maker (Kingston
 # 50026B, Samsung 5002538, Crucial 500A075, SanDisk 5001B44, Seagate 5000C5, HGST 5000CCA, WD 50014E, Toshiba 5000039), a run of one or two characters
-# (zeros), and a model or serial in which ESXi wrote a hyphen as 2D (WDC_WD40EFRX2D68N32N0, ..._____WD2DWCC7K1234567): it is judged in the pieces 2D separates.
+# (zeros), and a model or serial in which ESXi wrote a hyphen as 2D (WDC_WD40EFRX2D68N32N0, ..._____WD2DWCC7K1234567), in the forms below.
 _HEX_ONLY = re.compile(r"[0-9A-Fa-f]+")
 _T10_KNOWN = re.compile(r"(?:50026B|5002538|500A075|5001B44|5000C5|5000CCA|50014E|5000039)[0-9A-F]{8,10}")
+
+
+# A model or a serial in which ESXi wrote a hyphen as 2D is plain only in the forms drives carry: a maker's 2 to 4 letters, the digits that start a model, letters and digits in blocks as models write them, then one or two
+# `2D` and a part of 2 to 10 characters (WD40EFRX2D68N32N0, ST4000DM0042D2CV104, MZ7LN256HCHP2D000L2), or a maker's two letters, `2D` and a serial or the rest of a model
+# (WD2DWCC7K1234567, MZ2D7LN256HCHP2D000L2); a piece of 22 characters or more is never one. A piece that holds `2D` by chance is judged whole, as every other piece is.
+_T10_2D = re.compile(r"[A-Z]{2,4}[0-9]{1,6}(?:[A-Z]{1,5}[0-9]{1,4}){0,2}[A-Z]{0,5}(?:2D[A-Z0-9]{2,10}){1,2}|[A-Z]{2}(?:2D[A-Z0-9]{2,14}){1,2}")
+
+
+def _letters_plain(piece):
+    """Whether a run of letters of one case, 16 or more, reads as words and not as random letters: fewer than two pairs of letters that words rarely hold
+    (a compound of two or three words has one at most where they meet), a vowel in one letter of five, and no run of five consonants (y is a consonant here, as in the token test)."""
+    low = piece.lower()
+    return (sum(1 for k in range(len(low) - 1) if low[k:k + 2] in _RARE_PAIRS) < 2 and sum(c in "aeiou" for c in low) >= 0.2 * len(low) and _NO_VOWEL5.search(low) is None)
 
 
 def _t10_piece_plain(piece):
     """Whether a piece of a t10. id of 16 characters or more is a model or a serial and not random text: not token-like, or one of the known forms above."""
     if len(set(piece)) <= 2 or _T10_KNOWN.fullmatch(piece) is not None or (len(piece) == 16 and _HEX_ONLY.fullmatch(piece)):      # 16 hexadecimal digits are a 64-bit id (an EUI-64), as in an identifier field
         return True
-    return not any(len(p) >= 16 and _token_like(p) for p in ([piece] if _HEX_ONLY.fullmatch(piece) else piece.split("2D")))
+    if "2D" in piece and len(piece) <= 21 and _HEX_ONLY.fullmatch(piece) is None and _T10_2D.fullmatch(piece) is not None:
+        return True
+    if piece.isalpha() and (piece.islower() or piece.isupper()):          # one case of letters: the test for a lower-case run is the words' one
+        return _letters_plain(piece) and not _token_like(piece)
+    return not _token_like(piece)
+
+
+_LETTER_RUNS = re.compile(r"[a-z]{16,40}|[A-Z]{16,40}")
+# A t10. or iqn. id in free text is read by the judgement above too: random text in a serial, a model or a target is not made readable by the id around it.
+_ID_FREE = re.compile(r"(?<![A-Za-z0-9])(?:t10\.[A-Za-z0-9_.-]{8,120}|iqn\.[0-9]{4}-[0-9]{2}\.[a-z0-9][a-z0-9.-]{0,60}(?::[A-Za-z0-9._-]{1,40})?)")
+_NO_VOWEL5 = re.compile(r"[^aeiou]{5}")
 
 
 def _id_plausible(text):
-    """Whether an iqn. or t10. id holds names: an iqn. whose domain and target have no token-like run, a t10. whose vendor, model and
+    """Whether an iqn. or t10. id holds names: an iqn. whose domain and target have no token-like run and no run of letters of one case that is not words, a t10. whose vendor, model and
     serial pieces are short or do not mix capitals, small letters and digits as random text does. A GUID or a hexadecimal id is as it is."""
     if text.startswith("iqn."):
-        return not any(_token_like(run) for run in _RUN_CAND.findall(text[12:]))
+        return not any(_token_like(run) for run in _RUN_CAND.findall(text[12:])) and all(_letters_plain(run) for run in _LETTER_RUNS.findall(text[12:]))
     if text.startswith("t10."):
         for piece in _ID_SEGMENT.findall(text[4:]):
             if len(piece) >= 16 and (len(piece) > 24 or not _t10_piece_plain(piece)):
@@ -1026,7 +1077,7 @@ def _id_plausible(text):
 def _ids_plausible(text):
     """Whether every iqn. and t10. id in `text` holds names. One that holds random text makes the whole string not a name: the words around a random serial
     (t10.ATA_____Model_X_____<serial>) are what made the run of it look like words."""
-    return all(_id_plausible(m.group()) for m in _ID_EMBEDDED.finditer(text))
+    return all(_id_plausible(m.group()) for m in _ID_EMBEDDED.finditer(text)) and all(_id_plausible(m.group().rstrip(".-")) for m in _ID_FREE.finditer(text))
 
 
 def _id_sub(text, fill):
@@ -1142,25 +1193,54 @@ def _cross_slash_token(run):
 _SECRET_THEN = re.compile(r"(?:(?i:passw(?:or)?d|passphrase|pwd|secret|token|credential|api[_-]?key|private[_-]?key|access[_-]?key|account[_-]?key)|(?<=-)(?i:pass|auth|bearer|psk))"
                           r"(?=s?[ \t_.-]*['\"(\[]?([A-Za-z0-9]{1,40}))")
 # a flag with its value, after anything but a letter or a digit (`d--pwd x` is a directory named d- and a flag): the layers of free text look at a flag after a space or a quote only
-_IDENT_FLAG = re.compile(r"(?<![A-Za-z0-9])--?(?i:passw(?:or)?d|passwd|pass(?:phrase)?|pwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth|bearer|psk)[ \t]+(?!-)\S")
+_IDENT_FLAG = re.compile(r"(?<![A-Za-z0-9])--?" + _FLAG_NAME + r"[ \t]+(?!-)\S")
 _WORD_PARTS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 _NO_VOWEL = re.compile(r"[^aeiouy]{4}")
-# the pairs of letters that fewer than 50 words in 236,000 of an English word list hold (qz, jx, vk, ...): a word has none of them, random letters have some
-_RARE_PAIRS = frozenset((
-    "bg bk bq bw bx bz cb cd cf cg cj cm cp cv cw cx cz dk dq dx dz fb fc fd fg fh fj fk fm fn fp fq fs fv fw fx fz gc gj gk gp gq gv gx gz hg hj "
-    "hk hq hv hx hz jb jc jd jf jg jh jj jk jl jm jn jp jq jr js jt jv jw jx jy jz kc kd kg kj kq kv kx kz lj lq lx lz md mg mh mj mk mq mt mv mx "
-    "mz pd pg pj pk pq pv px pz qa qb qc qd qe qf qg qh qi qj qk ql qm qn qo qp qq qr qs qt qv qw qx qy qz rx sj sx sz tj tk tq tv tx uj uq uu uw "
-    "vb vc vd vf vg vh vj vk vl vm vn vp vq vr vs vt vv vw vx vz wc wg wj wp wq wv wx wz xb xd xf xg xj xk xl xm xn xq xr xv xw xx xz yj yk yq yv "
-    "yy zb zc zd zf zg zh zj zk zm zn zp zq zr zs zt zv zw zx "
-).split())
 
 
-def _plain_word(token):
-    """Whether the word after a secret's name in a name reads as a word (Vault, Ring, DB, Server01, KeePass, 2019) and not as a value:
-    letters in words of three or more with vowels (a capitals run of two or three is an acronym), at most four digits and only at the end."""
+# What a VM, a file or a job is called after the name of a secret and is not a value: a file extension (`Password.vmdk`, `Token.vhdx`, `Secret.qcow2`), a snapshot counter (`-000001`),
+# a date (`-20240312`), a short host or service tag (`srv01`, `db02`, `pg14`, `7d4f`), and the `D2024` that Veeam glues to a job name before its time stamp (`Password ManagerD2024-...vbk`).
+_FILE_EXT = frozenset((
+    "vmdk vmx vmxf vmsd vmsn vmem vmss vmtx vmpl vswp nvram vhd vhdx avhd avhdx vsv vfd vmrs vmcx vrsv qcow qcow2 qed vdi raw img iso ova ovf ovpn bin dat db sql json xml yaml yml toml "
+    "ini cfg conf log txt csv bak old tmp lck lock zip gz tar tgz bz2 xz zst 7z vbk vib vbm vrb vsb vlb vcb xva ova pdf key pem crt cer pfx".split()))
+_VEEAM_GLUE = re.compile(r"D(?:19|20)[0-9]{2}$")
+_DATE8 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])(?:[0-2][0-9][0-5][0-9][0-5][0-9])?")
+_TAG = re.compile(r"(?:[a-z]{2,5}|[A-Z]{2,5}|[A-Z][a-z]{1,4})[0-9]{1,4}")
+# product and service words that hold a pair of letters English words rarely do (vmware, vcenter, sqlserver, upgrade, update ...): taken out of a word before it is judged
+_TECH_WORDS = re.compile("vmware|vcenter|vsphere|vsan|proxmox|nextcloud|splunk|openvpn|pfsense|opnsense|switch|postgres(?:ql)?|pgsql|mysql|mssql|sqlserver|rabbitmq|kafka|"
+                         "upgrad(?:e|ed|es|ing)|updat(?:e|ed|es|ing)|workstation|helpdesk|cloudhsm|hyperv|xenserver|netapp|nutanix|veeam|commvault|cohesity|wsus|sccm|pgbouncer|mongodb|redis|"
+                         "kubernetes|openshift|jumpbox|gitlab|github|jfrog|zabbix|ldaps?|radius|kerberos|tacacs")
+
+
+_SHORT_ONE_CASE = re.compile(r"[a-z0-9]{1,4}|[A-Z0-9]{1,4}")
+_SHORT_TAG = re.compile(r"[a-z0-9]{1,4}|[A-Z0-9]{1,4}|[A-Z][a-z0-9]{0,3}")
+
+
+def _plain_word(token, dotted=False, tail=""):
+    """Whether the word after a secret's name in a name reads as a word (Vault, Ring, DB, Server01, KeePass, 2019) and not as a value: letters in words of three or more with vowels
+    (a capitals run of two or three is an acronym), at most four digits and only at the end; also, as a name, a tag and not a value: four characters or fewer of one case (a capital
+    first, digits anywhere), a counter of up to six digits or a date of eight (a time stamp of fourteen), a tag of 2 to 5 letters of one case (or one capital and small letters) and
+    1 to 4 digits (7 characters at most), the extension of a file when a dot comes before it, and a Veeam job name before the `D2024` its time stamp starts with. None of these when `+` or
+    `=` follows the word (`tail`), and with a `/` after it the four-character one only of one case: the value goes on in the alphabet of a key."""
     if len(token) <= 3:
         return True
+    if tail not in ("+", "="):
+        if (_SHORT_TAG if tail == "" else _SHORT_ONE_CASE).fullmatch(token) or (dotted and token.lower() in _FILE_EXT):
+            return True
+    if _VEEAM_GLUE.search(token):
+        token = token[:-5]
+        if len(token) <= 4 and tail not in ("+", "="):
+            return True
+    if tail not in ("+", "="):
+        if token.isdigit():
+            return len(token) <= 6 or _DATE8.fullmatch(token) is not None
+        if len(token) <= 7 and _TAG.fullmatch(token):
+            return True
+    if token.isdigit():
+        return False
     parts = _WORD_PARTS.findall(token)
+    if not parts:
+        return False
     if parts[-1].isdigit():
         if len(parts[-1]) > 4:
             return False
@@ -1173,18 +1253,25 @@ def _plain_word(token):
                 return False
         else:
             low = p.lower()
-            if len(p) < 3 or (i > 0 and not p[0].isupper()) or sum(c in "aeiouy" for c in low) < 0.2 * len(p) or _NO_VOWEL.search(low) or any(low[k:k + 2] in _RARE_PAIRS for k in range(len(low) - 1)):
+            if len(p) < 3 or (i > 0 and not p[0].isupper()):
                 return False
+            if sum(c in "aeiouy" for c in low) < 0.2 * len(p):
+                return False
+            for rest in _TECH_WORDS.sub(" ", low).split():
+                if _NO_VOWEL.search(rest) or any(rest[k:k + 2] in _RARE_PAIRS for k in range(len(rest) - 1)):
+                    return False
     return True
 
 
-def _secret_then_value(text):
+def _secret_then_value(text, more=False):
     """A name or a path piece that holds a secret's name and then, glued or after a separator or a space, something that is not a word
-    (password-Zq7kP2mR, Token Zq7kP2mR, pwdZq7kP2mR) or a flag with its value (-password x, --token x, set password x): a command line, not a name."""
-    return _IDENT_FLAG.search(text) is not None or _NAMED_SET.search(text) is not None or any(not _plain_word(m.group(1)) for m in _SECRET_THEN.finditer(text))
+    (password-Zq7kP2mR, Token Zq7kP2mR, pwdZq7kP2mR) or a flag with its value (-password x, --token x, set password x): a command line, not a name.
+    `more`: a `/` follows the piece in the path it is cut from."""
+    return (_IDENT_FLAG.search(text) is not None or _NAMED_SET.search(text) is not None
+            or any(not _plain_word(m.group(1), text[m.start(1) - 1:m.start(1)] == ".", text[m.end(1):m.end(1) + 1] or ("/" if more else "")) for m in _SECRET_THEN.finditer(text)))
 
 
-def _ident_text_ok(text, limit, path, slash=False):
+def _ident_text_ok(text, limit, path, slash=False, more=False):
     """The grammar of a name or of one path component."""
     if len(text) > limit:
         return False
@@ -1211,7 +1298,7 @@ def _ident_text_ok(text, limit, path, slash=False):
         for m in _PATH_RUN.finditer(scan):
             if _cross_slash_token(m.group()):
                 return False
-    if _secret_then_value(text):                   # the name of a secret and a value after it: a flag (-password x), a word that is not a word (password-Zq7kP2mR)
+    if _secret_then_value(text, more):             # the name of a secret and a value after it: a flag (-password x), a word that is not a word (password-Zq7kP2mR)
         return False
     if _SECRET_WORD.search(text):                  # the name of a secret in a name: no random-looking piece beside it (words are not)
         for piece in _ALNUM_RUN.findall(_SECRET_WORD.sub(" ", text)):
@@ -1239,7 +1326,7 @@ def _ident(text, kind, field, where):
         return _withhold_field(text, field, where)
     if kind == "path":
         parts = _SEP.split(body)
-        ok = [i % 2 == 1 or not p or _MARKER.fullmatch(p) is not None or p in OWN_NAMES or _ident_text_ok(p, 255, True) for i, p in enumerate(parts)]
+        ok = [i % 2 == 1 or not p or _MARKER.fullmatch(p) is not None or p in OWN_NAMES or _ident_text_ok(p, 255, True, False, parts[i + 1:i + 2] == ["/"]) for i, p in enumerate(parts)]
         # What each piece holds at the edge a key's neighbour would join: a piece of the key alphabet alone is all key; a piece with
         # something glued to it (`local:`, `[ds1] `, `C:`, a quote or a brace, an error message) holds a stretch of key at the end that
         # is not glued (its tail, for the piece left of a `/`, its head for the piece right of one). A withheld piece whose edge is
@@ -1554,8 +1641,16 @@ _S_IDS = re.compile(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}|[0-9A
 _S_MARK = re.compile(r"<[^<>]{0,80}withheld[^<>]{0,100}>")
 # a value in angle brackets is a value; only the empty brackets (what a marker leaves) and a placeholder word are not
 _S_PH = r"<(?:redacted|hidden|masked|removed|omitted|secret|password|passwd|passphrase|pwd|pass|token|key|value|placeholder|empty|none|null|unset|your[ _-]?(?:password|secret|token|key)|\*{1,16})?>"
-_S_PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!(?-i:[ \t]+(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}))"
-_S_FLAG = re.compile(r"(?<![\w-])(?:--?(?:pass|password|passwd|passphrase|pwd|secret|token|apikey|api-key|api_key|access[-_]?key|client[-_]secret|auth|bearer|psk)|(?:set|enable)[ \t]+(?:password|secret|passphrase|token))[= ](?!" + _S_PH + _S_PH_END + r")\S", re.I)
+# The tail the second check reads after a placeholder as a value (the same judgement as the layers above, written again): a word of 8 or more characters with a digit
+# or a small letter before a capital, 8 or more digits, or 8 or more letters of one case that hold a pair of letters words rarely hold or four consonants in a row.
+_S_RARE = "|".join("%s[%s]" % (a, "".join(sorted(p[1] for p in _RARE_PAIRS if p[0] == a))) for a in sorted({p[0] for p in _RARE_PAIRS}))
+_S_PH_TAIL = (r"(?-i:[ \t]+(?:(?=[A-Za-z0-9]{0,32}[A-Za-z])(?=[A-Za-z0-9]{0,32}(?:[0-9]|[a-z][A-Z]))[A-Za-z0-9]{8,}|[0-9]{8,40}(?![A-Za-z0-9])"
+              r"|(?=(?:[a-z]{8,40}|[A-Z]{8,40})(?![A-Za-z0-9]))(?=[A-Za-z]{0,38}(?i:" + _S_RARE + r"|[b-df-hj-np-tv-xz]{4}))[A-Za-z]{8}))")
+_S_PH_END = r"(?=[\s\"';,&\\<>)\]}]|\.(?:\s|$)|$)(?!" + _S_PH_TAIL + r")"
+# a flag that takes a secret (`-password x`, `--token x`, `--db-password x`, `--ssh-key x`, `-key x`; not `--key-file x` or `--keyboard x`)
+_S_FLAG_NAME = (r"(?:[a-z0-9]{1,20}[-_]){0,4}(?:pass(?:w(?:or)?d|phrase)?|pwd|[a-z0-9]{0,20}secret[a-z0-9]{0,20}|token|api[-_]?key|access[-_]?key|key|auth|bearer|psk"
+                r"|[a-z0-9]{1,20}(?-i:Key))")
+_S_FLAG = re.compile(r"(?<![\w-])(?:--?" + _S_FLAG_NAME + r"|(?:set|enable)[ \t]+(?:password|secret|passphrase|token))(?:=|[ \t]+)(?!" + _S_PH + _S_PH_END + r")\S", re.I)
 _S_PHM = re.compile(_S_PH + _S_PH_END, re.I)
 
 
@@ -1617,6 +1712,29 @@ def _s_named(flat):
                     return True
 
 
+_S_T10_PIECES = re.compile(r"[A-Za-z0-9]+")
+_S_LETTERS = re.compile(r"[a-z]{16,40}|[A-Z]{16,40}")
+
+
+def _s_random_letters(run):
+    """16 or more letters of one case with two or more of the pairs words rarely hold (a compound of words has one where they meet at most)."""
+    low = run.lower()
+    return sum(1 for k in range(len(low) - 1) if low[k:k + 2] in _RARE_PAIRS) >= 2
+
+
+def _s_id_random(s):
+    """Whether a device id of a kind holds random text: for a t10. id a piece of more than 24 characters, or 16 to 24 characters that change class as random text does or
+    are letters of one case that are not words; for an iqn. id letters of one case that are not words."""
+    if s.startswith("t10."):
+        return any(len(piece) > 24 or (len(piece) >= 16 and (_random_run(piece) or (_S_LETTERS.fullmatch(piece) and _s_random_letters(piece)))) for piece in _S_T10_PIECES.findall(s[4:]))
+    return s.startswith("iqn.") and any(_s_random_letters(run) for run in _S_LETTERS.findall(s[12:]))
+
+
+def _s_id_out(m):
+    """What a device id of a kind leaves in the text the checks below read: a blank. (One that holds random text is found before this, by _s_id_random.)"""
+    return " "
+
+
 def _suspect(text):
     """The name of the check a string fails, or None."""
     if text in OWN_NAMES or text in VOCABULARY or not text:
@@ -1628,9 +1746,11 @@ def _suspect(text):
         flat = _S_MARK.sub("<>", flat)
     if _S_PEM.search(flat):
         return "a PEM marker"
-    bare = _S_IDS.sub(" ", flat)
+    bare = _S_IDS.sub(_s_id_out, flat)
     if _s_named(bare) or _S_FLAG.search(flat):
         return "a named secret"
+    if ("t10." in flat or "iqn." in flat) and any(_s_id_random(m.group()) for m in _S_IDS.finditer(flat)):
+        return "a random-looking run"
     if _S_DIGITS.search(bare):
         return "a long digit run"
     if _S_PREFIX.search(flat):
