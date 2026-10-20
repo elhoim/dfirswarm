@@ -1126,8 +1126,7 @@ def end_record_at(tail, at, tail_start):
     _sig, _disk, _cd_disk, _n_disk, n_total, cd_size, cd_offset, comment_len = struct.unpack_from("<IHHHHIIH", tail, at)
     after = len(tail) - (at + 22 + comment_len)
     out = {"entries": n_total, "cd_bytes": cd_size, "cd_offset": cd_offset, "comment_bytes": comment_len,
-           "zip64": False, "eocd_at": tail_start + at, "after_comment": after,
-           "after_comment_zero": after > 0 and not tail[at + 22 + comment_len:].strip(b"\x00")}
+           "zip64": False, "eocd_at": tail_start + at, "after_comment": after}
     if at >= 20 and tail[at - 20:at - 16] == b"PK\x06\x07":
         out["zip64_locator"] = True
         rec = tail[at - 20 - 56:at - 20] if at - 20 - 56 >= 0 else b""
@@ -1194,6 +1193,8 @@ def read_eocd(path, size):
         richer = [r for r in sound if r["entries"] > 0]
         if richer:
             chosen = min(richer, key=lambda r: (-r["entries"], r["eocd_at"]))
+    start = chosen["eocd_at"] - (size - tail_len)
+    chosen["after_comment_zero"] = chosen["after_comment"] > 0 and not tail[start + 22 + chosen["comment_bytes"]:].strip(b"\x00")
     others = [r for r in pool if r is not chosen and (r["entries"], r["cd_bytes"]) != (chosen["entries"], chosen["cd_bytes"])]
     chosen["other_record_count"] = len(others)
     chosen["other_records"] = [{"offset": r["eocd_at"], "entries": r["entries"], "central_directory_bytes": r["cd_bytes"],
