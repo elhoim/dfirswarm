@@ -39,9 +39,16 @@ passes it no flag about that, and the pinned binary's behaviour was not verified
 content only when it runs as a job, only on `write_values: true`, and only under
 `$OUT/mem_fs`; its answer carries the locator of each file, never its content or a
 digest of it (`recovery_key_scan` of the encrypted-containers pack is the reference
-implementation of that pattern). The tool cannot see whether the job was run with
-`secret_output: true`, which seals every output of the job as sensitive: the skills
-say to run it that way, and to run `aeskeyfind`, the Volatility plugins that print
+implementation of that pattern). Both `mem_fs` and `mem_carve` declare `secret_output`
+for `write_values`, so the harness seals the job as sensitive, and both check
+`SECRET_OUTPUT=1` and refuse as JSON otherwise. `mem_carve` cuts slices out of an image
+(credential hives included, deliberately: a cracking tool downstream stays available)
+only with `write_values: true`, into a directory with mode 0700. What the tools print
+from the capture, a name MemProcFS lists, a line the engine prints, a kernel release
+and a build string, is judged first: a release and a build string are shown only when
+they have the grammar of a version, names by shape (withholding is by shape, so a
+plain password or a name under 16 characters is printed). The skills say to run
+`aeskeyfind`, the Volatility plugins that print
 command lines, environments or shell history, and YARA and `strings` match bytes
 that way too. None of them writes a secret, a fragment of one or a hash of one into
 a post, the ledger or the report.
