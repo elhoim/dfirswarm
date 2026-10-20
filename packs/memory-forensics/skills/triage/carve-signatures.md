@@ -30,6 +30,6 @@ treat a successful parse as evidence about the records it validated.
 `sig_carve` reports a signature the same way: for a plain Prefetch record, where
 `SCCA` is, not where the structure begins.
 
-**Sensitive output.** The hit list (offsets, kinds, validation) is not secret. A slice is memory content and can be a credential store (a SAM or SECURITY hive, a browser database), so `extract_to` needs `write_values: true` in a job the tool's manifest seals as secret output, and is refused as JSON anywhere else. Credential hives are cut on purpose; a cracking tool downstream stays available. Cite slices by job reference and offset, never by content.
+**Sensitive output.** The hit list (offsets, kinds, validation) is not secret. A slice is memory content and can be a credential store (a SAM or SECURITY hive, a browser database), so `extract_to` needs `write_values: true` in a job run with `secret_output: true` (the manifest declares it), and is refused as JSON anywhere else. Credential hives are cut on purpose; a cracking tool downstream stays available. Cite slices by job reference and offset, never by content.
 
 **Does not show.** That a signature hit is a whole, readable file; that a parse of a slice describes the original structure; that no hits means the structure is absent.
