@@ -52,7 +52,7 @@ a TEXT cell whole). A cut cell says `_truncated`, its whole length and where the
 output, streams each whole value to a private file and names it.
 
 The tool has a clock of its own (`max_seconds`, 80 by default): a progress handler aborts the
-statement when it passes, the rows are checked every 256, and the answer is partial with the
+statement when it passes, the clock is read at every row, and the answer is partial with the
 entries read (a prefix in start order, also whole in the file), and `resume` says where to go on.
 Every string of an entry passes the boundary below; SIGTERM, SIGINT and SIGHUP end the read the
 same way, with the staged copy of the database removed.
@@ -83,7 +83,6 @@ DEFAULT_MAX_SECONDS = 80.0            # the manifest allows 120 s: staging, the 
 MAX_SECONDS_LIMIT = 90.0
 SEAL_STOP_SECONDS = 116.5             # no string is judged past this (the rest is withheld whole): the manifest allows 120, less the 3.5 seconds the block asks for
 INVENTORY_SECONDS = 8.0               # the list of streams may take this long after the rows
-CHECK_EVERY = 256                     # rows between two looks at the clock
 PROGRESS_STEPS = 100000               # sqlite virtual-machine steps between two looks at the clock inside a statement
 TEXT_HANDLE = -1                      # the length slot of a TEXT cell: it is read through a blob handle, never loaded by a statement
 HEAD_BYTES = 4 * VALUE_CAP + 4        # bytes that hold at least VALUE_CAP + 1 characters of UTF-8
@@ -99,8 +98,9 @@ STANDARD = {"Z_PK", "ZSTREAMNAME", "ZVALUESTRING", "ZVALUEINTEGER", "ZVALUEDOUBL
 # time limit does: the work in hand is closed, what was done is kept and named, ONE JSON answer says status partial and `interrupted` (the signal's
 # name), and the exit code is 128 plus the signal number. The handler raises Interrupted (a BaseException, so no `except Exception` swallows it) from
 # wherever the signal lands; a write that must be whole (a row of a result file, the answer) is made under held(), and the signal is delivered when
-# it ends, and hold_signals() holds them for good once the answer is being written. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's interrupt, the
-# kill of the reader process this tool started: its own children only, never a search by name).
+# it ends, and hold_signals() holds them for good once the answer is being written; a signal that arrives meanwhile is found by pending_stop_signal() before the
+# answer is printed, and the answer says so. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's
+# interrupt, the kill of the reader process this tool started and of its descendants: its own, never a search by name).
 import signal
 
 STOP = {"signal": None, "hooks": []}
@@ -164,6 +164,18 @@ class held:
             except (AttributeError, ValueError, OSError):
                 pass
         return False
+
+
+def pending_stop_signal():
+    """The stop signal that arrived while signals were held and was not delivered, or None (how a signal that lands while the answer is sealed is found)."""
+    try:
+        pending = signal.sigpending()
+    except (AttributeError, OSError):
+        return None
+    for signum in STOP_SIGNALS:
+        if signum in pending:
+            return signum
+    return None
 
 
 def hold_signals():
@@ -1623,6 +1635,117 @@ def emit(doc, **dumps_kwargs):
 # END SHARED BOUNDARY
 
 
+# BEGIN SHARED GUARD
+# The same text is in fsevents_parse, knowledgec_query and unified_log (a macos-forensics test holds the copies equal). The boundary block above is a copy of the
+# windows-forensics pack's and is not edited here; these are the two checks this pack makes around it until the block itself is revised, and they call only what
+# the block already has.
+#  - guard_hex: data written as hexadecimal is judged by the block as printable runs of the bytes as they are, so a token that a NUL or an invisible character cuts
+#    into pieces of 15 characters or fewer shows no run that looks like a secret, and is printed whole. A field that is hex (a BLOB's head, a UUID, the raw bytes of a
+#    path) is judged here once more on the text the bytes make with the NULs and the invisible characters taken out, in UTF-8 and in UTF-16 (both byte orders and
+#    offsets), the way the block reads a text; it is withheld when that text holds a secret-shaped run.
+#  - guard_text: a FileVault personal recovery key (six groups of four capitals and digits, 2-9, joined by `-`) is not a shape the block knows; it is withheld here.
+#    The id of a user's temporary folder (`/var/folders/xx/` and 30 characters) that the block would withhold as a token is shown as an alias of its sha256.
+#  - emit_answer: the answer is printed as emit() prints it, but a stop signal that arrived while it was sealed is named in it.
+# Both withhold through the block's own _withheld, so they are counted, listed and written to the values file like everything else it withholds.
+_VAULT = re.compile(r"(?<![A-Za-z0-9])[A-Z2-9]{4}(?:-[A-Z2-9]{4}){5}(?![A-Za-z0-9])")
+_ASCII_RUN = re.compile(r"[\x20-\x7e]{6,}")
+_NOT_PRINTABLE = re.compile(rb"[^\x20-\x7e]")
+_INVISIBLE_CATS = frozenset(("Cf", "Mn", "Me", "Zl", "Zp"))
+
+
+class _Invisible(dict):
+    """A translation table that drops what cuts a token without showing: the NUL, the format characters, the combining marks and the fillers. Other control
+    characters stay: dropping them as well joins the printable bytes of random data into runs (1% of 4 KB of random bytes then held a random-looking run)."""
+
+    def __missing__(self, o):
+        if len(self) > 20000:
+            self.clear()
+        self[o] = None if o == 0 or unicodedata.category(chr(o)) in _INVISIBLE_CATS or o in _FILLERS else o
+        return self[o]
+
+
+_INVISIBLE = _Invisible()
+
+
+_TMP_FOLDER = re.compile(r"(?<=var/folders/)([a-z0-9_]{2})/([a-z0-9_]{30})(?=/|\Z)")
+
+
+def _tmp_alias(m):
+    if shown_text(m.group(2), "name", "path") == m.group(2):
+        return m.group(0)                                       # the block prints this id as it is: so does the tool
+    _withheld(m.group(2), "token-shaped text", "path")          # (counted, and kept in the values file of a secret job: what is printed is the alias)
+    return "%s/tmp-id-%s" % (m.group(1), hashlib.sha256(m.group(2).encode("utf-8")).hexdigest()[:12])
+
+
+def guard_text(s, field=""):
+    """`s` with every FileVault-shaped recovery key withheld, and the id of a user's temporary folder under /var/folders (30 characters of a typed id that the
+    block takes for a token, on most paths of a Mac that has run a program) shown as a short alias of its sha256 when the block would withhold it, the same alias
+    for the same id; anything else as it is."""
+    if not isinstance(s, str):
+        return s
+    if "var/folders/" in s:
+        s = _TMP_FOLDER.sub(_tmp_alias, s)
+    if len(s) < 29 or "-" not in s:
+        return s
+    return _VAULT.sub(lambda m: _withheld(m.group(), "secret value", field), s)
+
+
+def _hex_text_views(raw):
+    """The ASCII runs (6 or more) of `raw` read as text with the NULs and the invisible characters taken out: as UTF-8 and as UTF-16, both byte orders, both offsets."""
+    texts = [raw.decode("utf-8", "replace")]
+    for codec in ("utf-16-le", "utf-16-be"):
+        for offset in (0, 1):
+            part = raw[offset:]
+            texts.append(part[:len(part) - len(part) % 2].decode(codec, "replace"))
+    views = []
+    for text in texts:
+        views += _ASCII_RUN.findall(unicodedata.normalize("NFKC", text.translate(_INVISIBLE)))
+    return views
+
+
+def guard_hex(s, field=""):
+    """`s` (data written as hexadecimal) or, when its text with the NULs and the invisible characters taken out holds a secret-shaped run, the placeholder."""
+    if not isinstance(s, str) or len(s) < 12 or len(s) > MAX_HEX_JUDGED or len(s) % 2:
+        return s
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError:
+        return s
+    if _NOT_PRINTABLE.search(raw) is None:
+        # all printable: the block read it as one run; only the key it does not know is looked for
+        return _withheld(s, "binary data holding a secret-shaped text", field) if _VAULT.search(raw.decode("ascii")) else s
+    views = _hex_text_views(raw)
+    if views and _quietly(lambda: any(_layer2(v, "") != v or _deny_text(v, "") != v or _suspect(v) or _VAULT.search(v) for v in views)):
+        return _withheld(s, "binary data holding a secret-shaped text", field)
+    return s
+
+
+def shown_text(s, kind, field=""):
+    """The text the answer prints for `s` once guard_text has been applied: what a filter or a sort over a name must look at."""
+    return _quietly(lambda: sealed_text(guard_text(s, field), kind, field))
+
+def emit_answer(doc, interrupted=None, **dumps_kwargs):
+    """emit() with one addition: the answer is sealed first, and a stop signal that arrived while it was sealed (held until the answer is out, on purpose) is
+    reported in it: the status is partial, `interrupted` names the signal. Prints the answer and returns the signal number for the exit code (or None)."""
+    obj = answer_object(doc)
+    late = pending_stop_signal() if interrupted is None else None
+    if late is not None and isinstance(obj, dict):
+        interrupted = late
+        obj["interrupted"] = signal_name(late)
+        if obj.get("status") == "complete":
+            obj["status"] = "partial"
+        basis = obj.get("status_basis")
+        obj["status_basis"] = "%s%s arrived while the answer was being sealed; the answer below is whole" % (basis + "; " if isinstance(basis, str) and basis else "", signal_name(late))
+    try:
+        text = json.dumps(obj, ensure_ascii=False, default=str, **dumps_kwargs)
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(obj, ensure_ascii=True, default=str, **dumps_kwargs)
+    print(text, flush=True)
+    return interrupted
+# END SHARED GUARD
+
+
 OWN_NAMES.update((
     "db", "parser", "status", "status_basis", "interrupted", "problems", "entries", "entry_count", "entries_inline", "complete_entries", "inline_limited",
     "inline_bounded_by_bytes", "inline_byte_limit", "kept_earlier_larger_result", "values", "filters_applied", "filters_unapplied", "schema", "source_used",
@@ -1635,7 +1758,7 @@ OWN_NAMES.update((
     "_whole_value_bytes_written", "_export", "_float", "state", "frames_valid", "frames_committed", "frames_in_file", "page_size", "checkpoint_sequence",
     "busy", "log", "checkpointed", "rollback_applied", "journal_present_after_open", "database_sha256_as_acquired", "database_sha256_after_open",
     "boundary", "max_seconds", "max_seconds_requested", "seconds_used", "stopped_after_z_pk", "last_z_pk", "last_start", "resume_since", "rows_read",
-    "to_go_on", "ZOBJECT", "ZSTRUCTUREDMETADATA", "ZSOURCE", "write_values", "export_oversize", "max_stage_bytes", "max_export_bytes", "contains_secret_values",
+    "to_go_on", "after_start_raw", "after_z_pk", "stream_blind_rows", "stream_blind_streams", "ZOBJECT", "ZSTRUCTUREDMETADATA", "ZSOURCE", "write_values", "export_oversize", "max_stage_bytes", "max_export_bytes", "contains_secret_values",
 ))
 FIELDS.update({
     "db": "path", "database": "path", "stream": "path", "value_string": "text", "start": "time", "end": "time", "created": "time",
@@ -1821,6 +1944,9 @@ class Shaper:
             return {"_export": "not written: %s" % (type(exc).__name__ if not isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc.strerror or "error"))}
 
     def cell(self, value, length, table, column, rowid):
+        return guarded(self.cell_unguarded(value, length, table, column, rowid))
+
+    def cell_unguarded(self, value, length, table, column, rowid):
         if length == TEXT_HANDLE and rowid is not None:
             return self.text(table, column, rowid)
         if isinstance(value, str):
@@ -1846,6 +1972,18 @@ class Shaper:
         return out
 
 
+def guarded(cell):
+    """A cell as the guard block sees it before the boundary does: a recovery key in text, and a token cut by NULs or invisible characters in the hex of a BLOB."""
+    if isinstance(cell, str):
+        return guard_text(cell, "value_string")
+    if isinstance(cell, dict):
+        if isinstance(cell.get("_text_head"), str):
+            cell["_text_head"] = guard_text(cell["_text_head"], "_text_head")
+        if isinstance(cell.get("_hex"), str):
+            cell["_hex"] = guard_hex(cell["_hex"], "_hex")
+    return cell
+
+
 def bounded_select(alias, prefix, column):
     """Two select terms for one column: its value, and its length slot. A BLOB longer than VALUE_CAP is not read at all (typeof() and
     length() are answered from the record header); a TEXT cell is not read by the statement either, its slot says TEXT_HANDLE and the
@@ -1863,13 +2001,42 @@ def bounded_select(alias, prefix, column):
     return ["%s AS %s" % (value, quote(prefix + "|" + column)), "%s AS %s" % (length, quote(prefix + "#" + column))]
 
 
-def sha256_copy(src, dst):
+class StageTimeUp(Exception):
+    """The tool's own clock (max_seconds) ran out while the database was being copied into the private directory."""
+
+
+def sha256_copy(src, dst, deadline=None):
+    """Copy `src` to a new file `dst` (mode 0600: the copy is the evidence's bytes) and return the sha256 of what was copied; StageTimeUp past `deadline`."""
     digest = hashlib.sha256()
-    with open(src, "rb") as read, open(dst, "wb") as write:
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with open(src, "rb") as read, os.fdopen(fd, "wb") as write:
         for block in iter(lambda: read.read(1 << 20), b""):
             digest.update(block)
             write.write(block)
+            if deadline is not None and time.monotonic() > deadline:
+                raise StageTimeUp()
     return digest.hexdigest()
+
+
+def remove_dead_stages(parent):
+    """Remove the private copies an earlier run of this tool left behind when it was killed without a chance to clean up (SIGKILL): a directory of
+    `parent` named for a process that no longer exists. A live process's directory, a link and anything else are left alone."""
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return
+    for entry in entries:
+        m = re.fullmatch(r"knowledgec-([0-9]+)-[A-Za-z0-9_]+", entry.name)
+        if m is None or entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            os.kill(int(m.group(1)), 0)
+            continue                                   # alive (or not ours to signal): not stale
+        except PermissionError:
+            continue
+        except (ProcessLookupError, OverflowError, ValueError):
+            pass
+        shutil.rmtree(entry.path, ignore_errors=True)
 
 
 def sha256_file(path):
@@ -1911,6 +2078,33 @@ def wal_inventory(path):
     info.update(page_size=page, checkpoint_sequence=seq, frames_in_file=total, frames_valid=valid, frames_committed=committed,
                 state="frames of the current generation counted from their salts; checksums not verified")
     return info
+
+
+def stream_key(name):
+    """A stream name as one string whatever SQLite stored (the key the filter and the stored value are compared by)."""
+    if isinstance(name, str):
+        return name
+    if isinstance(name, (bytes, bytearray)):
+        return bytes(name).decode("utf-8", "backslashreplace")
+    return str(name)
+
+
+def printed_stream(name):
+    """The text the answer prints for a stream name (a name longer than VALUE_CAP is printed as its head, a TEXT head)."""
+    text = stream_key(name)
+    if len(text) > VALUE_CAP:
+        return shown_text(text[:VALUE_CAP], "text", "_text_head")
+    return shown_text(text, "path", "stream")
+
+
+def read_inventory(connection, st, columns):
+    """Every stream of the file with its count and its first and last start, in one pass (GROUP BY), under the clock of the statement (sqlite3.Error when
+    it ran out or failed). The rows come back in no order: the answer lists them through print_order. Read once: the stream filter needs it before the rows,
+    the list of streams after them."""
+    if st["inventory"] is None:
+        start_col = "ZSTARTDATE" if "ZSTARTDATE" in columns else "NULL"
+        st["inventory"] = [tuple(r) for r in connection.execute("SELECT ZSTREAMNAME, COUNT(*), MIN(%s), MAX(%s) FROM ZOBJECT GROUP BY 1" % (start_col, start_col))]
+    return st["inventory"]
 
 
 def stage_parent():
@@ -1969,6 +2163,16 @@ def run_query(args):
         resolve_output(out_name, "out_file")   # refuses a place outside the run, or under inputs/
     since = to_apple(args["since"], "since") if args.get("since") else None
     until = to_apple(args["until"], "until") if args.get("until") else None
+    if args.get("stream") is not None and not isinstance(args["stream"], str):
+        fail("stream must be a string (an SQL LIKE pattern)", stream=args["stream"])
+    keyset = None
+    if "after_z_pk" in args or "after_start_raw" in args:
+        pk, start = args.get("after_z_pk"), args.get("after_start_raw")
+        if not isinstance(pk, int) or isinstance(pk, bool):
+            fail("after_z_pk must be an integer (resume.after_z_pk of the stopped run), given together with after_start_raw", after_z_pk=pk)
+        if start is not None and (not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start)):
+            fail("after_start_raw must be a number, or null when the last row read had no start (resume.after_start_raw of the stopped run)", after_start_raw=start)
+        keyset = (start, pk)
     try:
         bind_values(write_values, "knowledgec_query")
     except ValuesRefused as exc:
@@ -1985,7 +2189,8 @@ def run_query(args):
     st = {"stage": None, "sink": None, "paging": None, "streams": None, "shaper": None, "connection": None, "tables": [], "zobject": [], "joins": {},
           "fingerprint": None, "applied": [], "unapplied": [], "reasons": [], "problems": [], "count": 0, "unconverted": 0, "stopped": None,
           "interrupted": None, "last": {"z_pk": None, "start_raw": None}, "inline": [], "inline_state": {"bytes": 0, "full": False, "bounded_by_bytes": False},
-          "source": {"database": db, "staged": False, "sidecars": sidecars}, "abort": None, "until": deadline, "schema_read": False, "opener": None}
+          "source": {"database": db, "staged": False, "sidecars": sidecars}, "abort": None, "until": deadline, "schema_read": False, "opener": None,
+          "inventory": None, "stream_blind": None}
     problems = st["problems"]
     source = st["source"]
 
@@ -2007,18 +2212,22 @@ def run_query(args):
             try:
                 parent = stage_parent()
                 parent.mkdir(parents=True, exist_ok=True)
-                st["stage"] = stage = tempfile.mkdtemp(prefix="knowledgec-", dir=str(parent))
+                remove_dead_stages(parent)
+                st["stage"] = stage = tempfile.mkdtemp(prefix="knowledgec-%d-" % os.getpid(), dir=str(parent))
                 staged_db = os.path.join(stage, os.path.basename(db))
-                source["database_sha256"] = sha256_copy(db, staged_db)
+                source["database_sha256"] = sha256_copy(db, staged_db, deadline)
                 source["database_bytes"] = os.path.getsize(db)
                 for suffix in sidecars:
-                    sidecars[suffix]["sha256"] = sha256_copy(db + suffix, staged_db + suffix)
+                    sidecars[suffix]["sha256"] = sha256_copy(db + suffix, staged_db + suffix, deadline)
                 if "-wal" in sidecars:
                     source["wal"] = wal_inventory(db + "-wal")
                 source["staged"] = True
                 source["open_mode"] = "a private copy of the database and its sidecars, read-write so SQLite works on them, removed at the end"
                 connection = sqlite3.connect(staged_db)
                 st["opener"] = lambda: sqlite3.connect(staged_db)
+            except StageTimeUp:
+                st["stopped"] = "time"           # the copy used the whole of max_seconds: nothing was read, and the private copy is removed below
+                return
             except (OSError, sqlite3.Error, UnicodeError) as exc:
                 fail("the database could not be opened or staged", db=db,
                      reason=("%s: %s" % (type(exc).__name__, exc.strerror or "error")) if isinstance(exc, OSError) else type(exc).__name__)
@@ -2035,7 +2244,8 @@ def run_query(args):
         # Text that is not UTF-8 comes back with its bytes escaped, every byte still said.
         connection.text_factory = lambda b: b.decode("utf-8", "backslashreplace")
         try:
-            tables = [r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+            # (listed in the order the answer prints them: by the text printed, the withheld names in an order that is new every run, never by the bytes of a name)
+            tables = print_order([r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")], "text", text=lambda t: t if isinstance(t, str) else "")
         except UnicodeError as exc:
             # SQLite's own error message can hold a name that is not UTF-8, and Python then cannot even build the exception
             fail("this file is not a usable SQLite database: its schema holds text that is not UTF-8 and SQLite refused to read it", db=db, reason=type(exc).__name__)
@@ -2113,12 +2323,59 @@ def run_query(args):
         applied, unapplied, reasons = st["applied"], st["unapplied"], st["reasons"]
         if args.get("stream"):
             if "ZSTREAMNAME" in columns:
-                where.append("o.ZSTREAMNAME LIKE ?")
-                params.append(args["stream"])
+                # `stream` is an SQL LIKE pattern over the stream name AS THE ANSWER PRINTS IT, never over the stored name: a name that is withheld in the answer
+                # must not answer a probe (a count of 1 or 0 for a prefix would give it away, a character at a time). The streams are listed first (one pass), the
+                # pattern is tried on each printed name, and the rows are selected by the stored names of the streams that matched.
+                try:
+                    found = read_inventory(connection, st, columns)
+                except sqlite3.Error as exc:
+                    check_stop()
+                    if st["abort"] is None:
+                        fail("the query failed", reason=type(exc).__name__)
+                    st["stopped"] = st["abort"]
+                    return
+                keep, blind = set(), [0, 0]
+                for number, (name, n, _first, _last) in enumerate(found):
+                    if number % 64 == 0 and time.monotonic() > deadline:
+                        st["stopped"] = "time"
+                        return
+                    if name is None:
+                        continue
+                    shown = printed_stream(name)
+                    try:
+                        matched = connection.execute("SELECT ?1 LIKE ?2", (shown, args["stream"])).fetchone()[0]
+                    except sqlite3.Error as exc:
+                        check_stop()
+                        fail("stream is not a LIKE pattern SQLite will run", reason=type(exc).__name__)
+                    if matched:
+                        keep.add(stream_key(name))
+                    elif _MARK.search(shown):
+                        blind[0] += 1
+                        blind[1] += n
+                connection.create_function("kc_stream_kept", 1, lambda b: b is not None and b.decode("utf-8", "backslashreplace") in keep, deterministic=True)
+                where.append("kc_stream_kept(CAST(o.ZSTREAMNAME AS BLOB))")
                 applied.append("stream")
+                st["stream_blind"] = {"streams": blind[0], "rows": blind[1]}
+                if blind[1]:
+                    reasons.append("%d row(s) of %d stream(s) were not selected by stream and have a stream name that is withheld in this answer, so the pattern may match "
+                                   "what is withheld (stream_blind_rows); stream is matched against the name as printed, never against what is withheld" % (blind[1], blind[0]))
             else:
                 unapplied.append("stream")
                 reasons.append("stream could not be applied: this database has no ZSTREAMNAME column, so the rows are not filtered by stream")
+        if keyset is not None:
+            if "ZSTARTDATE" in columns and "Z_PK" in columns:
+                # the keyset of the order (ZSTARTDATE, Z_PK) the rows are read in: the rows after the last one a stopped run read, none read twice, none skipped (a
+                # NULL start sorts first)
+                if keyset[0] is None:
+                    where.append("(o.ZSTARTDATE IS NOT NULL OR o.Z_PK > ?)")
+                    params.append(keyset[1])
+                else:
+                    where.append("(o.ZSTARTDATE > ? OR (o.ZSTARTDATE = ? AND o.Z_PK > ?))")
+                    params += [keyset[0], keyset[0], keyset[1]]
+                applied.append("after_z_pk")
+            else:
+                unapplied.append("after_z_pk")
+                reasons.append("after_z_pk could not be applied: this database has no ZSTARTDATE and Z_PK to order the rows by, so the read starts at the first row")
         for name, value, op in (("since", since, ">="), ("until", until, "<=")):
             if value is None:
                 continue
@@ -2147,7 +2404,7 @@ def run_query(args):
             st["sink"] = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
             OWN_NAMES.add(out_name)
         else:
-            st["paging"] = SealedPage("knowledgec_query", [db, args.get("stream"), args.get("since"), args.get("until")], limit, inline_bytes)
+            st["paging"] = SealedPage("knowledgec_query", [db, args.get("stream"), args.get("since"), args.get("until"), keyset], limit, inline_bytes)
         sink, paging = st["sink"], st["paging"]
         inline, inline_state, last = st["inline"], st["inline_state"], st["last"]
         shaper = st["shaper"] = Shaper(connection, export, max_export, st["opener"] if HAVE_HANDLES else None)
@@ -2208,7 +2465,7 @@ def run_query(args):
                 "uuid": None,
             }
             if isinstance(uuid, (bytes, bytearray)):
-                entry["uuid"] = bytes(uuid).hex()
+                entry["uuid"] = guard_hex(bytes(uuid).hex(), "uuid")
             elif uuid is not None:
                 entry["uuid"] = cell("o", "ZUUID")
             other = {c: cell("o", c) for c, (v, n, _r) in shaped["o"].items() if c not in STANDARD and (v is not None or n is not None)}
@@ -2236,26 +2493,32 @@ def run_query(args):
                         inline_state["full"] = True
                 else:
                     paging.add(entry)
-            if st["count"] % CHECK_EVERY == 0 and time.monotonic() > deadline:
+            if time.monotonic() > deadline:        # (every row: a row of a few hundred cells of 4,000 characters takes a fifth of a second to judge, and 256 of them a minute)
                 st["stopped"] = "time"
                 break
 
         # The list of streams: every stream in the file, whatever the filters. After a stop on the clock it gets a few seconds of its own.
         streams = st["streams"] = SealedPage("knowledgec_streams", [db], 200, 256 << 10)
         if "ZSTREAMNAME" in columns:
-            start_col = "ZSTARTDATE" if "ZSTARTDATE" in columns else "NULL"
             st["until"] = time.monotonic() + INVENTORY_SECONDS if st["stopped"] == "time" else max(st["until"], time.monotonic() + INVENTORY_SECONDS)
             st["abort"] = None
             try:
-                for name, n, first, last_start in connection.execute(
-                        "SELECT ZSTREAMNAME, COUNT(*), MIN(%s), MAX(%s) FROM ZOBJECT GROUP BY 1 ORDER BY 2 DESC, 1" % (start_col, start_col)):
-                    streams.add({"stream": name, "count": n, "first_start_raw": plain(first), "last_start_raw": plain(last_start),
-                                 "first_start": when(first), "last_start": when(last_start)})
+                listed = read_inventory(connection, st, columns)
             except sqlite3.Error as exc:
                 check_stop()
+                listed = None
                 why = "it ran past its time" if st["abort"] else type(exc).__name__
                 problems.append("the stream inventory could not be %s (%s): the list of streams is %s" % (
                     "made" if st["stopped"] is None else "finished", why, "not complete" if st["stopped"] else "not complete (the entries are)"))
+            if listed is not None:
+                # listed by count, most first; streams of one count in the order they are printed (print_order: the text printed, a random order among the
+                # withheld names that is new every run), so the place of a withheld name says nothing about its bytes
+                shown_rows = [(guard_text(stream_key(name), "stream") if name is not None else None, n, first, last_start) for name, n, first, last_start in listed]
+                ordered = print_order(shown_rows, "path", text=lambda r: r[0] if isinstance(r[0], str) else "")
+                ordered.sort(key=lambda r: -r[1])
+                for name, n, first, last_start in ordered:
+                    streams.add({"stream": name, "count": n, "first_start_raw": plain(first), "last_start_raw": plain(last_start),
+                                 "first_start": when(first), "last_start": when(last_start)})
         else:
             problems.append("this database has no ZSTREAMNAME column, so there is no stream inventory and no entry has a stream")
 
@@ -2314,14 +2577,19 @@ def run_query(args):
         problems_all.append("the tool stopped on %s after %d entr%s: the entries below are a prefix of the result in start order (the whole prefix is in %s), "
                             "and the rest of the table was not read" % (when_text, count, "y" if count == 1 else "ies", complete or "the answer"))
         resume = {"rows_read": count, "stopped_after_z_pk": last["z_pk"], "last_start_raw": last["start_raw"]}
-        if isinstance(last["start_raw"], (int, float)) and math.isfinite(last["start_raw"]) and "ZSTARTDATE" in {n for n, _t in st["zobject"]}:
-            earlier = when(last["start_raw"] - 0.000001)
-            resume["resume_since"] = earlier
-            resume["to_go_on"] = ("run again with since = resume_since (a microsecond before the last start read, so no row is skipped; the rows that "
-                                  "start at last_start_raw are read again), the same stream and until, and a larger max_seconds if the database is large")
+        zcols = {n for n, _t in st["zobject"]}
+        finite = isinstance(last["start_raw"], (int, float)) and not isinstance(last["start_raw"], bool) and math.isfinite(last["start_raw"])
+        if count and "ZSTARTDATE" in zcols and "Z_PK" in zcols and isinstance(last["z_pk"], int) and (finite or last["start_raw"] is None):
+            resume["after_start_raw"] = last["start_raw"]
+            resume["after_z_pk"] = last["z_pk"]
+            if finite:
+                resume["resume_since"] = when(last["start_raw"] - 0.000001)
+            resume["to_go_on"] = ("run again with after_start_raw and after_z_pk set to these two values (and the same db, stream, since and until, and a larger max_seconds "
+                                  "if the database is large): the read goes on with the next row of the order (start, then Z_PK), no row twice and none skipped, "
+                                  "also when many rows share one start. resume_since, a microsecond before the last start, is the older way: it reads the rows of that start again")
         elif count == 0:
-            resume["to_go_on"] = ("no entry was read before the stop (the statement was still sorting the rows by start time): run again with a larger "
-                                  "max_seconds (at most %d), or narrow the read with stream, since and until" % MAX_SECONDS_LIMIT)
+            resume["to_go_on"] = ("no entry was read before the stop (the database was being copied, or the statement was still sorting the rows by start time): run again "
+                                  "with a larger max_seconds (at most %d), or narrow the read with stream, since and until" % MAX_SECONDS_LIMIT)
         else:
             resume["to_go_on"] = "this database has no usable start time to resume from: narrow the read with stream, or read the table with sqlite_query"
     if interrupted is not None:
@@ -2369,6 +2637,7 @@ def run_query(args):
                            "where the whole is in the database (_where); a TEXT cell is read through a blob handle, so only its head is loaded; "
                            "export_oversize: true (a secret job) writes each whole value to a file and names it." % VALUE_CAP},
         "filters_applied": st["applied"],
+        **({"stream_blind_rows": st["stream_blind"]["rows"], "stream_blind_streams": st["stream_blind"]["streams"]} if st["stream_blind"] is not None else {}),
         **({"filters_unapplied": st["unapplied"]} if st["unapplied"] else {}),
         "limits": {"max_seconds": max_seconds, **({"max_seconds_requested": requested_seconds} if requested_seconds != max_seconds else {}),
                    "seconds_used": round(time.monotonic() - started, 1)},
@@ -2381,7 +2650,7 @@ def run_query(args):
         "note": note,
     }
     hold_signals()                     # the work is done: a signal now waits for the answer instead of replacing it (judging takes seconds at most)
-    emit(result, indent=2)
+    interrupted = emit_answer(result, interrupted, indent=2)       # (a signal that arrives while the answer is sealed is named in it)
     close_values()
     if interrupted is not None:
         sys.exit(128 + interrupted)

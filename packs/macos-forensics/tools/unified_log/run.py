@@ -53,6 +53,8 @@ KEEP = ["timestamp", "time", "processImagePath", "process", "subsystem", "catego
 ENTRY_KEYS = {"timestamp", "time", "eventMessage", "message", "raw_message", "process", "subsystem"}
 OUTPUT_NAMES = ("unifiedlogs.jsonl", "unifiedlogs.ndjson", "unifiedlog.stderr", ".logarchive-input")
 FIRST = 10
+PREDICATE_TEXT = re.compile(r"(?i)\b(?:event|composed)?message\b|formatstring")     # the fields of a predicate that hold the text of a message
+UNREADABLE_KEPT = 10000       # unreadable directories kept to list the first FIRST of them in the order printed (they are all counted)
 
 
 # BEGIN SHARED STOP
@@ -60,8 +62,9 @@ FIRST = 10
 # time limit does: the work in hand is closed, what was done is kept and named, ONE JSON answer says status partial and `interrupted` (the signal's
 # name), and the exit code is 128 plus the signal number. The handler raises Interrupted (a BaseException, so no `except Exception` swallows it) from
 # wherever the signal lands; a write that must be whole (a row of a result file, the answer) is made under held(), and the signal is delivered when
-# it ends, and hold_signals() holds them for good once the answer is being written. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's interrupt, the
-# kill of the reader process this tool started: its own children only, never a search by name).
+# it ends, and hold_signals() holds them for good once the answer is being written; a signal that arrives meanwhile is found by pending_stop_signal() before the
+# answer is printed, and the answer says so. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's
+# interrupt, the kill of the reader process this tool started and of its descendants: its own, never a search by name).
 import signal
 
 STOP = {"signal": None, "hooks": []}
@@ -125,6 +128,18 @@ class held:
             except (AttributeError, ValueError, OSError):
                 pass
         return False
+
+
+def pending_stop_signal():
+    """The stop signal that arrived while signals were held and was not delivered, or None (how a signal that lands while the answer is sealed is found)."""
+    try:
+        pending = signal.sigpending()
+    except (AttributeError, OSError):
+        return None
+    for signum in STOP_SIGNALS:
+        if signum in pending:
+            return signum
+    return None
 
 
 def hold_signals():
@@ -1500,6 +1515,117 @@ def emit(doc, **dumps_kwargs):
 # END SHARED BOUNDARY
 
 
+# BEGIN SHARED GUARD
+# The same text is in fsevents_parse, knowledgec_query and unified_log (a macos-forensics test holds the copies equal). The boundary block above is a copy of the
+# windows-forensics pack's and is not edited here; these are the two checks this pack makes around it until the block itself is revised, and they call only what
+# the block already has.
+#  - guard_hex: data written as hexadecimal is judged by the block as printable runs of the bytes as they are, so a token that a NUL or an invisible character cuts
+#    into pieces of 15 characters or fewer shows no run that looks like a secret, and is printed whole. A field that is hex (a BLOB's head, a UUID, the raw bytes of a
+#    path) is judged here once more on the text the bytes make with the NULs and the invisible characters taken out, in UTF-8 and in UTF-16 (both byte orders and
+#    offsets), the way the block reads a text; it is withheld when that text holds a secret-shaped run.
+#  - guard_text: a FileVault personal recovery key (six groups of four capitals and digits, 2-9, joined by `-`) is not a shape the block knows; it is withheld here.
+#    The id of a user's temporary folder (`/var/folders/xx/` and 30 characters) that the block would withhold as a token is shown as an alias of its sha256.
+#  - emit_answer: the answer is printed as emit() prints it, but a stop signal that arrived while it was sealed is named in it.
+# Both withhold through the block's own _withheld, so they are counted, listed and written to the values file like everything else it withholds.
+_VAULT = re.compile(r"(?<![A-Za-z0-9])[A-Z2-9]{4}(?:-[A-Z2-9]{4}){5}(?![A-Za-z0-9])")
+_ASCII_RUN = re.compile(r"[\x20-\x7e]{6,}")
+_NOT_PRINTABLE = re.compile(rb"[^\x20-\x7e]")
+_INVISIBLE_CATS = frozenset(("Cf", "Mn", "Me", "Zl", "Zp"))
+
+
+class _Invisible(dict):
+    """A translation table that drops what cuts a token without showing: the NUL, the format characters, the combining marks and the fillers. Other control
+    characters stay: dropping them as well joins the printable bytes of random data into runs (1% of 4 KB of random bytes then held a random-looking run)."""
+
+    def __missing__(self, o):
+        if len(self) > 20000:
+            self.clear()
+        self[o] = None if o == 0 or unicodedata.category(chr(o)) in _INVISIBLE_CATS or o in _FILLERS else o
+        return self[o]
+
+
+_INVISIBLE = _Invisible()
+
+
+_TMP_FOLDER = re.compile(r"(?<=var/folders/)([a-z0-9_]{2})/([a-z0-9_]{30})(?=/|\Z)")
+
+
+def _tmp_alias(m):
+    if shown_text(m.group(2), "name", "path") == m.group(2):
+        return m.group(0)                                       # the block prints this id as it is: so does the tool
+    _withheld(m.group(2), "token-shaped text", "path")          # (counted, and kept in the values file of a secret job: what is printed is the alias)
+    return "%s/tmp-id-%s" % (m.group(1), hashlib.sha256(m.group(2).encode("utf-8")).hexdigest()[:12])
+
+
+def guard_text(s, field=""):
+    """`s` with every FileVault-shaped recovery key withheld, and the id of a user's temporary folder under /var/folders (30 characters of a typed id that the
+    block takes for a token, on most paths of a Mac that has run a program) shown as a short alias of its sha256 when the block would withhold it, the same alias
+    for the same id; anything else as it is."""
+    if not isinstance(s, str):
+        return s
+    if "var/folders/" in s:
+        s = _TMP_FOLDER.sub(_tmp_alias, s)
+    if len(s) < 29 or "-" not in s:
+        return s
+    return _VAULT.sub(lambda m: _withheld(m.group(), "secret value", field), s)
+
+
+def _hex_text_views(raw):
+    """The ASCII runs (6 or more) of `raw` read as text with the NULs and the invisible characters taken out: as UTF-8 and as UTF-16, both byte orders, both offsets."""
+    texts = [raw.decode("utf-8", "replace")]
+    for codec in ("utf-16-le", "utf-16-be"):
+        for offset in (0, 1):
+            part = raw[offset:]
+            texts.append(part[:len(part) - len(part) % 2].decode(codec, "replace"))
+    views = []
+    for text in texts:
+        views += _ASCII_RUN.findall(unicodedata.normalize("NFKC", text.translate(_INVISIBLE)))
+    return views
+
+
+def guard_hex(s, field=""):
+    """`s` (data written as hexadecimal) or, when its text with the NULs and the invisible characters taken out holds a secret-shaped run, the placeholder."""
+    if not isinstance(s, str) or len(s) < 12 or len(s) > MAX_HEX_JUDGED or len(s) % 2:
+        return s
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError:
+        return s
+    if _NOT_PRINTABLE.search(raw) is None:
+        # all printable: the block read it as one run; only the key it does not know is looked for
+        return _withheld(s, "binary data holding a secret-shaped text", field) if _VAULT.search(raw.decode("ascii")) else s
+    views = _hex_text_views(raw)
+    if views and _quietly(lambda: any(_layer2(v, "") != v or _deny_text(v, "") != v or _suspect(v) or _VAULT.search(v) for v in views)):
+        return _withheld(s, "binary data holding a secret-shaped text", field)
+    return s
+
+
+def shown_text(s, kind, field=""):
+    """The text the answer prints for `s` once guard_text has been applied: what a filter or a sort over a name must look at."""
+    return _quietly(lambda: sealed_text(guard_text(s, field), kind, field))
+
+def emit_answer(doc, interrupted=None, **dumps_kwargs):
+    """emit() with one addition: the answer is sealed first, and a stop signal that arrived while it was sealed (held until the answer is out, on purpose) is
+    reported in it: the status is partial, `interrupted` names the signal. Prints the answer and returns the signal number for the exit code (or None)."""
+    obj = answer_object(doc)
+    late = pending_stop_signal() if interrupted is None else None
+    if late is not None and isinstance(obj, dict):
+        interrupted = late
+        obj["interrupted"] = signal_name(late)
+        if obj.get("status") == "complete":
+            obj["status"] = "partial"
+        basis = obj.get("status_basis")
+        obj["status_basis"] = "%s%s arrived while the answer was being sealed; the answer below is whole" % (basis + "; " if isinstance(basis, str) and basis else "", signal_name(late))
+    try:
+        text = json.dumps(obj, ensure_ascii=False, default=str, **dumps_kwargs)
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(obj, ensure_ascii=True, default=str, **dumps_kwargs)
+    print(text, flush=True)
+    return interrupted
+# END SHARED GUARD
+
+
 OWN_NAMES.update((
     "path", "parser", "engine", "reader", "version", "platform", "status", "status_basis", "interrupted", "exit_code", "timed_out", "command", "output",
     "output_sha256", "entry_count", "entries", "entries_inline", "unparsed_lines", "decoded_coverage", "staging", "problems", "warnings", "stderr",
@@ -1508,7 +1634,7 @@ OWN_NAMES.update((
     "support_files", "tracev3_files", "timesync_files", "uuidtext_files", "dsc_files", "other_files", "directories_unreadable", "first_directories_unreadable",
     "directory", "stopped_at_files", "staged", "files", "bytes", "duplicates_identical", "sources", "counting_stopped_at_line", "reader_outcome",
     "budget", "seconds_used", "seconds_for_reader", "staging_seconds", "census_seconds", "boundary", "max_stage_files", "max_stage_bytes", "out_dir", "holds",
-    "looked_for", "link", "found_as", "conflicts", "conflict_count", "directory", "files", "bytes",
+    "looked_for", "link", "found_as", "conflicts", "conflict_count", "directory", "files", "bytes", "predicate_names_message_text",
 ))
 FIELDS.update({
     "path": "path", "output": "path", "stderr": "path", "out_dir": "path", "sources": "path", "directory": "path", "link": "path", "command": "text",
@@ -1576,9 +1702,15 @@ def inventory(path, budget):
 
     def unreadable(exc):
         census["directories_unreadable"] += 1
-        if len(census["first_directories_unreadable"]) < FIRST:
+        if len(census["first_directories_unreadable"]) < UNREADABLE_KEPT:
             census["first_directories_unreadable"].append({"directory": getattr(exc, "filename", None),
                                                            "reason": "%s: %s" % (type(exc).__name__, exc)})
+
+    def listed():
+        # the first FIRST of them in the order the answer prints their names (the order of a walk is the directory's: it would give the place of a withheld name away)
+        census["first_directories_unreadable"] = print_order(census["first_directories_unreadable"], "path",
+                                                              text=lambda d: d["directory"] if isinstance(d.get("directory"), str) else "")[:FIRST]
+        return census
 
     seen = 0
     for dirpath, _dirs, names in os.walk(path, followlinks=False, onerror=unreadable):
@@ -1587,7 +1719,7 @@ def inventory(path, budget):
             seen += 1
             if seen > budget:
                 census["stopped_at_files"] = budget
-                return census
+                return listed()
             low = name.lower()
             if low.endswith(".tracev3"):
                 census["tracev3_files"] += 1
@@ -1599,7 +1731,7 @@ def inventory(path, budget):
                 census["uuidtext_files"] += 1
             else:
                 census["other_files"] += 1
-    return census
+    return listed()
 
 
 def stage(path, scratch, max_files, max_bytes, deadline):
@@ -1644,7 +1776,7 @@ def stage(path, scratch, max_files, max_bytes, deadline):
                 conflicts.append(rel)
     if conflicts:
         fail("a member is in both diagnostics and uuidtext with different bytes; nothing was staged: which one the reader should see is "
-             "not for this tool to choose", conflicts=sorted(conflicts)[:FIRST], conflict_count=len(conflicts))
+             "not for this tool to choose", conflicts=print_order(conflicts, "text", text=lambda c: c)[:FIRST], conflict_count=len(conflicts))
     try:
         os.makedirs(scratch, exist_ok=False)
     except OSError as exc:
@@ -1713,22 +1845,62 @@ def count_output(path, limit, deadline):
             if not (ENTRY_KEYS & row.keys()):
                 cov["records_without_entry_fields"] += 1
                 if len(first_without) < FIRST:
-                    first_without.append({"line": number, "keys": sorted(row)[:20]})
+                    first_without.append({"line": number, "keys": print_order(list(row), "name")[:20]})
                 continue
             cov["entry_records"] += 1
             if len(entries) < limit:
-                kept = {k: row.get(k) for k in KEEP if row.get(k) is not None}
-                entries.append(kept or {"keys": sorted(row)[:20]})
+                kept = {k: (guard_text(row[k], k) if isinstance(row.get(k), str) else row[k]) for k in KEEP if row.get(k) is not None}
+                entries.append(kept or {"keys": print_order(list(row), "name")[:20]})
     cov["first_unparsed_lines"] = first_unparsed
     cov["first_records_without_entry_fields"] = first_without
     return cov, entries
 
 
+def descendants(pid):
+    """The processes below `pid` in the process tree (its children, theirs, and so on), from the table of parent pids; empty when `ps` cannot say. Followed from the
+    reader this tool started: its own descendants, never a search by name."""
+    table = None
+    for ps in (shutil.which("ps"), "/bin/ps", "/usr/bin/ps"):
+        if not ps:
+            continue
+        try:
+            table = subprocess.run([ps, "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+            break
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if table is None:
+        return []
+    children = {}
+    for line in table.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, stack = [], list(children.get(pid, []))
+    while stack:
+        child = stack.pop()
+        if child in found or child == os.getpid():
+            continue
+        found.append(child)
+        stack.extend(children.get(child, []))
+    return found
+
+
 def kill_reader(proc):
-    """End the reader this tool started (its own child, never a search by name)."""
+    """End the reader this tool started and what it started (its own child and that child's descendants, never a search by name): a reader that runs helpers
+    leaves them behind when only its own pid is killed. The reader is stopped first so that it starts no more while its tree is read."""
     try:
         if proc.poll() is None:
+            try:
+                os.kill(proc.pid, signal.SIGSTOP)
+            except OSError:
+                pass
+            below = descendants(proc.pid)
             proc.kill()
+            for pid in below:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
     except OSError:
         pass
 
@@ -1792,6 +1964,20 @@ def run_log(args):
              note="Linux images should install Mandiant macos-UnifiedLogs v0.7.0 or later.")
     if not apple and any(args.get(k) for k in ("predicate", "start", "end")):
         fail("predicate/start/end require Apple's log command; unifiedlog_iterator keeps the full JSONL for downstream queries")
+    for key in ("predicate", "start", "end"):
+        if args.get(key) is not None and not isinstance(args[key], str):
+            fail("%s must be a string" % key, **{key: args[key]})
+    predicate_warning = None
+    if apple and args.get("predicate"):
+        # Apple's `log` evaluates the predicate over the messages as decoded, and entry_count is the count of what it matched: a predicate that names the text of a
+        # message tells a true guess of a piece the preview withholds from a false one, by the count (the tool cannot judge text inside the reader).
+        if PREDICATE_TEXT.search(args["predicate"]) and os.environ.get("SECRET_OUTPUT") == "1":
+            fail("predicate is refused in a job run as secret output when it names the text of a message (eventMessage, composedMessage, formatString): entry_count "
+                 "would answer guesses of text that the preview withholds. Select by process, subsystem, category, sender or time here, and look for the text in the "
+                 "reader's output file inside a job of its own", predicate_names_message_text=True)
+        predicate_warning = ("predicate was evaluated by Apple's log over the messages as it decoded them, not over the text this answer prints: when it names the text "
+                             "of a message, entry_count is a count of matches that a preview with withheld text does not show (a count can tell a guess of withheld text "
+                             "from a wrong one); a job run as secret output refuses such a predicate")
 
     # Where every file this run writes would land, checked before the directory is touched; a name that
     # already exists (a file, or a link) is an earlier run's output and is not overwritten.
@@ -1816,6 +2002,8 @@ def run_log(args):
     stderr_path = names["unifiedlog.stderr"]
     scratch = os.path.join(out_dir, ".logarchive-input")
     problems, warnings = [], []
+    if predicate_warning:
+        warnings.append(predicate_warning)
     staging = None
     timed_out = False
     returncode = None
@@ -1990,7 +2178,7 @@ def run_log(args):
         "note": note,
     }
     hold_signals()                     # the work is done: a signal now waits for the answer instead of replacing it (judging takes seconds at most)
-    emit(result, indent=2)
+    interrupted = emit_answer(result, interrupted, indent=2)       # (a signal that arrives while the answer is sealed is named in it)
     close_values()
     if interrupted is not None:
         sys.exit(128 + interrupted)

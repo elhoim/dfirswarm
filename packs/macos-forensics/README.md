@@ -52,7 +52,7 @@ what it staged removed and the reader it started ended.
 The boundary is the windows-forensics pack's block, copied byte for byte (a test holds
 the copies equal): an allow-list per field type, a deny-list for free text and a second
 check written apart. It works by shape, so a secret of another shape (a plain password, a
-passphrase, a UUID-shaped key, anything under 16 characters in a name) is printed, and
+passphrase, a UUID-shaped key, a BitLocker recovery key, anything under 16 characters in a name) is printed, and
 a file whose secrets matter is read in a job run with `secret_output: true`.
 
 **One goal template**: `mac-compromise.md`.

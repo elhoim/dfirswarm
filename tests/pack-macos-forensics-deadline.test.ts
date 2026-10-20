@@ -136,7 +136,7 @@ async function runWithLimit(script: string, cwd: string, args: unknown, ms: numb
 test("fsevents_parse refuses a contains that can backtrack without end, at once and as JSON: (a|aa)+$ over a path of 40 characters took 37 s", async () => {
   await withCwd(async (cwd) => {
     const dir = await fsDir(cwd, "ev", { "0000000000000001": gz(fsPage("2SLD", [fsRecord("tmp/" + "a".repeat(40) + "b", 1n, CREATED, 1n)])) });
-    for (const pattern of ["(a|aa)+$", "(a+)+b", "(?:a*)*b", "(a*)*$", "(.*a){12}", "(?=a+)+b", "(a)\\1", "^(a?){30}a{30}$", "(?<=a)b", "(x+x+)+y", "a*a*a*b", "a?".repeat(30) + "a".repeat(30), "(?i)" + "a?".repeat(9) + "b"]) {
+    for (const pattern of ["(a|aa)+$", "(a+)+b", "(?:a*)*b", "(a*)*$", "(.*a){12}", "(?=a+)+b", "(a)\\1", "^(a?){30}a{30}$", "(?<=a)b", "(x+x+)+y", "a*a*a*b", "a?".repeat(30) + "a".repeat(30), "(?i)" + "a?".repeat(9) + "b", "((((((a?){8}){8}){8}){8}){8}){8}b"]) {
       const started = Date.now();
       const run = await runWithLimit(FS, cwd, { path: dir, contains: pattern }, 20_000);
       assert.equal(run.ended, true, `${pattern}: the tool did not end in 20 s`);

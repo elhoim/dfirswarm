@@ -179,8 +179,8 @@ test("the rules the split keeps: observation against verdict, bounded negatives,
   has("filesystem/apfs-encryption", /`fvdeinfo` is for Core Storage; it is not assumed to read APFS/);
   has("logs/unified", /Complete is not a coverage claim/);
   has("logs/unified", /the reader's whole output named in `output` is not judged and holds every message as decoded/);
-  has("artifacts/knowledgec", /That is by shape: a plain password, a passphrase, a UUID-shaped key or anything under 16 characters in a name is printed/);
-  has("artifacts/fsevents", /a plain password or an ordinary-looking name is printed/);
+  has("artifacts/knowledgec", /That is by shape: a plain password, a passphrase, a UUID-shaped key, a BitLocker key or anything under 16 characters in a name is printed/);
+  has("artifacts/fsevents", /a plain password, a BitLocker key or an ordinary-looking name is printed/);
   has("artifacts/plists", /A file that does not parse is a row with the kind of error and its place, never the file's text/);
   has("logs/unified", /not proof that everything between them was recorded/);
   has("logs/unified-readers", /It does not bring back an entry that was never persisted, was removed by retention or was redacted/);

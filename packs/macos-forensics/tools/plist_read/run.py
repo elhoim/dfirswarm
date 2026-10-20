@@ -93,8 +93,9 @@ SECRET_KEY = re.compile(
 # time limit does: the work in hand is closed, what was done is kept and named, ONE JSON answer says status partial and `interrupted` (the signal's
 # name), and the exit code is 128 plus the signal number. The handler raises Interrupted (a BaseException, so no `except Exception` swallows it) from
 # wherever the signal lands; a write that must be whole (a row of a result file, the answer) is made under held(), and the signal is delivered when
-# it ends, and hold_signals() holds them for good once the answer is being written. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's interrupt, the
-# kill of the reader process this tool started: its own children only, never a search by name).
+# it ends, and hold_signals() holds them for good once the answer is being written; a signal that arrives meanwhile is found by pending_stop_signal() before the
+# answer is printed, and the answer says so. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's
+# interrupt, the kill of the reader process this tool started and of its descendants: its own, never a search by name).
 import signal
 
 STOP = {"signal": None, "hooks": []}
@@ -158,6 +159,18 @@ class held:
             except (AttributeError, ValueError, OSError):
                 pass
         return False
+
+
+def pending_stop_signal():
+    """The stop signal that arrived while signals were held and was not delivered, or None (how a signal that lands while the answer is sealed is found)."""
+    try:
+        pending = signal.sigpending()
+    except (AttributeError, OSError):
+        return None
+    for signum in STOP_SIGNALS:
+        if signum in pending:
+            return signum
+    return None
 
 
 def hold_signals():
@@ -838,6 +851,14 @@ def main():
                 "is not a secret's is printed as it is, and the key names themselves are printed.",
     }
     hold_signals()                     # the work is done: a signal now waits for the answer instead of replacing it
+    late = pending_stop_signal() if interrupted is None else None
+    if late is not None:
+        # it arrived after the last read and before the answer: the answer says so
+        interrupted = late
+        result["interrupted"] = signal_name(late)
+        if result["status"] == "complete":
+            result["status"] = "partial"
+        result["status_basis"] = "%s; %s arrived while the answer was being written; the answer below is whole" % (result["status_basis"], signal_name(late))
     print(json.dumps(result, indent=2, default=str))
     if interrupted is not None:
         sys.exit(128 + interrupted)

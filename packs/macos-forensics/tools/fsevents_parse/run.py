@@ -72,6 +72,7 @@ REGEX_SECONDS = 0.5                   # one search of `contains` over one shown 
 REGEX_TOTAL_SECONDS = 20.0            # the searches that ran out of time may take this much in all, then the filter is given up
 MAX_CONTAINS_CHARS = 256
 MAX_CONTAINS_REPEATS = 8              # `a?` x 30 followed by `a` x 30 is exponential over thirty letters: few repeats of any kind, large or small
+MAX_CONTAINS_PRODUCT = 16             # repeats inside repeats: the counts along a chain multiply (`((a?){8}){8}` can split a run of letters in 9^8 ways), so the product is bounded
 DEFAULT_INLINE_BYTES = 1 << 20
 FIRST_BYTES = 256 << 10
 FIRST_PROBLEMS = 100
@@ -97,8 +98,9 @@ UUID_TEXT = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f
 # time limit does: the work in hand is closed, what was done is kept and named, ONE JSON answer says status partial and `interrupted` (the signal's
 # name), and the exit code is 128 plus the signal number. The handler raises Interrupted (a BaseException, so no `except Exception` swallows it) from
 # wherever the signal lands; a write that must be whole (a row of a result file, the answer) is made under held(), and the signal is delivered when
-# it ends, and hold_signals() holds them for good once the answer is being written. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's interrupt, the
-# kill of the reader process this tool started: its own children only, never a search by name).
+# it ends, and hold_signals() holds them for good once the answer is being written; a signal that arrives meanwhile is found by pending_stop_signal() before the
+# answer is printed, and the answer says so. The first signal counts: later ones do nothing while the tool cleans up. STOP["hooks"] run first (a database connection's
+# interrupt, the kill of the reader process this tool started and of its descendants: its own, never a search by name).
 import signal
 
 STOP = {"signal": None, "hooks": []}
@@ -162,6 +164,18 @@ class held:
             except (AttributeError, ValueError, OSError):
                 pass
         return False
+
+
+def pending_stop_signal():
+    """The stop signal that arrived while signals were held and was not delivered, or None (how a signal that lands while the answer is sealed is found)."""
+    try:
+        pending = signal.sigpending()
+    except (AttributeError, OSError):
+        return None
+    for signum in STOP_SIGNALS:
+        if signum in pending:
+            return signum
+    return None
 
 
 def hold_signals():
@@ -1621,6 +1635,117 @@ def emit(doc, **dumps_kwargs):
 # END SHARED BOUNDARY
 
 
+# BEGIN SHARED GUARD
+# The same text is in fsevents_parse, knowledgec_query and unified_log (a macos-forensics test holds the copies equal). The boundary block above is a copy of the
+# windows-forensics pack's and is not edited here; these are the two checks this pack makes around it until the block itself is revised, and they call only what
+# the block already has.
+#  - guard_hex: data written as hexadecimal is judged by the block as printable runs of the bytes as they are, so a token that a NUL or an invisible character cuts
+#    into pieces of 15 characters or fewer shows no run that looks like a secret, and is printed whole. A field that is hex (a BLOB's head, a UUID, the raw bytes of a
+#    path) is judged here once more on the text the bytes make with the NULs and the invisible characters taken out, in UTF-8 and in UTF-16 (both byte orders and
+#    offsets), the way the block reads a text; it is withheld when that text holds a secret-shaped run.
+#  - guard_text: a FileVault personal recovery key (six groups of four capitals and digits, 2-9, joined by `-`) is not a shape the block knows; it is withheld here.
+#    The id of a user's temporary folder (`/var/folders/xx/` and 30 characters) that the block would withhold as a token is shown as an alias of its sha256.
+#  - emit_answer: the answer is printed as emit() prints it, but a stop signal that arrived while it was sealed is named in it.
+# Both withhold through the block's own _withheld, so they are counted, listed and written to the values file like everything else it withholds.
+_VAULT = re.compile(r"(?<![A-Za-z0-9])[A-Z2-9]{4}(?:-[A-Z2-9]{4}){5}(?![A-Za-z0-9])")
+_ASCII_RUN = re.compile(r"[\x20-\x7e]{6,}")
+_NOT_PRINTABLE = re.compile(rb"[^\x20-\x7e]")
+_INVISIBLE_CATS = frozenset(("Cf", "Mn", "Me", "Zl", "Zp"))
+
+
+class _Invisible(dict):
+    """A translation table that drops what cuts a token without showing: the NUL, the format characters, the combining marks and the fillers. Other control
+    characters stay: dropping them as well joins the printable bytes of random data into runs (1% of 4 KB of random bytes then held a random-looking run)."""
+
+    def __missing__(self, o):
+        if len(self) > 20000:
+            self.clear()
+        self[o] = None if o == 0 or unicodedata.category(chr(o)) in _INVISIBLE_CATS or o in _FILLERS else o
+        return self[o]
+
+
+_INVISIBLE = _Invisible()
+
+
+_TMP_FOLDER = re.compile(r"(?<=var/folders/)([a-z0-9_]{2})/([a-z0-9_]{30})(?=/|\Z)")
+
+
+def _tmp_alias(m):
+    if shown_text(m.group(2), "name", "path") == m.group(2):
+        return m.group(0)                                       # the block prints this id as it is: so does the tool
+    _withheld(m.group(2), "token-shaped text", "path")          # (counted, and kept in the values file of a secret job: what is printed is the alias)
+    return "%s/tmp-id-%s" % (m.group(1), hashlib.sha256(m.group(2).encode("utf-8")).hexdigest()[:12])
+
+
+def guard_text(s, field=""):
+    """`s` with every FileVault-shaped recovery key withheld, and the id of a user's temporary folder under /var/folders (30 characters of a typed id that the
+    block takes for a token, on most paths of a Mac that has run a program) shown as a short alias of its sha256 when the block would withhold it, the same alias
+    for the same id; anything else as it is."""
+    if not isinstance(s, str):
+        return s
+    if "var/folders/" in s:
+        s = _TMP_FOLDER.sub(_tmp_alias, s)
+    if len(s) < 29 or "-" not in s:
+        return s
+    return _VAULT.sub(lambda m: _withheld(m.group(), "secret value", field), s)
+
+
+def _hex_text_views(raw):
+    """The ASCII runs (6 or more) of `raw` read as text with the NULs and the invisible characters taken out: as UTF-8 and as UTF-16, both byte orders, both offsets."""
+    texts = [raw.decode("utf-8", "replace")]
+    for codec in ("utf-16-le", "utf-16-be"):
+        for offset in (0, 1):
+            part = raw[offset:]
+            texts.append(part[:len(part) - len(part) % 2].decode(codec, "replace"))
+    views = []
+    for text in texts:
+        views += _ASCII_RUN.findall(unicodedata.normalize("NFKC", text.translate(_INVISIBLE)))
+    return views
+
+
+def guard_hex(s, field=""):
+    """`s` (data written as hexadecimal) or, when its text with the NULs and the invisible characters taken out holds a secret-shaped run, the placeholder."""
+    if not isinstance(s, str) or len(s) < 12 or len(s) > MAX_HEX_JUDGED or len(s) % 2:
+        return s
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError:
+        return s
+    if _NOT_PRINTABLE.search(raw) is None:
+        # all printable: the block read it as one run; only the key it does not know is looked for
+        return _withheld(s, "binary data holding a secret-shaped text", field) if _VAULT.search(raw.decode("ascii")) else s
+    views = _hex_text_views(raw)
+    if views and _quietly(lambda: any(_layer2(v, "") != v or _deny_text(v, "") != v or _suspect(v) or _VAULT.search(v) for v in views)):
+        return _withheld(s, "binary data holding a secret-shaped text", field)
+    return s
+
+
+def shown_text(s, kind, field=""):
+    """The text the answer prints for `s` once guard_text has been applied: what a filter or a sort over a name must look at."""
+    return _quietly(lambda: sealed_text(guard_text(s, field), kind, field))
+
+def emit_answer(doc, interrupted=None, **dumps_kwargs):
+    """emit() with one addition: the answer is sealed first, and a stop signal that arrived while it was sealed (held until the answer is out, on purpose) is
+    reported in it: the status is partial, `interrupted` names the signal. Prints the answer and returns the signal number for the exit code (or None)."""
+    obj = answer_object(doc)
+    late = pending_stop_signal() if interrupted is None else None
+    if late is not None and isinstance(obj, dict):
+        interrupted = late
+        obj["interrupted"] = signal_name(late)
+        if obj.get("status") == "complete":
+            obj["status"] = "partial"
+        basis = obj.get("status_basis")
+        obj["status_basis"] = "%s%s arrived while the answer was being sealed; the answer below is whole" % (basis + "; " if isinstance(basis, str) and basis else "", signal_name(late))
+    try:
+        text = json.dumps(obj, ensure_ascii=False, default=str, **dumps_kwargs)
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(obj, ensure_ascii=True, default=str, **dumps_kwargs)
+    print(text, flush=True)
+    return interrupted
+# END SHARED GUARD
+
+
 OWN_NAMES.update((
     "path", "parser", "status", "status_basis", "interrupted", "files", "gzip_files", "files_by_state", "per_file", "per_file_pages", "log_identity",
     "records", "record_count", "records_inline", "complete_records", "records_before_filter", "event_id_range", "inline_limited", "inline_bounded_by_bytes",
@@ -1734,7 +1859,7 @@ def inflate(fh, scan, cap):
                 rest += len(more)
             scan.not_decoded_bytes += rest
             scan.problem("bytes after the last gzip member", "%d byte(s) at compressed offset %d are not a gzip member" % (rest, offset),
-                         compressed_offset=offset, bytes=rest, first_bytes_hex=pending[:8].hex())
+                         compressed_offset=offset, bytes=rest, first_bytes_hex=guard_hex(pending[:8].hex(), "first_bytes_hex"))
             return
         engine = zlib.decompressobj(16 + zlib.MAX_WBITS)
         scan.member_starts.append((scan.expanded, index))
@@ -1912,7 +2037,7 @@ def parse_records(page, at, version, scan, emit, member):
             continue
         raw_path = page[start:end]
         scan.records["decoded"] += 1
-        text = raw_path.decode("utf-8", "replace")
+        text = guard_text(raw_path.decode("utf-8", "replace"), "path")
         record = {"path": text, "event_id": event_id, "flags": decode_flags(flags), "flags_raw": flags,
                   "node_id": node, "version": version, "file": scan.path, "member": member,
                   "page_offset": at, "record_offset": at + start, "parser": PARSER}
@@ -1921,7 +2046,7 @@ def parse_records(page, at, version, scan, emit, member):
             record["flags_undecoded"] = undecoded
         if "\ufffd" in text:
             record["path_invalid_utf8"] = True
-            record["path_raw_hex"] = raw_path.hex()
+            record["path_raw_hex"] = guard_hex(raw_path.hex(), "path_raw_hex")
         emit(record)
 
 
@@ -1957,7 +2082,7 @@ def parse_pages(src, scan, emit, max_page):
             scan.bytes_skipped += skipped
             scan.problem("bytes not placed in a page",
                          "%d byte(s) from decompressed offset %d are not a page header and were skipped to the next 1SLD or 2SLD" % (skipped, at),
-                         offset=at, bytes=skipped, first_bytes_hex=head[:8].hex())
+                         offset=at, bytes=skipped, first_bytes_hex=guard_hex(head[:8].hex(), "first_bytes_hex"))
             continue
         length = struct.unpack_from("<I", head, 8)[0]
         if length < 12 or length > max_page:
@@ -2006,7 +2131,7 @@ def scan_file(scan, emit, max_expanded, max_page):
             scan.compressed = False
             scan.state = "unsupported"
             scan.problem("not an FSEvents record file", "neither gzip nor a page header: it starts with %s" % (head.hex() or "nothing"),
-                         first_bytes_hex=head.hex())
+                         first_bytes_hex=guard_hex(head.hex(), "first_bytes_hex"))
             return scan
         try:
             parse_pages(Source(chunks), scan, emit, max_page)
@@ -2051,7 +2176,7 @@ def log_identity(directory):
     if UUID_TEXT.fullmatch(text):
         out["uuid"] = text
     else:
-        out["raw_hex"] = data[:64].hex()
+        out["raw_hex"] = guard_hex(data[:64].hex(), "raw_hex")
     out["note"] = "the log's own identity, not the APFS volume's UUID"
     return out
 
@@ -2061,7 +2186,8 @@ def contains_problem(text):
     without end (`(a|aa)+$` over 40 characters took 37 s), and a path is chosen by whoever wrote the volume. So: at most MAX_CONTAINS_CHARS
     characters; no back-reference, conditional, lookaround, atomic group or possessive repeat; no repeat of 9 or more inside any repeat, and no
     repeat at all (`(a?){30}` is exponential), or alternation, inside a repeat of 9 or more; at most two repeats of 9 or more, and at most
-    MAX_CONTAINS_REPEATS repeats of any size (thirty `a?` and thirty `a` are exponential too). What is left can still be slow (two
+    MAX_CONTAINS_REPEATS repeats of any size (thirty `a?` and thirty `a` are exponential too); repeats of 2 to 8 inside one another whose counts multiply
+    to more than MAX_CONTAINS_PRODUCT (`((((((a?){8}){8}){8}){8}){8}){8}b` is exponential, `(\\d{1,3}\\.){3}` is not). What is left can still be slow (two
     repeats over the same characters take quadratic time), so each search also runs under a timer (REGEX_SECONDS)."""
     if len(text) > MAX_CONTAINS_CHARS:
         return "it is longer than %d characters" % MAX_CONTAINS_CHARS
@@ -2072,7 +2198,7 @@ def contains_problem(text):
     big = [0]
     total = [0]
 
-    def walk(items, in_any, in_big):
+    def walk(items, in_any, in_big, product=1):
         for op, av in items:
             name = str(op)
             if name in ("GROUPREF", "GROUPREF_EXISTS"):
@@ -2092,17 +2218,20 @@ def contains_problem(text):
                 big[0] += 1 if large else 0
                 if big[0] > 2:
                     return "it has more than two repeats of 9 or more"
-                reason = walk(body, in_any or high > 1, in_big or large)
+                inner = product * (high if 1 < high <= 8 else 1)
+                if inner > MAX_CONTAINS_PRODUCT:
+                    return "it has repeats inside repeats whose counts multiply to more than %d" % MAX_CONTAINS_PRODUCT
+                reason = walk(body, in_any or high > 1, in_big or large, inner)
             elif name == "BRANCH":
                 if in_big:
                     return "it has an alternation inside a long repeat"
                 reason = None
                 for branch in av[1]:
-                    reason = walk(branch, in_any, in_big)
+                    reason = walk(branch, in_any, in_big, product)
                     if reason:
                         break
             elif name == "SUBPATTERN":
-                reason = walk(av[3], in_any, in_big)
+                reason = walk(av[3], in_any, in_big, product)
             else:
                 reason = None
             if reason:
@@ -2186,7 +2315,7 @@ def run_scan(args):
     if os.path.isdir(path):
         identity = log_identity(path)
         try:
-            names = sorted(os.listdir(path))
+            names = os.listdir(path)
         except OSError as exc:
             fail("the directory could not be listed", path=path, reason="%s: %s" % (type(exc).__name__, exc.strerror or "error"))
         for name in names:
@@ -2204,6 +2333,9 @@ def run_scan(args):
         identity = log_identity(os.path.dirname(os.path.abspath(path)))
     if not targets:
         fail("no record files there", path=path, **notes)
+    # (the files are read, and listed in per_file, in the order the answer prints their names: by the text printed, the withheld names in an order that is new
+    # every run; the order of the bytes of a name, or of the directory, would give the place of a withheld name away)
+    targets = print_order(targets, "path", text=lambda t: t)
 
     # The values file (the originals of what the boundary withholds) is decided before anything else is made.
     try:
@@ -2253,9 +2385,8 @@ def run_scan(args):
             return hit is not None
 
         def emit_record(record):
+            check_time()                          # (every record: a path of 250 KB takes 0.4 s to judge, and 512 of them are minutes)
             totals["before_filter"] += 1
-            if totals["before_filter"] % 512 == 0:
-                check_time()
             if wanted and not (wanted & set(record["flags"])):
                 return
             if pattern is not None and not matches(record):
@@ -2435,7 +2566,7 @@ def run_scan(args):
     }
     OWN_NAMES.add(result["note"])
     hold_signals()                     # the work is done: a signal now waits for the answer instead of replacing it (judging takes seconds at most)
-    emit(result, indent=2)
+    interrupted = emit_answer(result, interrupted, indent=2)       # (a signal that arrives while the answer is sealed is named in it)
     close_values()
     if interrupted is not None:
         sys.exit(128 + interrupted)
