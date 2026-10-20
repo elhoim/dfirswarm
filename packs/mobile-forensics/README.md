@@ -52,16 +52,21 @@ opens a `Manifest.db`'s `-wal` and `-journal` in a working copy, with the file.
   seals. It reads UTF-8 and UTF-16 text (the byte order the header declares) and
   says so. A `-wal` or a `-journal` beside the file is listed and not read, so what
   only the WAL holds is absent, and the status is partial while one holds bytes.
-  `contains` only narrows the values file (it needs `write_values`): the answer
-  lists every fragment and does not say which matched, and it is accepted only as
-  an expression of bounded cost (no `*`, `+` or `{m,}`, no nested repeat, no
-  lookaround, no back reference), so that how long it takes says nothing about the
-  text. A job that asks for `write_values` is run as secret output.
+  `contains` only marks the rows of the values file (it needs `write_values`):
+  the file holds a row for every fragment, each with `match` 1, 0 or 2 (not decided
+  in time), so its size and digest do not depend on the expression; the answer
+  lists every fragment and does not say which matched. It is accepted only as an
+  expression of bounded cost (no `*`, `+` or `{m,}`, no nested repeat, no
+  lookaround, no back reference, at most 256 steps), so that how long it takes says
+  almost nothing about the text (at most about 0.06 s of CPU per 32,768
+  characters, for an expression that repeats one class of characters 250 times).
+  A job that asks for `write_values` is run as secret output.
 - `protobuf_peek` reads the wire structure of a protobuf message without its
   schema: field numbers, wire types, absolute offsets and field paths, numbers
-  raw with their zigzag reading. It does not say what a field means. A group makes
-  a message `unsupported`, a structural error names its offset, and a bounded
-  window is read, not a whole file. Only a top-level varint is printed, and only for
+  raw with their zigzag reading. It does not say what a field means. A group or a
+  structural error makes the window `not_accepted` (one status, no count, in the
+  same words for every such window; what the parser found is in the sealed values
+  file), and a bounded window is read, not a whole file. Only a top-level varint is printed, and only for
   a window that is a message (it parses whole, is not printable text and meets a
   stated rule, which is stricter for a window aimed with `offset` or `length`, so
   that a window aimed at a string or a token is not read back as numbers): the text of a

@@ -20,9 +20,16 @@ export const LIB = join(ROOT, "tool-library");
  * bytes); `null` is the JSON document `null` for a tool, which the tools' own tests send on purpose, and no stdin for
  * a snippet (`noneForNull`), which is how a builder that reads nothing is called.
  */
+/** Whether an error of a child's stdin only means the child exited without reading it (the only error the helpers ignore). */
+export function childGone(err: { code?: string }): boolean {
+  return err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED";
+}
+
 function feedStdin(stream: Writable | null, stdin: unknown, noneForNull = false): void {
   if (!stream) return;
-  stream.on("error", () => {});
+  stream.on("error", (err: NodeJS.ErrnoException) => {
+    if (!childGone(err)) throw err; // any other failure of the write surfaces (an uncaught exception fails the test file)
+  });
   if (stdin === undefined || (noneForNull && stdin === null)) stream.end();
   else stream.end(JSON.stringify(stdin));
 }

@@ -35,6 +35,14 @@ and the encoding of each fragment, and never its text. The text is written only 
 `write_values: true`, in a job run with `secret_output: true`, to a 0600 file under $OUT that
 the answer names (the shared block below has the rules).
 
+WHAT `contains` DOES. It marks, and never drops. The values file holds a row for every fragment found, whatever the
+expression says; `match` is 1 for a fragment it matched (and for every fragment when no expression was given), 0 for one it did
+not match and 2 for one it could not decide (it ran out of time). The file's size does not depend on the expression, and nor
+does the answer: a file that was shorter when the expression matched less would tell the requester, through its size, whether
+text it cannot see matches. Rows carry a random `run`, so the file's digest is different in every run. What stays a function of
+the hidden text is the file's size as JSON writes the text (a quote, a backslash, a control or non-ASCII character is escaped),
+which no expression changes.
+
 The file is read-only to this tool: it is opened for reading, as bytes, and never written.
 """
 import errno
@@ -43,11 +51,14 @@ import json
 import math
 import os
 import re
+import select
 import signal
 import struct
 import sys
 import tempfile
 import time
+import unicodedata
+import warnings
 from pathlib import Path
 
 try:  # Python 3.11 and later; the module was sre_parse before
@@ -58,8 +69,9 @@ except ImportError:  # pragma: no cover
 PARSER = "sqlite_freespace/2"
 TOOL = "sqlite_freespace"
 VALUES_NAME = "sqlite-freespace-values.jsonl"
-VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, file (the real path), page, where, encoding, "
-                 "offset, bytes, characters, value (the fragment's text, whole)")
+VALUES_FORMAT = ("JSON Lines, mode 0600, one row for every fragment found: finding_id, file (the real path), page, where, encoding, "
+                 "offset, bytes, characters, match (1 matched `contains` or none was given, 0 did not match, 2 not decided), run "
+                 "(random, the same in every row of this run), value (the fragment's text, whole)")
 
 
 # --- shared with the pack's other tools: begin ---------------------------------------------
@@ -81,16 +93,28 @@ VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, file (the real path), page,
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
 #      real path.
+#   5. The harness shows the requester a sealed file's size and digest, so neither may answer a
+#      question about text nobody can see: a filter marks rows and never drops them, a window or an
+#      expression that is not accepted writes a file of the same size as one that is, and every row
+#      carries a random per-run `run`, so that no two runs share a digest.
+#   6. One document is written, whole: from the moment the answer is being written a stop signal is
+#      ignored, so a reader that is slow never gets a truncated answer followed by a failure.
 
 WITHHELD = "<recovery-password-shaped name withheld>"
 PATHS_WITHHELD = [0]
-# A BitLocker recovery password is eight groups of six digits. A file or a directory named after
-# one (people save a key under its own name) would print it in every row that names the file.
-RECOVERY = re.compile(rb"(?<![0-9])(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})(?![0-9])")
-RECOVERY_UTF16LE = re.compile(
-    rb"(?<![0-9]\x00)" + (rb"-\x00".join([rb"((?:[0-9]\x00){6})"] * 8)) + rb"(?![0-9]\x00)"
-)
-RECOVERY_TEXT = re.compile(RECOVERY.pattern.decode("ascii"))
+# A BitLocker recovery password is eight groups of six digits: 48 digits. People save a key under its own name, and not
+# only in the dashed form: with spaces, underscores or dots between the groups, with no separator at all, with another
+# dash, in full-width or Arabic-Indic digits, with a zero-width character inside, and a name can carry part of it. A name
+# is shaped like one when it holds RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most
+# three separator or invisible characters between two digits, after NFKC folding (which turns full-width digits,
+# superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a phone number or an id.
+RECOVERY_DIGITS = 42
+GAP = r"[\s_.\-\u00ad\u058a\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
+RECOVERY_TEXT = re.compile(r"\d(?:%s{0,3}\d){%d,}" % (GAP, RECOVERY_DIGITS - 1))
+
+
+def key_shaped(text):
+    return RECOVERY_TEXT.search(unicodedata.normalize("NFKC", text)) is not None
 
 
 def shown(path, count=True):
@@ -99,7 +123,7 @@ def shown(path, count=True):
         return path
     parts = path.split("/")
     for i, part in enumerate(parts):
-        if RECOVERY.search(part.encode("utf-8", "replace")) or RECOVERY_UTF16LE.search(part.encode("utf-16-le", "replace")):
+        if key_shaped(part):
             parts[i] = WITHHELD
             if count:
                 PATHS_WITHHELD[0] += 1
@@ -108,7 +132,10 @@ def shown(path, count=True):
 
 def scrub(text):
     """Text that may quote a path, with anything shaped like a recovery password withheld."""
-    return RECOVERY_TEXT.sub(WITHHELD, text)
+    text = RECOVERY_TEXT.sub(WITHHELD, text)
+    if key_shaped(text):      # digits only NFKC folds (superscripts, circled digits): the text is not printed at all
+        return WITHHELD
+    return text
 
 
 def describe(exc):
@@ -172,9 +199,27 @@ def wrap_up(answer):
     return answer
 
 
+def emit(text):
+    """Write one document to standard output, whole. From here a stop signal is ignored: the answer is written in one piece
+    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure."""
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    data = memoryview((text + "\n").encode("utf-8"))
+    try:
+        sys.stdout.flush()
+        descriptor = sys.stdout.fileno()
+        while len(data):
+            try:
+                data = data[os.write(descriptor, data):]
+            except BlockingIOError:      # a pipe set non-blocking by its owner and full: wait until it can take more
+                select.select([], [descriptor], [], 1.0)
+    except OSError:       # the reader went away: there is nobody to answer
+        raise SystemExit(1)
+
+
 def fail(message, **extra):
     answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
-    print(dumps(wrap_up(answer)))
+    emit(dumps(wrap_up(answer)))
     raise SystemExit(1)
 
 
@@ -204,7 +249,7 @@ def stopped(signum):
     answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
                       "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
                       "interrupted": name})
-    print(dumps(answer))
+    emit(dumps(answer))
     raise SystemExit(128 + signum)
 
 
@@ -345,6 +390,7 @@ class SecretValues:
         self.out = os.environ.get("OUT") or ""
         self.path = None
         self.shown = None
+        self.run = os.urandom(8).hex()      # in every row: the file's digest is different in every run, whatever it holds
         if not enabled:
             return
         if not (self.job and self.out):
@@ -380,7 +426,7 @@ class SecretValues:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "run": self.run, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -443,7 +489,7 @@ def read_args():
 
 
 def send(result):
-    print(dumps(result, indent=2))
+    emit(dumps(result, indent=2))
 
 
 def run_main(main):
@@ -467,13 +513,16 @@ DEFAULT_MAX_SECONDS = 240
 MAX_SECONDS_CAP = 270       # manifest.json timeout_seconds (300) less the time to write the answer
 INLINE_BYTES = 1 << 20
 REGEX_SECONDS = 2.0         # one fragment: a pattern inside the cost bound below never gets near it
-REGEX_TOTAL_SECONDS = 10.0  # all fragments together; past it the rest are written without the expression being run
 # `contains` runs only on text nobody can see, so how long it takes must not depend on that text. Python's re backtracks, and
 # a pattern with nested repeats, a lookahead or a back reference can be made to run for seconds on a fragment that holds a
 # guess and for microseconds on one that does not: one bit per call. Only patterns of a cost the tool can bound are accepted
-# (see linear_pattern); the clocks above are a second line, and neither is ever reported.
+# (see linear_pattern). The bound is small, not zero: an accepted expression still costs a little more on text that its first
+# element matches than on text it does not. Measured on 32,768 characters, the slowest of 171 accepted candidate expressions (one
+# class repeated 250 times, against text of that class) took 0.06 s of CPU, and 1.1 s when the bound was 16384; that residual is
+# stated in the manifest, the README and the skill. A fragment the clock stops (REGEX_SECONDS, or max_seconds) is marked 2 in the values
+# file and the answer says partial; the time the expression takes counts toward max_seconds.
 MAX_PATTERN_CHARS = 256
-MAX_PATTERN_COST = 16384
+MAX_PATTERN_COST = 256
 MAX_REPEAT_COUNT = 4096
 PROBLEMS_INLINE = 200
 TEXT_ENCODINGS = {1: "UTF-8", 2: "UTF-16LE", 3: "UTF-16BE"}
@@ -563,7 +612,9 @@ def linear_pattern(source):
     if len(source) > MAX_PATTERN_CHARS:
         return None, "contains is at most %d characters" % MAX_PATTERN_CHARS
     try:
-        tree = sre_parse.parse(source, re.I)
+        with warnings.catch_warnings():      # a FutureWarning ("possible nested set") would go to stderr
+            warnings.simplefilter("ignore")
+            tree = sre_parse.parse(source, re.I)
     except (re.error, RecursionError, OverflowError) as exc:
         return None, "contains is not a valid regex (%s)" % type(exc).__name__
     unbounded = sre_constants.MAXREPEAT
@@ -613,7 +664,9 @@ def linear_pattern(source):
         walk(tree)
     except Refused as why:
         return None, str(why)
-    return re.compile(source, re.I), None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return re.compile(source, re.I), None
 
 
 class OutOfTime(Exception):
@@ -868,10 +921,10 @@ def main():
                   "freelist_trunk_pages": 0, "freelist_leaf_pages": 0, "freeblocks": 0, "unallocated_gaps": 0,
                   "regions_scanned": 0, "bytes_scanned": 0, "fragments_found": 0,
                   "fragments_unverified": 0, "candidates_dropped_as_overlapping": 0, "pages_not_reached": 0}
-        regex_spent = [0.0]        # seconds spent running contains; not counted against max_seconds, so the page where a run stops never depends on the text
+        undecided = [0]            # fragments contains could not be decided on: marked 2 in the values file, said in the answer
 
         def out_of_time():
-            return time.monotonic() - regex_spent[0] > deadline
+            return time.monotonic() > deadline
         stopped_at = None
         serial = 0
 
@@ -888,17 +941,17 @@ def main():
                 text = decode(raw, encoding)
                 characters = len(text)
                 counts["fragments_found"] += 1
-                # contains only narrows what is written to the sealed values file. The answer lists every fragment whatever
-                # the expression says: a list of the fragments that matched would answer, for each fragment, whether text
-                # you cannot see matches, and a few hundred calls rebuild a token.
-                hit = True
-                if pattern is not None and regex_spent[0] < REGEX_TOTAL_SECONDS:
-                    began = time.monotonic()
+                # contains only marks the rows of the sealed values file (match 1, 0 or 2): every fragment is a row, so that the
+                # file's size does not say how many matched. The answer lists every fragment whatever the expression says: a
+                # list of the fragments that matched would answer, for each fragment, whether text you cannot see matches, and a
+                # few hundred calls rebuild a token.
+                hit = 1
+                if pattern is not None:
                     try:
-                        hit = timed_search(pattern, text, min(REGEX_SECONDS, REGEX_TOTAL_SECONDS - regex_spent[0])) is not None
+                        hit = 1 if timed_search(pattern, text, max(0.01, min(REGEX_SECONDS, deadline - time.monotonic()))) is not None else 0
                     except Timeout:
-                        hit = True      # not decided: written to the sealed file, and nothing about it is reported
-                    regex_spent[0] += time.monotonic() - began
+                        hit = 2         # not decided: marked in the file, counted, and the answer says partial
+                        undecided[0] += 1
                 absolute = (number - 1) * page_size + base_in_page + start
                 verify.seek(absolute)
                 again = verify.read(len(raw))
@@ -912,9 +965,8 @@ def main():
                        "offset": absolute, "offset_verified": verified, "bytes": len(raw),
                        "characters": characters, "parser": PARSER, **extra}
                 fragments.add(row)
-                if hit:
-                    values.add(finding, {"file": os.path.realpath(db), "page": number, "where": where, "encoding": encoding,
-                                         "offset": absolute, "bytes": len(raw), "characters": characters}, text)
+                values.add(finding, {"file": os.path.realpath(db), "page": number, "where": where, "encoding": encoding,
+                                     "offset": absolute, "bytes": len(raw), "characters": characters, "match": hit}, text)
 
         scan.seek(0)
         number = 0
@@ -981,6 +1033,10 @@ def main():
             stopped_at = number
             counts["pages_not_reached"] = in_file - number + 1
             problems.add("time limit", "max_seconds (%s) passed in page %d: that page may be partly read, and pages %d to %d are not examined" % (max_seconds, number, number, in_file), False, page=number)
+        if undecided[0]:
+            problems.add("contains not decided", "contains was not decided on %d fragment(s) within its time (2 seconds for one, or max_seconds): "
+                         "they are rows of the values file marked match 2, as if they might have matched" % undecided[0], False)
+            counts["contains_not_decided"] = undecided[0]
         if counts["pages_not_btree"] and any(k.startswith("freelist") for k in problems.kinds):
             problems.add("pages not read after a freelist problem",
                          "%d pages are neither b-tree pages nor on the freelist as walked. Overflow pages hold live content "
@@ -1027,12 +1083,12 @@ def main():
         "fragments": fragments.page,
         "fragment_count": counts["fragments_found"],
         "filter": scrub(contains) if contains else None,
-        "filter_narrows": ("the values file only (the fragments listed here are all of them, whatever the expression matched; a fragment the "
-                           "expression could not be decided on within its time limit is written as if it had matched, and that is not reported)") if contains else None,
+        "filter_marks": ("the rows of the values file only: every fragment is a row there, with match 1 (matched), 0 (did not) or 2 (not decided "
+                         "in time, counted under problems); the fragments listed here are all of them, whatever the expression matched") if contains else None,
         "pages": paging,
         "companions": companions,
-        "secret_values": {**values.summary(), "written": None, "contains_secret_values": None,
-                          "count_withheld": "contains narrowed the values file: how many fragments matched is not shown"} if pattern is not None else values.summary(),
+        "secret_values": ({**values.summary(), "rows_are_all_fragments": "match marks the rows contains matched; how many matched is not shown"}
+                          if pattern is not None else values.summary()),
         "paths_withheld": PATHS_WITHHELD[0],
         **({"paths_note": "A path component shaped like a recovery password is withheld from every path in this answer and in "
                           "the files it names; the real path is in the values file when write_values was asked for."}
@@ -1048,12 +1104,13 @@ def main():
                 "this answer, and a non-empty one makes the status partial. Encodings are UTF-8 and UTF-16LE "
                 "(UTF-16BE instead of it where the header declares UTF-16BE); a negative covers only those encodings, only the regions "
                 "counted under scanned, and says nothing about a vacuumed database or one that used secure_delete. "
-                "contains is accepted only with write_values: it narrows the sealed values file, and the list in this "
+                "contains is accepted only with write_values: it marks the rows of the sealed values file (match 1 matched, 0 did not, 2 "
+                "was not decided in time; every fragment is a row, so the file's size does not depend on the expression), and the list in this "
                 "answer is every fragment whatever it matched (how many matched is not shown), since a list of the "
                 "matches would answer, fragment by fragment, whether text you cannot see matches. contains is accepted only as an expression "
-                "of bounded cost (no unbounded repeat, no nested repeat, no lookaround, no back reference): how long it runs on text you "
-                "cannot see must not tell you about the text, so a fragment it could not be decided on in time is written as if it had "
-                "matched and nothing reports it. Status is complete (every page examined, nothing inconsistent, no companion left unread), "
+                "of bounded cost (no unbounded repeat, no nested repeat, no lookaround, no back reference, at most 256 steps): how long "
+                "it runs on text you cannot see should not tell you about the text; the bound keeps what remains small, and does not make it zero. "
+                "A fragment it could not be decided on in time is marked 2 and the status is partial. Status is complete (every page examined, nothing inconsistent, no companion left unread), "
                 "partial (a limit, a companion not read, or pages or regions not examined) or corrupt (the file's "
                 "structure disagreed with itself where problems says; the fragments found are still reported, and "
                 "a corrupt chain means text beyond it was not reached). A fragment is a candidate to corroborate, "

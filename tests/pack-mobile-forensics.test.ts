@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ROOT, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
+import { ROOT, childGone, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
 
 const PACK = process.env.MOBILE_PACK ?? join(ROOT, "packs", "mobile-forensics");
 const TOOLS = join(PACK, "tools");
@@ -223,16 +223,16 @@ type Fragment = {
 };
 type Paged = { matched: number; returned: number; truncated: boolean; all_results?: string };
 type Free = {
-  db: string; parser: string; status: string; fragments: Fragment[]; fragment_count: number; filter: string | null; filter_narrows: string | null;
+  db: string; parser: string; status: string; status_basis?: string; fragments: Fragment[]; fragment_count: number; filter: string | null; filter_marks: string | null;
   problems: { kind: string; detail: string }[]; problem_kinds: Record<string, number>; stopped_before_page: number | null;
   database: { page_size: number; text_encoding: string; bytes: number; pages_in_file: number; journal_mode_on_disk: string };
   freelist: { declared: number; walked: number; trunk_pages: number };
   scanned: Record<string, number>; encodings_scanned: string[];
   companions: Record<string, { bytes: number; examined: boolean }>;
-  secret_values: { requested: boolean; written: number | null; values_file: string | null; contains_secret_values: boolean | null; count_withheld?: string };
+  secret_values: { requested: boolean; written: number | null; values_file: string | null; contains_secret_values: boolean | null; rows_are_all_fragments?: string };
   pages: { fragments: Paged; problems: Paged }; paths_withheld: number; truncated: boolean;
 };
-type Value = { finding_id: string; file: string; page: number; where: string; encoding: string; offset: number; bytes: number; characters: number; value: string };
+type Value = { finding_id: string; file: string; page: number; where: string; encoding: string; offset: number; bytes: number; characters: number; value: string; match?: number; run?: string };
 
 /** The freeblocks of every b-tree page, by walking the file with the format's own rules. */
 function freeblocks(file: Buffer): { page: number; block: number; size: number; base: number }[] {
@@ -253,18 +253,23 @@ function freeblocks(file: Buffer): { page: number; block: number; size: number; 
   return out;
 }
 
-async function freespace(cwd: string, db: string, args: Record<string, unknown> = {}, name = "out"): Promise<{ answer: Free; values: Value[]; out: string; run: Run }> {
+/**
+ * The tool as a job runs it. `rows` is every row of the values file (one for every fragment found: `contains` marks them with match 1, 0 or
+ * 2 and never drops one); `values` is the rows an expression matched or could not decide, which is what a reader of the file filters on.
+ */
+async function freespace(cwd: string, db: string, args: Record<string, unknown> = {}, name = "out"): Promise<{ answer: Free; values: Value[]; rows: Value[]; out: string; run: Run }> {
   const run = await asJob(FREESPACE, cwd, { db, write_values: true, ...args }, name);
   const answer = body<Free>(run);
   const valuesFile = join(cwd, name, "sqlite-freespace-values.jsonl");
-  let values = (await exists(valuesFile)) ? await jsonl<Value>(valuesFile) : [];
+  const rows = (await exists(valuesFile)) ? await jsonl<Value>(valuesFile) : [];
+  let values = rows.filter((v) => v.match !== 0);
   if (!values.length && answer.fragments.some((f) => f.text !== undefined)) {
     // The tool as it was before the fix printed each fragment's text in the answer: read it from there, so that a
     // test run against that code fails on the assertion that names the defect.
     values = answer.fragments.map((f, i) => ({ finding_id: `old${i}`, file: db, page: f.page, where: f.where, encoding: f.encoding, offset: f.offset,
       bytes: Buffer.byteLength(f.text ?? ""), characters: [...(f.text ?? "")].length, value: f.text ?? "" }));
   }
-  return { answer, values, out: join(cwd, name), run };
+  return { answer, values, rows, out: join(cwd, name), run };
 }
 
 // --- sqlite_freespace ----------------------------------------------------------------
@@ -613,10 +618,11 @@ test("sqlite_freespace prints none of a file that is not SQLite, only its size a
   });
 });
 
-test("sqlite_freespace refuses a filter that backtracks, so it cannot run for seconds on a fragment and never on another", async () => {
+test("sqlite_freespace refuses a filter that backtracks or can cost much per start, so it cannot run for seconds on a fragment and never on another", async () => {
   // A filter that backtracks only when a lookahead holds ran 2 seconds on a fragment that held a guess and microseconds on one that did
   // not, and the answer counted the slow ones (scanned.contains_timeouts, problem_kinds): one bit about text nobody could see, per call.
-  // Run against the code before the fix, the first expression is accepted and the run is slow.
+  // Run against the code before the fix, the first expression is accepted and the run is slow. The bound is 256 steps: at 16,384 an
+  // expression such as `\d(?:.?){10}Y` cost 1.75 s on a hidden region of digits and 0.05 s on one of letters.
   await withCwd(async (cwd) => {
     const db = join(cwd, "work", "regex.db");
     await build(FREELIST_DB, db, "REGEX-MARKER");
@@ -634,6 +640,13 @@ test("sqlite_freespace refuses a filter that backtracks, so it cannot run for se
       ["(?:ab|cd){12}c", /too many steps/],
       [".{0,63}.{0,63}z", /too many steps/],
       ["w".repeat(257), /at most 256 characters/],
+      // What cost the most time on text the first element matches, now over the bound.
+      ["\\d(?:.?){10}Y", /too many steps/],
+      ["(?:a?){10}Z", /too many steps/],
+      ["(?:\\d?){10}Y", /too many steps/],
+      ["(?:[a-z]|\\d){4000}Q", /too many steps/],
+      [["Zq7K", "(?:.?){10}Y"].join(""), /too many steps/],
+      ["w{257}", /too many steps/],
     ];
     for (const [pattern, why] of refusals) {
       const err = refused(await asJob(FREESPACE, cwd, { db, write_values: true, contains: pattern, min_length: 20 }, "refused-" + sha256(pattern).slice(0, 8)));
@@ -641,14 +654,77 @@ test("sqlite_freespace refuses a filter that backtracks, so it cannot run for se
       assert.equal(err.contains_refused, true, pattern);
       assert.equal(err.fragments, undefined, "nothing was scanned: " + pattern);
     }
-    // What people write for a token or a number is accepted, and narrows the file.
+    // What people write for a token or a number is accepted, and marks the file.
     const free = await freespace(cwd, db, { min_length: 20 }, "all-regex");
-    for (const pattern of ["REGEX-MARKER-0[0-9]{2}", "marker|nothing", "^REGEX", "[A-Z]{5}-[A-Z]{6}-[0-9]{3}", "w{800}", "(?:REGEX|XEGER)-MARKER", "colou?r|REGEX"]) {
+    for (const pattern of ["REGEX-MARKER-0[0-9]{2}", "marker|nothing", "^REGEX", "[A-Z]{5}-[A-Z]{6}-[0-9]{3}", "w{200}", "(?:REGEX|XEGER)-MARKER", "colou?r|REGEX",
+      "[A-Za-z0-9]{32}", "\\d{6}(?:-\\d{6}){7}", "[0-9a-f]{64}"]) {
       const run = await freespace(cwd, db, { contains: pattern, min_length: 20 }, "ok-" + sha256(pattern).slice(0, 8));
       assert.equal(run.answer.fragment_count, free.answer.fragment_count, pattern);
+      assert.equal(run.rows.length, free.rows.length, pattern);
       assert.ok(run.values.length <= free.values.length, pattern);
     }
     assert.ok((await freespace(cwd, db, { contains: "REGEX-MARKER-0[0-9]{2}", min_length: 20 }, "n1")).values.length >= 1);
+  });
+});
+
+test("sqlite_freespace writes a row for every fragment whatever contains asks, so the sealed file's size and digest answer nothing about the text", async () => {
+  // contains used to decide which fragments were written, and the harness shows the requester a job output's byte count and sha256:
+  // 299 bytes for a right prefix of a hidden token and 0 for a wrong one, 62 calls a character. The file is now one row per fragment,
+  // `match` marks what the expression matched, and a random `run` makes every run's digest different.
+  await withCwd(async (cwd) => {
+    const secret = ["token", "=", "Zq7K", "p2mR9xT4"].join("");
+    const db = join(cwd, "work", "oracle.db");
+    await build(FREEBLOCK_DB, db, secret, "utf-8");
+    const guesses: (string | undefined)[] = [undefined, "Zq7K", "Zq7J", "Zq7Kp2", "Zq7Kp3", "token=Zq7Kp2mR9xT4", "^$", ".", "[0-9]{4}", "(?:Zq7K|Zq7J)[a-z0-9]{2}"];
+    const sizes = new Set<number>();
+    const digests = new Set<string>();
+    const runs = new Set<string>();
+    const marks: Record<string, number> = {};
+    let fragments = -1;
+    for (const [i, contains] of guesses.entries()) {
+      const r = await freespace(cwd, db, { min_length: 4, ...(contains ? { contains } : {}) }, `size-${i}`);
+      const data = await readFile(join(r.out, "sqlite-freespace-values.jsonl"));
+      sizes.add(data.length);
+      digests.add(sha256(data));
+      if (fragments < 0) fragments = r.answer.fragment_count;
+      assert.equal(r.answer.fragment_count, fragments);
+      assert.equal(r.rows.length, fragments, "a row for every fragment found");
+      assert.equal(r.answer.secret_values.written, fragments, "the count is the fragments', never the matches'");
+      assert.ok(r.rows.every((v) => [0, 1, 2].includes(v.match ?? -1)), "match is 0, 1 or 2 in every row");
+      if (!contains) assert.ok(r.rows.every((v) => v.match === 1), "without an expression every row is 1");
+      assert.equal(new Set(r.rows.map((v) => v.run)).size, 1, "one run id in the file");
+      assert.match(r.rows[0].run ?? "", /^[0-9a-f]{16}$/);
+      runs.add(r.rows[0].run ?? "");
+      marks[contains ?? "(none)"] = r.rows.filter((v) => v.match === 1).length;
+    }
+    assert.equal(sizes.size, 1, `the file's size depends on the expression: ${[...sizes].join(", ")}`);
+    assert.equal(digests.size, guesses.length, "a different digest in every run");
+    assert.equal(runs.size, guesses.length);
+    // The marks are the answer a reader of the file filters on: the right prefix marks the fragment, a wrong one marks none.
+    assert.ok(marks["Zq7K"] >= 1 && marks["Zq7Kp2"] >= 1);
+    assert.equal(marks["Zq7J"], 0);
+    assert.equal(marks["Zq7Kp3"], 0);
+    assert.equal(marks["(none)"], fragments);
+    // Nothing of that is in the answer: the same answer, whatever the expression matched.
+    const a = await freespace(cwd, db, { min_length: 4, contains: "Zq7K" }, "ans-a");
+    const b = await freespace(cwd, db, { min_length: 4, contains: "Zq7J" }, "ans-b");
+    const strip = (x: Free) => JSON.stringify({ ...x, filter: "-", pages: "-" });
+    assert.equal(strip(a.answer), strip(b.answer));
+  });
+});
+
+test("sqlite_freespace's size does not follow the expression for a UTF-16 fragment or one with characters JSON escapes either", async () => {
+  await withCwd(async (cwd) => {
+    const secret = ["pw", "=", "Ünï", "\"q7\\K", "p2\n", "你好"].join("");
+    const db = join(cwd, "work", "escapes.db");
+    await build(FREEBLOCK_DB, db, secret, "UTF-16le");
+    const sizes = new Set<number>();
+    for (const [i, contains] of [undefined, "q7", "nothing-like-it", "你好"].entries()) {
+      const r = await freespace(cwd, db, { min_length: 4, ...(contains ? { contains } : {}) }, `esc-${i}`);
+      sizes.add((await readFile(join(r.out, "sqlite-freespace-values.jsonl"))).length);
+      assert.equal(r.rows.length, r.answer.fragment_count);
+    }
+    assert.equal(sizes.size, 1);
   });
 });
 
@@ -669,54 +745,60 @@ os.makedirs(sys.argv[3], exist_ok=True)
 fs.run_main(fs.main)
 `;
 
-test("sqlite_freespace's clocks on contains decide nothing the answer says: a fragment it could not decide is written, and nothing reports it", async () => {
-  // Past the cost check, a pattern can still be slow. The second line of defence: a fragment on which it ran out of time goes to the sealed file
-  // as if it had matched, no count and no problem names it, and the pages read do not depend on it.
+test("sqlite_freespace marks a fragment its expression could not be decided on in the file, and the answer says partial", async () => {
+  // Past the cost check, a pattern can still be slow. A fragment on which it ran out of time was written as if it had matched, with no
+  // mark and no word in the answer, which said `complete`: a reader of the sealed file could not tell a match from an undecided row.
   await withCwd(async (cwd) => {
     const guess = ["token", "=", "Zq7K"].join("");
     const present = join(cwd, "work", "present.db");
-    const absent = join(cwd, "work", "absent.db");
     await build(FREEBLOCK_DB, present, guess + "p2mR9xT4", "utf-8");
-    await build(FREEBLOCK_DB, absent, ["token", "=", "Zq7J"].join("") + "p2mR9xT4", "utf-8");
     const slow = "^(?=.*" + guess + ")(?:.*)*Y$";
-    const answers: Free[] = [];
-    const written: number[] = [];
-    for (const [name, db] of [["present", present], ["absent", absent]] as const) {
-      const out = join(cwd, "unchecked-" + name);
-      const run = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, out], { db, write_values: true, contains: slow, min_length: 20 });
-      const answer = body<Free>(run);
-      answers.push(answer);
-      written.push((await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl"))).length);
-      const text = JSON.stringify(answer);
-      assert.equal(text.includes("contains_timeouts"), false, name);
-      assert.equal(/took too long/.test(text), false, name);
-      assert.equal(answer.status, "complete", name + ": " + JSON.stringify(answer.problems));
-      assert.deepEqual(answer.problem_kinds, {}, name);
-      assert.equal(answer.stopped_before_page, null);
-    }
-    // The two answers differ only in the file's name: the same counts, the same fragments, the same problems.
-    const strip = (a: Free) => JSON.stringify({ ...a, db: "-", fragments: a.fragments.map((f) => ({ ...f, source: "-" })), pages: "-" });
-    assert.equal(strip(answers[0]), strip(answers[1]));
-    assert.ok(written[0] >= 1, "the fragment the expression ran out of time on is in the sealed file");
+    const out = join(cwd, "unchecked-present");
+    const run = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, out], { db: present, write_values: true, contains: slow, min_length: 20 });
+    const answer = body<Free>(run);
+    const rows = await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl"));
+    assert.equal(rows.length, answer.fragment_count, "every fragment is a row");
+    const undecided = rows.filter((v) => v.match === 2);
+    assert.ok(undecided.length >= 1, "the fragment the expression ran out of time on is marked 2");
+    assert.ok(undecided.some((v) => v.value.includes(guess)));
+    assert.equal(answer.status, "partial", "the answer says it did not decide");
+    assert.equal(answer.problem_kinds["contains not decided"], 1);
+    assert.equal(answer.scanned.contains_not_decided, undecided.length);
+    assert.match(answer.problems.find((p) => p.kind === "contains not decided")?.detail ?? "", /marked match 2/);
+    assert.match(answer.status_basis ?? "", /not examined|partial/);
+    // And the same file size as a run that decided everything.
+    const quick = join(cwd, "unchecked-quick");
+    const other = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, quick], { db: present, write_values: true, contains: "no-such-text", min_length: 20 });
+    assert.equal(body<Free>(other).status, "complete");
+    assert.equal((await readFile(join(quick, "sqlite-freespace-values.jsonl"))).length, (await readFile(join(out, "sqlite-freespace-values.jsonl"))).length);
   });
 });
 
-test("sqlite_freespace holds the pages it reads apart from the time contains takes", async () => {
-  // The page where max_seconds stops a run must not depend on how long an expression ran on text nobody can see.
+test("sqlite_freespace counts the time contains takes toward max_seconds, so max_seconds bounds the run", async () => {
+  // The expression's time was left out of max_seconds: `max_seconds: 3` with an expression that ran 2 s on every fragment took 10.3 s, and
+  // the worst case was 270 s of scan plus 10 s of expression inside a 300 s timeout.
   await withCwd(async (cwd) => {
-    const db = join(cwd, "work", "pages.db");
-    await build(FREELIST_DB, db, "PAGES-MARKER");
-    const plain = (await freespace(cwd, db, { min_length: 20, max_seconds: 60 }, "p1")).answer;
-    const filtered = (await freespace(cwd, db, { contains: "PAGES-MARKER-0[0-9]{2}", min_length: 20, max_seconds: 60 }, "p2")).answer;
-    assert.equal(filtered.stopped_before_page, null);
-    assert.deepEqual(filtered.scanned, plain.scanned);
-    assert.equal("contains_timeouts" in filtered.scanned, false);
+    const db = join(cwd, "work", "slow.db");
+    await build(FREELIST_DB, db, "SLOW-MARKER");
+    const out = join(cwd, "unchecked-slow");
+    const began = Date.now();
+    const run = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, out], { db, write_values: true, contains: "(w+)+Y", min_length: 20, max_seconds: 1 });
+    const wall = (Date.now() - began) / 1000;
+    const answer = body<Free>(run);
+    assert.ok(wall < 5, `max_seconds 1 took ${wall} s`);
+    assert.notEqual(answer.stopped_before_page, null, "the time limit stopped the scan");
+    assert.equal(answer.status, "partial");
+    assert.ok(answer.problem_kinds["time limit"] >= 1);
+    assert.ok(answer.problem_kinds["contains not decided"] >= 1, "what the clock cut off is counted");
+    // The pages it read are marked, not dropped.
+    const rows = await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl"));
+    assert.equal(rows.length, answer.fragment_count);
   });
 });
 
-test("sqlite_freespace's contains narrows the sealed values file, and nothing in the answer says which fragments matched", async () => {
+test("sqlite_freespace's contains marks the sealed values file, and nothing in the answer says which fragments matched", async () => {
   // The answer listed the fragments that matched and the total before the filter: with text you cannot see, one call was one bit of every
-  // fragment, and an alternation of guesses confirmed a short PIN in a few calls. The expression now only decides what is written to the file.
+  // fragment, and an alternation of guesses confirmed a short PIN in a few calls. The expression now only marks the rows of the file.
   await withCwd(async (cwd) => {
     const db = join(cwd, "work", "wal.db");
     await build(FREEBLOCK_DB, db, "FILTER-MARKER-ONE", "utf-8");
@@ -731,20 +813,23 @@ test("sqlite_freespace's contains narrows the sealed values file, and nothing in
       assert.deepEqual(other.answer.fragments.map((f) => [f.finding_id, f.offset, f.bytes]), all.answer.fragments.map((f) => [f.finding_id, f.offset, f.bytes]));
       assert.equal(other.answer.fragment_count, all.answer.fragment_count);
       assert.deepEqual(other.answer.scanned, all.answer.scanned);
-      assert.equal(other.answer.secret_values.written, null, "how many matched is not shown");
-      assert.equal(other.answer.secret_values.contains_secret_values, null);
-      assert.match(other.answer.secret_values.count_withheld ?? "", /how many fragments matched is not shown/);
+      assert.equal(other.answer.secret_values.written, all.answer.fragment_count, "the rows are every fragment, so the count says nothing");
+      assert.match(other.answer.secret_values.rows_are_all_fragments ?? "", /how many matched is not shown/);
+      assert.equal(other.rows.length, all.rows.length);
     }
     assert.equal(some.answer.filter, "FILTER-MARKER");
-    assert.match(some.answer.filter_narrows ?? "", /values file only/);
-    // What is written is what matched.
+    assert.match(some.answer.filter_marks ?? "", /rows of the values file only/);
+    // What the file marks is what matched.
     assert.ok(some.values.length >= 1 && some.values.length < all.values.length);
     assert.ok(some.values.every((v) => /FILTER-MARKER/i.test(v.value)));
+    assert.deepEqual(some.rows.filter((v) => v.match === 1).map((v) => v.finding_id), some.values.map((v) => v.finding_id));
+    assert.ok(some.rows.filter((v) => v.match === 0).every((v) => !/FILTER-MARKER/i.test(v.value)));
     assert.equal(none.values.length, 0);
+    assert.equal(none.rows.every((v) => v.match === 0), true);
     assert.equal(everything.values.length, all.values.length);
     assert.deepEqual(some.answer.companions, { "-wal": { bytes: 32, examined: false } });
     assert.match(refused(await tool(FREESPACE, cwd, { db, contains: "(" })).error, /not a valid regex/);
-    // contains with no values file to narrow is refused before anything is scanned, outside a job and in one.
+    // contains with no values file to mark is refused before anything is scanned, outside a job and in one.
     const bare = refused(await tool(FREESPACE, cwd, { db, contains: "FILTER-MARKER" }));
     assert.match(bare.error, /contains narrows the sealed values file: it needs write_values: true/);
     assert.equal(bare.contains_refused, true);
@@ -752,6 +837,21 @@ test("sqlite_freespace's contains narrows the sealed values file, and nothing in
     const noValues = refused(await asJob(FREESPACE, cwd, { db, contains: ".", write_values: false }, "novalues"));
     assert.equal(noValues.contains_refused, true);
     assert.equal(noValues.fragment_count, undefined);
+  });
+});
+
+test("sqlite_freespace and manifest_db print no FutureWarning for an expression that is a set inside a set", async () => {
+  // re.compile warns (to stderr, with a position) about `[[:alpha:]]`; the warning is not an answer.
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "warn.db");
+    await build(FREEBLOCK_DB, db, "WARN-MARKER", "utf-8");
+    const free = await asJob(FREESPACE, cwd, { db, write_values: true, contains: "[[:alpha:]]{3}", min_length: 4 }, "warn-fs");
+    assert.equal(free.code, 0, free.stdout);
+    assert.equal(free.stderr, "");
+    const dir = await backup(cwd, "warn-bk", { entries: [{ id: ID_A, path: "Library/a.db", blob: "none" }] });
+    const m = await tool(MANIFEST, cwd, { path: dir, contains: "[[:alpha:]]{3}" });
+    assert.equal(m.code, 0, m.stdout);
+    assert.equal(m.stderr, "");
   });
 });
 
@@ -894,7 +994,7 @@ type Entry = {
   changed?: string | null; has_wrapped_file_key?: boolean; payload_encrypted: boolean | null; manifest_rowid?: number;
 };
 type Manifest = {
-  path: string; parser: string; status: string; encrypted: boolean | null;
+  path: string; parser: string; status: string; status_basis?: string; encrypted: boolean | null;
   encryption: { state: string; basis: string; payload_encrypted: boolean | null; key_material_in_manifest_plist: Record<string, { present: boolean; bytes: number | null; printed: boolean }>; decryption: string };
   manifest_plist: Record<string, unknown>; info_plist: Record<string, unknown>; status_plist: Record<string, unknown>; device: Record<string, unknown>;
   manifest_db_file: { bytes: number; format: string; entropy_bits_per_byte_of_first_4096?: number; companions: Record<string, number>; snapshot?: string; working_copy?: string };
@@ -1392,6 +1492,15 @@ type Pb = {
 };
 type PbValue = { finding_id: string; source: string; field_path: string | null; offset: number; payload_offset: number; kind: string; bytes: number | null; value: string | Record<string, unknown> };
 
+/** The parser's finding for a window that was not accepted, from its one row in the values file (written in a fixed width). */
+function parseFinding(values: PbValue[]): { state: string; reason: string; offset: number; rule_failed: string } {
+  const row = values.find((v) => v.kind === "window");
+  assert.ok(row, "one row of kind window");
+  assert.equal(values.length, 1);
+  const parse = (row as unknown as { parse: { state: string; reason: string; offset: string; rule_failed: string } }).parse;
+  return { state: parse.state.trim(), reason: parse.reason.trim(), offset: /^\d+$/.test(parse.offset) ? Number(parse.offset) : -1, rule_failed: parse.rule_failed.trim() };
+}
+
 async function peek(cwd: string, args: Record<string, unknown>, name?: string): Promise<{ answer: Pb; run: Run; values: PbValue[] }> {
   const run = name ? await asJob(PROTOBUF, cwd, { write_values: true, ...args }, name) : await tool(PROTOBUF, cwd, args);
   const answer = body<Pb>(run);
@@ -1434,7 +1543,9 @@ test("protobuf_peek reads a nested message with absolute offsets and full field 
     assert.match(byPath["3.2"].value_withheld ?? "", /inside a length-delimited field/);
     const job = await peek(cwd, { path: "work/blob.bin", offset: 100 }, "pb-numbers");
     const held = Object.fromEntries(job.values.map((v) => [v.field_path, v]));
-    assert.deepEqual(held["4"].value, { value: 0x3f800000, hex: "0000803f", float_reading: 1 });
+    const { pad, ...readings } = held["4"].value as Record<string, unknown>;
+    assert.deepEqual(readings, { value: 0x3f800000, hex: "0000803f", float_reading: 1 });
+    assert.match(String(pad), /^-+$/, "the readings are padded to one width");
     assert.equal(held["4"].kind, "number");
     assert.equal((held["3.2"].value as unknown as { value: number }).value, 5);
   });
@@ -1509,13 +1620,14 @@ test("protobuf_peek withholds its rows from a window that is not a message, and 
   await withCwd(async (cwd) => {
     const group = Buffer.concat([varintField(1, 1), key(5, 3), varintField(1, 2), key(5, 4), varintField(2, 3)]);
     const { answer, run, values } = await peek(cwd, { hex: group.toString("hex") }, "group");
-    assert.equal(answer.structure.status, "unsupported");
+    assert.equal(answer.structure.status, "not_accepted", "a group is not told apart from any other window the rules do not show");
     assert.equal(answer.structure.consistent_with_protobuf_wire_format, false);
-    assert.match(answer.structure.reason, /group/);
+    assert.doesNotMatch(answer.structure.reason, /group/);
     assert.deepEqual(answer.fields, []);
     assert.equal(answer.structure.problem_offset, undefined, "no position derived from the bytes");
     assert.equal(answer.looks_like_protobuf, undefined);
-    assert.equal(values.find((v) => v.kind === "diagnosis")?.offset, 2, "the diagnosis is in the values file");
+    assert.equal(parseFinding(values).state, "unsupported", "what the parser found is in the values file");
+    assert.equal(parseFinding(values).offset, 2, "the diagnosis is in the values file");
     assert.doesNotMatch(run.stdout, /"offset": 2\b/);
     const cases: [string, Buffer, RegExp, number][] = [
       ["field number 0", Buffer.from([0x00, 0x01]), /field number of 0/, 0],
@@ -1531,7 +1643,7 @@ test("protobuf_peek withholds its rows from a window that is not a message, and 
       assert.equal(r.answer.structure.status, "not_accepted", name);
       assert.equal(r.answer.structure.consistent_with_protobuf_wire_format, false, name);
       assert.deepEqual(r.answer.fields, [], name);
-      const diagnosis = r.values.find((v) => v.kind === "diagnosis")?.value as { reason: string; offset: number };
+      const diagnosis = parseFinding(r.values);
       assert.match(diagnosis.reason, why, name);
       assert.equal(diagnosis.offset, at, name);
       assert.doesNotMatch(JSON.stringify(r.answer), /\d{4,}/.source === "" ? /x/ : /problem_offset/, name);
@@ -1865,7 +1977,8 @@ test("manifest_db does not read a keyed-archive cell above 1 MiB, and says so fo
     assert.equal(rows["Library/a.db"].metadata_status, "ok");
     assert.equal(rows["Library/c.db"].metadata_status, "ok");
     assert.equal(answer.counts.metadata.too_large, 1);
-    assert.equal(answer.status, "complete");
+    assert.equal(answer.status, "partial", "a cell the tool did not read is metadata left out of the answer");
+    assert.match(answer.status_basis ?? "", /the metadata of 1 listed row\(s\) was not read/);
     assert.ok(answer.observations.some((o) => /^1 listed row\(s\) have no readable metadata/.test(o)), answer.observations.join("\n"));
     const base = await baseline(MANIFEST, cwd).catch(() => null);
     const tiny = await measured(MANIFEST, cwd, { path: await backup(cwd, "tinycell", { entries: [{ id: ID_A, path: "Library/a.db" }] }) });
@@ -1887,6 +2000,8 @@ con.commit()
     const rows = Object.fromEntries(answer.entries.map((e) => [e.relative_path, e]));
     assert.equal(rows["Library/a.db"].metadata_status, "malformed");
     assert.equal(rows["Library/a.db"].metadata_reason, "the file column is a str, not a blob");
+    assert.equal(answer.status, "partial", "a cell the tool could not use is metadata left out of the answer");
+    assert.match(answer.status_basis ?? "", /the metadata of 1 listed row\(s\) was not read \(over the size limit\) or is malformed/);
     assert.equal(rows["Library/b.db"].metadata_status, "absent");
   });
 });
@@ -2124,4 +2239,259 @@ test("the helper's stdin: a child that never reads it is not an error, and null 
   assert.equal(done.code, 0);
   const nothing = await runPySnippet("import sys; print(repr(sys.stdin.read()))", [], null);
   assert.equal(nothing.stdout.trim(), "''");
+});
+
+test("the helper's stdin ignores a child that is gone and no other error of the write", () => {
+  for (const code of ["EPIPE", "ERR_STREAM_DESTROYED"]) assert.equal(childGone({ code }), true, code);
+  for (const code of ["EIO", "ENOSPC", "ECONNRESET", "EBADF", undefined]) assert.equal(childGone({ code }), false, String(code));
+});
+
+// --- what a requester can see of a sealed output, the counts of a window, one document, recovery-password shapes -----------
+
+test("protobuf_peek prints no count and one status for a window it does not show, so a window slid over a token cannot read the token through them", async () => {
+  // The answer for a window that was not a message still printed field_count, top_level_fields, counts.{varint,64-bit,32-bit,length-delimited,
+  // nested_messages,deepest} and, for a wire type 3 or 4, the status `unsupported`. The parse stops at the first error, so those numbers came from the
+  // token's bytes (leave-one-out, a base62 character kept 18 of 62 candidates, a digit 3.4 of 10; a 6-digit PIN lost about 8 of 20 bits).
+  await withCwd(async (cwd) => {
+    const alphabets: [string, string][] = [["digits", "0123456789"], ["base62", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"], ["hex", "0123456789abcdef"]];
+    let seed = 12345;
+    const next = (): number => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+    const byLength = new Map<number, Set<string>>();
+    let windows = 0, rejected = 0, shown = 0;
+    for (const [name, alphabet] of alphabets) {
+      const token = Array.from({ length: 20 }, () => alphabet[next() % alphabet.length]).join("");
+      const message = Buffer.concat([varintField(1, 150), lenDelimited(2, token), varintField(3, 7)]);
+      await writeFile(join(cwd, "work", `${name}.bin`), message);
+      const start = 5;
+      for (let at = start; at < start + 20; at += 2) {
+        for (const length of [2, 3, 5, 8, 12, 16, 20]) {
+          if (at + length > message.length) continue;
+          windows++;
+          const r = await tool(PROTOBUF, cwd, { path: `work/${name}.bin`, offset: at, length });
+          const a = body<Pb>(r);
+          if (a.structure.status !== "not_accepted") { shown++; continue; }
+          rejected++;
+          assert.equal(a.field_count, 0, `${name} ${at}+${length}`);
+          assert.equal(a.top_level_fields, 0);
+          assert.deepEqual(Object.values(a.counts).filter((n) => n !== 0), [], "every count is zero");
+          assert.deepEqual(a.fields, []);
+          assert.equal((a.structure as Record<string, unknown>).fields_not_tried_as_nested_at_max_depth, undefined);
+          // Everything that is not about where the window is, is the same for every window of that length that was not shown.
+          const { window: _w, source: _s, ...rest } = a as unknown as Record<string, unknown>;
+          const set = byLength.get(a.structure.bytes_in_window) ?? new Set<string>();
+          set.add(JSON.stringify(rest));
+          byLength.set(a.structure.bytes_in_window, set);
+        }
+      }
+    }
+    assert.ok(rejected >= windows * 0.9, `${rejected} of ${windows} windows were not shown`);
+    for (const [length, answers] of byLength) assert.equal(answers.size, 1, `${answers.size} different answers for rejected windows of ${length} bytes`);
+    assert.ok(shown <= windows * 0.1);
+    // A group is not told apart either.
+    const group = Buffer.concat([varintField(1, 1), key(5, 3), varintField(1, 2), key(5, 4), varintField(2, 3)]);
+    const g = body<Pb>(await tool(PROTOBUF, cwd, { hex: group.toString("hex") }));
+    const plain = body<Pb>(await tool(PROTOBUF, cwd, { hex: Buffer.alloc(group.length, 0xff).toString("hex") }));
+    assert.equal(g.structure.status, "not_accepted");
+    assert.equal(JSON.stringify(g.structure), JSON.stringify(plain.structure));
+  });
+});
+
+test("protobuf_peek's values file for a window that is not shown has the size of the window, whatever the window parses as", async () => {
+  // The file held one row for every field the parse found, with its varints and its content: its size, which the harness shows the requester,
+  // was a function of the window's bytes (how many fields, how many digits), and a sliding window read a token through it.
+  await withCwd(async (cwd) => {
+    const n = 24;
+    const unordered = Buffer.concat(Array.from({ length: 12 }, (_, i) => varintField(12 - i, i + 1)));
+    const group = Buffer.concat([key(1, 3), Buffer.alloc(n - 1, 0x01)]);
+    const windows: [string, Buffer][] = [
+      ["unordered", unordered], ["bad varint", Buffer.alloc(n, 0xff)], ["text", Buffer.from("abcdefghijklmnopqrstuvwx")], ["group", group],
+      ["big numbers", Buffer.concat([varintField(3, 1n << 62n), varintField(2, 1), varintField(1, 1n << 40n), key_fixed(1, 7)])],
+      ["one long field", Buffer.concat([key(1, 2), varint(n - 2), Buffer.alloc(n - 2, 0x80)])],
+    ];
+    assert.deepEqual(windows.map(([, b]) => b.length).filter((l) => l !== n), [], "the fixtures are one length");
+    const sizes = new Set<number>();
+    const digests = new Set<string>();
+    for (const [name, window] of windows) {
+      const r = await peek(cwd, { hex: window.toString("hex") }, "win-" + name.replace(/\W+/g, "-"));
+      assert.equal(r.answer.structure.status, "not_accepted", name);
+      assert.equal(r.values.length, 1, name);
+      assert.equal(r.values[0].kind, "window");
+      assert.equal(r.values[0].value, window.toString("hex"), "the whole window, as hexadecimal");
+      const data = await readFile(join(cwd, "win-" + name.replace(/\W+/g, "-"), "protobuf-values.jsonl"));
+      sizes.add(data.length);
+      digests.add(sha256(data));
+    }
+    assert.equal(sizes.size, 1, `the values file's size follows the window's parse: ${[...sizes].join(", ")}`);
+    assert.equal(digests.size, windows.length);
+    // The padded readings of a number under a nested message are one width, whatever the number is.
+    const lines: number[] = [];
+    for (const v of [5, 100]) {
+      const message = Buffer.concat([varintField(1, 150), lenDelimited(2, Buffer.concat([varintField(1, v), varintField(2, 3)]))]);
+      const r = await peek(cwd, { hex: message.toString("hex") }, "num-" + v);
+      assert.equal(r.answer.structure.status, "valid");
+      const text = await readFile(join(cwd, "num-" + v, "protobuf-values.jsonl"), "utf8");
+      const line = text.split("\n").find((l) => l.includes('"field_path": "2.1"') || l.includes('"field_path":"2.1"'));
+      assert.ok(line, "the row of the nested number");
+      lines.push(line.length);
+    }
+    assert.equal(new Set(lines).size, 1, `a withheld number's row differs in width: ${lines.join(", ")}`);
+  });
+});
+
+test("manifest_db's sealed outputs and answer have the same size whatever a withheld name says", async () => {
+  // The names are the hidden text of this tool. Two backups that differ only in the digits of a recovery-password-shaped component give the
+  // same answer (the file ids, which are SHA-1 digests, differ in value and not in width) and files of the same size.
+  await withCwd(async (cwd) => {
+    const sizes = new Set<number>();
+    const files = new Set<number>();
+    for (const seed of [21, 22, 23]) {
+      const key1 = recoveryName(seed), key2 = recoveryName(seed + 100);
+      const entries = [{ id: ID_A, path: `Documents/${key1}/a.txt`, blob: "none" }, { id: ID_B, path: `Documents/${key2}.key`, blob: "none" }, ...many(260)];
+      const dir = await backup(cwd, "same-" + seed, { entries });
+      const r = await tool(MANIFEST, cwd, { path: dir, limit: 5 });
+      const answer = body<Manifest>(r);
+      sizes.add(r.stdout.replaceAll(dir, "").length);
+      const kept = answer.pages.entries.all_results;
+      assert.ok(kept, "the whole listing is in a file");
+      files.add((await readFile(join(cwd, kept))).length);
+      for (const secret of [key1, key2]) assert.equal(r.stdout.includes(secret), false);
+    }
+    assert.equal(sizes.size, 1, `the answer's size follows the hidden names: ${[...sizes].join(", ")}`);
+    assert.equal(files.size, 1, `the listing file's size follows the hidden names: ${[...files].join(", ")}`);
+  });
+});
+
+test("manifest_db orders domains by the text it prints, so a withheld domain does not stand where its hidden name sorts", async () => {
+  // domains were sorted by (count, real name) and printed as the placeholder: among domains with the same count, where the placeholder stood
+  // followed the hidden text.
+  await withCwd(async (cwd) => {
+    const orders: string[] = [];
+    for (const [name, hidden] of [["low", recoveryName(5)], ["high", "zz-" + recoveryName(6)]] as const) {
+      const dir = await backup(cwd, "dom-" + name, { entries: [
+        { id: ID_A, path: "Library/a", domain: "HomeDomain", blob: "none" }, { id: ID_B, path: "Library/b", domain: "HomeDomain", blob: "none" },
+        { id: ID_C, path: "Library/c", domain: hidden, blob: "none" }, { id: "cc" + "2".repeat(38), path: "Library/d", domain: hidden, blob: "none" },
+      ] });
+      const { answer } = await manifest(cwd, dir);
+      orders.push(answer.domains.map((d) => d.domain).join("|"));
+      assert.match((answer as unknown as { note: string }).note, /file_id is the SHA-1 of the domain and the real path/);
+      assert.equal(answer.domains.some((d) => d.domain.includes(hidden)), false);
+    }
+    assert.equal(orders[0], orders[1], orders.join(" vs "));
+  });
+});
+
+test("the three tools withhold a recovery password in the forms a name is saved in, and print a number that is not one", async () => {
+  // Only the dashed eight-by-six form was withheld: spaces, underscores, dots, 48 contiguous digits, an en dash, full-width and Arabic-Indic digits,
+  // a zero-width character inside and a name that carried seven of the eight groups were printed. Counts only, from a seeded generator; the key is
+  // never a fixed literal.
+  const probe = String.raw`
+import importlib.util, json, random, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+rng = random.Random(77)
+def group(): return "%06d" % rng.randrange(10 ** 6)
+def key(n=8): return [group() for _ in range(n)]
+fw = {ord(str(i)): 0xFF10 + i for i in range(10)}
+ar = {ord(str(i)): 0x0660 + i for i in range(10)}
+sup = {ord(str(i)): ord("⁰¹²³⁴⁵⁶⁷⁸⁹"[i]) for i in range(10)}
+def hexs(n): return "".join(rng.choice("0123456789abcdef") for _ in range(n))
+shapes = {
+    "dashed": lambda: "-".join(key()),
+    "dashed with a prefix and a suffix": lambda: "recovery-" + "-".join(key()) + ".txt",
+    "spaces": lambda: " ".join(key()),
+    "underscores": lambda: "_".join(key()),
+    "dots": lambda: ".".join(key()),
+    "contiguous": lambda: "".join(key()),
+    "en dash": lambda: "–".join(key()),
+    "minus sign": lambda: "−".join(key()),
+    "mixed separators": lambda: "".join(g + rng.choice(["-", " ", "_", ".", " - "]) for g in key()[:-1]) + group(),
+    "full-width digits": lambda: "-".join(key()).translate(fw),
+    "Arabic-Indic digits": lambda: "-".join(key()).translate(ar),
+    "zero-width inside": lambda: "-".join(key())[:rng.randrange(1, 40)] + "​" + "-".join(key())[0:0] + "".join(key())[0:0],
+    "seven groups": lambda: "-".join(key(7)),
+    "superscript digits": lambda: "".join(key()).translate(sup),
+}
+benign = {
+    "uuid": lambda: "-".join([hexs(8), hexs(4), hexs(4), hexs(4), hexs(12)]),
+    "sha256": lambda: hexs(64),
+    "sha1": lambda: hexs(40),
+    "millisecond timestamp": lambda: str(1700000000000 + rng.randrange(10 ** 9)),
+    "phone number": lambda: "+90 %d %03d %02d %02d" % (rng.randrange(500, 600), rng.randrange(1000), rng.randrange(100), rng.randrange(100)),
+    "date and time": lambda: "2026-10-20 12:%02d:%02d" % (rng.randrange(60), rng.randrange(60)),
+    "six groups": lambda: "-".join(key(6)),
+    "ipv4": lambda: ".".join(str(rng.randrange(256)) for _ in range(4)),
+    "photo name": lambda: "IMG_%04d.HEIC" % rng.randrange(10000),
+}
+out = {"withheld": {}, "printed": {}}
+N = 40
+for name, make in shapes.items():
+    n = 0
+    for _ in range(N):
+        v = make()
+        if name == "zero-width inside":
+            k = "-".join(key()); cut = rng.randrange(1, len(k) - 1); v = k[:cut] + "​" + k[cut:]
+        n += t.WITHHELD in t.shown("Documents/" + v + "/note.txt", False) and v not in t.shown("Documents/" + v, False)
+    out["withheld"][name] = n
+for name, make in benign.items():
+    out["printed"][name] = sum(1 for _ in range(N) if (lambda v: t.shown("Documents/" + v, False) == "Documents/" + v and t.scrub("opening " + v) == "opening " + v)(make()))
+out["scrub_withheld"] = sum(1 for _ in range(N) if t.WITHHELD in t.scrub("cannot read " + "-".join(key()) + " (denied)"))
+print(json.dumps(out))
+`;
+  for (const script of [FREESPACE, MANIFEST, PROTOBUF]) {
+    const r = await runPySnippet(probe, [script], null);
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as { withheld: Record<string, number>; printed: Record<string, number>; scrub_withheld: number };
+    for (const [shape, n] of Object.entries(out.withheld)) assert.equal(n, 40, `${script}: ${n} of 40 names in the shape "${shape}" were withheld`);
+    for (const [shape, n] of Object.entries(out.printed)) assert.equal(n, 40, `${script}: ${n} of 40 names in the shape "${shape}" were printed`);
+    assert.equal(out.scrub_withheld, 40);
+  }
+});
+
+test("the three tools write one whole document when a stop signal arrives while a large answer is being written to a reader that has not read yet", async () => {
+  // The answer was print()ed: a signal during a write to a full pipe raised in the middle of it, and the stop handler wrote its failure document
+  // after the truncated answer. The reader got two documents, the first cut short.
+  await withCwd(async (cwd) => {
+    const code = String.raw`
+import importlib.util, sys, threading
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+def ready():
+    sys.stderr.write("READY\n"); sys.stderr.flush()
+threading.Timer(1.0, ready).start()
+def main():
+    t.send({"rows": ["row %d" % i for i in range(120000)], "tail": "the end"})
+t.run_main(main)
+`;
+    for (const script of [FREESPACE, MANIFEST, PROTOBUF]) {
+      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+        const r = await new Promise<Run>((resolve, reject) => {
+          const child = spawn("python3", ["-c", code, script], { cwd, env: { ...process.env, ...AGENT } });
+          const out: Buffer[] = [], err: Buffer[] = [];
+          let sent = false;
+          const guard = setTimeout(() => child.kill("SIGKILL"), 60000);
+          child.stderr.on("data", (c: Buffer) => {
+            err.push(c);
+            if (sent || !Buffer.concat(err).toString("utf8").includes("READY")) return;
+            sent = true;
+            // The child is blocked writing to a pipe nobody has read from: signal it, wait, then read.
+            child.kill(sig);
+            setTimeout(() => child.stdout.on("data", (b: Buffer) => out.push(b)), 400);
+          });
+          child.on("error", reject);
+          child.on("close", (code2, signal) => {
+            clearTimeout(guard);
+            resolve({ code: code2 ?? (signal ? 128 + 99 : null), stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8").replace("READY\n", "") });
+          });
+        });
+        const label = `${script} ${sig}`;
+        assert.doesNotMatch(r.stderr, /Traceback/, label);
+        let parsed: Record<string, unknown> | undefined;
+        try { parsed = JSON.parse(r.stdout) as Record<string, unknown>; } catch { /* reported below */ }
+        assert.ok(parsed, `${label}: stdout is not one JSON document (exit ${r.code}, ${r.stdout.length} bytes)`);
+        // The answer was being written, so it is the answer; or the signal came first and the one document is the failure.
+        if (parsed.interrupted !== undefined) assert.ok(r.code !== 0, label);
+        else { assert.equal(r.code, 0, label); assert.equal(parsed.tail, "the end"); assert.equal((parsed.rows as string[]).length, 120000); }
+      }
+    }
+  });
 });

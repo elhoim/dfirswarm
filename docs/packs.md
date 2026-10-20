@@ -736,10 +736,13 @@ import each other), and holds to this:
   while the values are withheld: with text you cannot see, each call is one bit
   of every row, and a few hundred calls confirm a guess. The values-to-file
   mode takes the table, not the query (`sqlite_query` with `write_values`), or
-  lets the expression narrow only what goes into the sealed file and never what
-  the answer counts (`sqlite_freespace`'s `contains`, which runs only as an
-  expression of bounded cost and reports no time-out: how long an expression runs
-  on text you cannot see is a bit as well). A position is not free of
+  lets the expression mark only the rows of the sealed file, never what the
+  answer counts and never the file's size (`sqlite_freespace`'s `contains` marks
+  every fragment's row and drops none, and a random id in each row makes the
+  file's digest different in every run, because the harness shows a job output's
+  size and digest to whoever asked; it runs only as an expression of bounded
+  cost: how long an expression runs on text you cannot see is a bit as well, and
+  the bound makes it a small one, not none). A position is not free of
   the values by itself, either. A range over a key is a filter over that key
   when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
   KEY` column, so `sqlite_query` refuses a rowid range on such a table, never

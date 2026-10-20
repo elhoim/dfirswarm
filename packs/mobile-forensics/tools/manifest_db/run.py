@@ -50,6 +50,12 @@ holds the key bag and the wrapped manifest key. Nothing of either is printed: ke
 presence and length, and a path component shaped like a recovery password is withheld. This tool
 has no values file: it reads no secret and writes none. A future decryption step would take its
 secret from a sealed file by reference, never from an argument.
+
+THE FILE ID IS PRINTED, withheld names included. It is the SHA-1 of the domain, a dash and the real path, so for a row whose path is
+withheld it is a digest of the withheld name. That is the layout of an iOS backup, not a choice of this tool: the blob is stored under
+that name, `on_disk` cites it, and any listing of the backup directory shows the same digests. Hiding it here would hide nothing the
+directory does not show. For a recovery password (48 digits) the digest cannot be inverted; for a short, guessable name it would
+confirm a guess, as the directory listing already does.
 """
 import datetime
 import errno
@@ -59,6 +65,7 @@ import math
 import os
 import plistlib
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -67,6 +74,8 @@ import struct
 import sys
 import tempfile
 import time
+import unicodedata
+import warnings
 from pathlib import Path
 
 PARSER = "manifest_db/2"
@@ -94,16 +103,28 @@ VALUES_FORMAT = "not used"
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
 #      real path.
+#   5. The harness shows the requester a sealed file's size and digest, so neither may answer a
+#      question about text nobody can see: a filter marks rows and never drops them, a window or an
+#      expression that is not accepted writes a file of the same size as one that is, and every row
+#      carries a random per-run `run`, so that no two runs share a digest.
+#   6. One document is written, whole: from the moment the answer is being written a stop signal is
+#      ignored, so a reader that is slow never gets a truncated answer followed by a failure.
 
 WITHHELD = "<recovery-password-shaped name withheld>"
 PATHS_WITHHELD = [0]
-# A BitLocker recovery password is eight groups of six digits. A file or a directory named after
-# one (people save a key under its own name) would print it in every row that names the file.
-RECOVERY = re.compile(rb"(?<![0-9])(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})(?![0-9])")
-RECOVERY_UTF16LE = re.compile(
-    rb"(?<![0-9]\x00)" + (rb"-\x00".join([rb"((?:[0-9]\x00){6})"] * 8)) + rb"(?![0-9]\x00)"
-)
-RECOVERY_TEXT = re.compile(RECOVERY.pattern.decode("ascii"))
+# A BitLocker recovery password is eight groups of six digits: 48 digits. People save a key under its own name, and not
+# only in the dashed form: with spaces, underscores or dots between the groups, with no separator at all, with another
+# dash, in full-width or Arabic-Indic digits, with a zero-width character inside, and a name can carry part of it. A name
+# is shaped like one when it holds RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most
+# three separator or invisible characters between two digits, after NFKC folding (which turns full-width digits,
+# superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a phone number or an id.
+RECOVERY_DIGITS = 42
+GAP = r"[\s_.\-\u00ad\u058a\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
+RECOVERY_TEXT = re.compile(r"\d(?:%s{0,3}\d){%d,}" % (GAP, RECOVERY_DIGITS - 1))
+
+
+def key_shaped(text):
+    return RECOVERY_TEXT.search(unicodedata.normalize("NFKC", text)) is not None
 
 
 def shown(path, count=True):
@@ -112,7 +133,7 @@ def shown(path, count=True):
         return path
     parts = path.split("/")
     for i, part in enumerate(parts):
-        if RECOVERY.search(part.encode("utf-8", "replace")) or RECOVERY_UTF16LE.search(part.encode("utf-16-le", "replace")):
+        if key_shaped(part):
             parts[i] = WITHHELD
             if count:
                 PATHS_WITHHELD[0] += 1
@@ -121,7 +142,10 @@ def shown(path, count=True):
 
 def scrub(text):
     """Text that may quote a path, with anything shaped like a recovery password withheld."""
-    return RECOVERY_TEXT.sub(WITHHELD, text)
+    text = RECOVERY_TEXT.sub(WITHHELD, text)
+    if key_shaped(text):      # digits only NFKC folds (superscripts, circled digits): the text is not printed at all
+        return WITHHELD
+    return text
 
 
 def describe(exc):
@@ -185,9 +209,27 @@ def wrap_up(answer):
     return answer
 
 
+def emit(text):
+    """Write one document to standard output, whole. From here a stop signal is ignored: the answer is written in one piece
+    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure."""
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    data = memoryview((text + "\n").encode("utf-8"))
+    try:
+        sys.stdout.flush()
+        descriptor = sys.stdout.fileno()
+        while len(data):
+            try:
+                data = data[os.write(descriptor, data):]
+            except BlockingIOError:      # a pipe set non-blocking by its owner and full: wait until it can take more
+                select.select([], [descriptor], [], 1.0)
+    except OSError:       # the reader went away: there is nobody to answer
+        raise SystemExit(1)
+
+
 def fail(message, **extra):
     answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
-    print(dumps(wrap_up(answer)))
+    emit(dumps(wrap_up(answer)))
     raise SystemExit(1)
 
 
@@ -217,7 +259,7 @@ def stopped(signum):
     answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
                       "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
                       "interrupted": name})
-    print(dumps(answer))
+    emit(dumps(answer))
     raise SystemExit(128 + signum)
 
 
@@ -358,6 +400,7 @@ class SecretValues:
         self.out = os.environ.get("OUT") or ""
         self.path = None
         self.shown = None
+        self.run = os.urandom(8).hex()      # in every row: the file's digest is different in every run, whatever it holds
         if not enabled:
             return
         if not (self.job and self.out):
@@ -393,7 +436,7 @@ class SecretValues:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "run": self.run, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -456,7 +499,7 @@ def read_args():
 
 
 def send(result):
-    print(dumps(result, indent=2))
+    emit(dumps(result, indent=2))
 
 
 def run_main(main):
@@ -748,7 +791,9 @@ def main():
         if not isinstance(contains, str) or len(contains) > 1000:
             fail("contains must be a regular expression of at most 1000 characters")
         try:
-            pattern = re.compile(contains, re.I)
+            with warnings.catch_warnings():      # a FutureWarning ("possible nested set") would go to stderr
+                warnings.simplefilter("ignore")
+                pattern = re.compile(contains, re.I)
         except re.error as exc:
             fail("contains is not a valid regex", reason=str(exc))
     domain_filter = args.get("domain")
@@ -989,7 +1034,9 @@ def main():
 
     # --- the answer ------------------------------------------------------------------------
     domain_page = LosslessPage(TOOL, [shown(os.path.realpath(db), False), "domains", domain_filter or ""], limit, INLINE_BYTES)
-    for name, number in sorted(domains.items(), key=lambda kv: (-kv[1], kv[0])):
+    # Sorted by the text that is printed, never by the name behind a placeholder: where a withheld domain stands among domains with
+    # the same count would otherwise follow its hidden text. Domains that print alike keep the order the table first met them in.
+    for name, number in sorted(domains.items(), key=lambda kv: (-kv[1], shown(kv[0], False))):
         domain_page.add({"domain": shown(name), "entries": number})
     paging = {"entries": entries.finish(), "domains": domain_page.finish()}
     time_range = {}
@@ -1002,11 +1049,13 @@ def main():
     if contains_timeouts:
         observations.append("contains ran past its time on %d path(s): those rows are counted and were not matched" % contains_timeouts)
     unreadable = sum(n for k, n in counts["metadata"].items() if k != "ok")
+    # A cell the tool did not read (over its size limit) or could not make sense of (malformed) is metadata left out of the answer.
+    metadata_left_out = sum(counts["metadata"].get(k, 0) for k in ("too_large", "malformed"))
     if unreadable:
         observations.append("%d listed row(s) have no readable metadata (counts.metadata says why, and each row carries metadata_status): "
                             "they are listed with their path and blob state only" % unreadable)
     complete = (listing["available"] and stopped_at_row is None and read_error is None and not skipped_companions
-                and not cut and not contains_timeouts and completion["state"] != "not_finished")
+                and not cut and not contains_timeouts and not metadata_left_out and completion["state"] != "not_finished")
     if listing["available"] and (extra["checks"]["after_backup_date"] or extra["checks"]["before_2007"]):
         observations.append("under epoch %s some times fall after the backup's own date or before 2007: see epoch.consistency. "
                             "That can be a wrong epoch (a 31-year shift between the two), a phone clock, or the case; it is for the examiner to settle." % epoch)
@@ -1031,6 +1080,8 @@ def main():
             reasons.append("a companion that is a link was not applied")
         if contains_timeouts:
             reasons.append("contains ran out of time on a path")
+        if metadata_left_out:
+            reasons.append("the metadata of %d listed row(s) was not read (over the size limit) or is malformed" % metadata_left_out)
         if completion["state"] == "not_finished":
             reasons.append("the backup did not finish")
         status_basis = "partial because " + ("; ".join(reasons) if reasons else "the encryption state or the listing is not settled") + " (see observations)"
@@ -1086,12 +1137,15 @@ def main():
                 "SQLite and otherwise the answer says the listing is not available; which parts of an encrypted backup are "
                 "readable depends on the build that made it, and listing.available says what this one allowed. "
                 "Key material (the key bag, the manifest key) is reported as present with its length and never printed. "
+                "file_id is the SHA-1 of the domain and the real path and is the blob's name in the backup directory, so it is "
+                "printed for a withheld path too: it is a digest of that name, and the directory listing shows the same digest. "
                 "Times are the raw seconds beside a conversion from the epoch you chose (check it against a file whose "
                 "time the case documents); a time in the manifest is the file's time on the device as the backup "
                 "recorded it, not when it was backed up. blob says whether the file named by an id is in the backup "
                 "(present), absent (missing), a directory, a link (never followed), not applicable (the manifest entry "
                 "is a directory or a link) or refused (an id that is not 40 hexadecimal digits). status is partial "
                 "when the listing is not available, a damaged page ended it (read_error), the file is cut short, the time limit stopped it, "
+                "the metadata of a listed row was not read (too_large) or could not be used (the status the row carries), "
                 "contains ran out of time on a row, a companion that is a link was not applied, or Status.plist says the backup did not finish "
                 "(completion). completion is unknown, not a failure, when there is no Status.plist or it has no SnapshotState.",
     }

@@ -17,8 +17,8 @@ The wire format, which is all this reads (protobuf encoding, as documented by th
 
 A varint is at most ten bytes, and the tenth may hold only the top bit of a 64-bit value; a longer one,
 a field number of 0 or above 536870911, a wire type of 6 or 7 and a field that runs past its message
-are structural errors. A message that holds a group is `unsupported`: it is not parsed past the group
-and it is never reported as valid.
+are structural errors. A message that holds a group is not parsed past the group and is never reported as valid
+(its window is `not_accepted`, like every window that is not a message the rules show).
 
 WHEN ROWS ARE PRINTED. What the field numbers, wire types, lengths and varints of a window show is
 derived from its bytes: aimed at the payload of a string or a token, the tool would hand the
@@ -29,10 +29,21 @@ bytes pass about once in 3,400; real Biome messages 17,871 times in 17,872). A w
 start of the message, or a length) must also be at least sixteen bytes with at least four fields: the first answer names where
 each withheld field's payload is, and a window slid across a token would otherwise print the token's characters as keys, lengths
 and varints (measured with the plain rule on a token inside a message: between 13 and 99 percent of 12- to 64-character tokens
-had a window that was shown, and 3 to 20 percent of a token's characters were derivable from what was printed; with this rule 0
-to 1.2 percent of tokens have such a window and at most 0.2 percent of a token's characters are derivable, never a whole token). A window that is not
+had a window that was shown, and 3 to 20 percent of a token's characters were derivable from what was printed; with this rule, for a
+token that is the whole of one string field, 0 to 1.2 percent of tokens have such a window and at most 0.2 percent of a token's
+characters are derivable, never a whole token). The rule is tuned to that layout, and it is weaker outside it: a token split
+across two string fields had a shown window for 4.8 percent of 32-character hexadecimal tokens (0.8 percent of their characters
+derivable), a 64-character hexadecimal token written as repeated six-byte pieces for 12.5 percent (1.1 percent of characters), a
+32-byte token as repeated six-byte pieces for 8.1 percent (0.5 percent), and a 64-character hexadecimal token inside a nested
+message for 3.9 percent (0.4 percent); never a whole token in any of them. A window that is not
 accepted, which includes most windows aimed at the payload of a field this tool withheld, gets a status and counts, no row, no
-field number, no varint and no number in a reason; its rows are in the job's values file on request. The same rule decides
+field number, no varint and no number in a reason, and NO COUNT: not the number of fields, not the number of top-level fields, not
+how many were varints or nested, not how deep, and not whether the parse met a group (the parse stops at the first error, so
+those numbers come from the bytes of a token as much as the rows would: a window slid over a token gave about two bits per
+character through them). Every window that is not accepted gets the same status, `not_accepted`, and the same words. Its bytes
+are in the job's values file on request, as one row of the same size as the window (hexadecimal, with the parser's finding in
+a fixed width), not as the rows the parse found: a file whose size follows the number of fields parsed would answer the same
+question. The same rule decides
 whether a length-delimited field is read as a nested message; printable text is text, never a nested message (a tag byte is a
 printable character).
 
@@ -63,19 +74,24 @@ import json
 import math
 import os
 import re
+import select
 import signal
 import stat
 import struct
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 PARSER = "protobuf_peek/2"
 TOOL = "protobuf_peek"
 VALUES_NAME = "protobuf-values.jsonl"
 VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, source (the real file), field_path, offset, payload_offset, "
-                 "kind (text, bytes or number), bytes, value (the text, the bytes as hexadecimal, or the number's readings)")
+                 "kind (text, bytes, nested_payload, number or window), bytes, run (random, the same in every row of this run), value (the "
+                 "text, the bytes as hexadecimal, or the number's readings padded to a fixed width). A window that was not accepted is "
+                 "one row of kind window: value is the whole window as hexadecimal, and parse is the parser's finding (state, reason, "
+                 "offset) in a fixed width")
 
 
 # --- shared with the pack's other tools: begin ---------------------------------------------
@@ -97,16 +113,28 @@ VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, source (the real file), fie
 #   4. A printed path component shaped like a recovery password is withheld on every output
 #      channel (the answer, the files it names, an error message); the values file keeps the
 #      real path.
+#   5. The harness shows the requester a sealed file's size and digest, so neither may answer a
+#      question about text nobody can see: a filter marks rows and never drops them, a window or an
+#      expression that is not accepted writes a file of the same size as one that is, and every row
+#      carries a random per-run `run`, so that no two runs share a digest.
+#   6. One document is written, whole: from the moment the answer is being written a stop signal is
+#      ignored, so a reader that is slow never gets a truncated answer followed by a failure.
 
 WITHHELD = "<recovery-password-shaped name withheld>"
 PATHS_WITHHELD = [0]
-# A BitLocker recovery password is eight groups of six digits. A file or a directory named after
-# one (people save a key under its own name) would print it in every row that names the file.
-RECOVERY = re.compile(rb"(?<![0-9])(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})(?![0-9])")
-RECOVERY_UTF16LE = re.compile(
-    rb"(?<![0-9]\x00)" + (rb"-\x00".join([rb"((?:[0-9]\x00){6})"] * 8)) + rb"(?![0-9]\x00)"
-)
-RECOVERY_TEXT = re.compile(RECOVERY.pattern.decode("ascii"))
+# A BitLocker recovery password is eight groups of six digits: 48 digits. People save a key under its own name, and not
+# only in the dashed form: with spaces, underscores or dots between the groups, with no separator at all, with another
+# dash, in full-width or Arabic-Indic digits, with a zero-width character inside, and a name can carry part of it. A name
+# is shaped like one when it holds RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most
+# three separator or invisible characters between two digits, after NFKC folding (which turns full-width digits,
+# superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a phone number or an id.
+RECOVERY_DIGITS = 42
+GAP = r"[\s_.\-\u00ad\u058a\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
+RECOVERY_TEXT = re.compile(r"\d(?:%s{0,3}\d){%d,}" % (GAP, RECOVERY_DIGITS - 1))
+
+
+def key_shaped(text):
+    return RECOVERY_TEXT.search(unicodedata.normalize("NFKC", text)) is not None
 
 
 def shown(path, count=True):
@@ -115,7 +143,7 @@ def shown(path, count=True):
         return path
     parts = path.split("/")
     for i, part in enumerate(parts):
-        if RECOVERY.search(part.encode("utf-8", "replace")) or RECOVERY_UTF16LE.search(part.encode("utf-16-le", "replace")):
+        if key_shaped(part):
             parts[i] = WITHHELD
             if count:
                 PATHS_WITHHELD[0] += 1
@@ -124,7 +152,10 @@ def shown(path, count=True):
 
 def scrub(text):
     """Text that may quote a path, with anything shaped like a recovery password withheld."""
-    return RECOVERY_TEXT.sub(WITHHELD, text)
+    text = RECOVERY_TEXT.sub(WITHHELD, text)
+    if key_shaped(text):      # digits only NFKC folds (superscripts, circled digits): the text is not printed at all
+        return WITHHELD
+    return text
 
 
 def describe(exc):
@@ -188,9 +219,27 @@ def wrap_up(answer):
     return answer
 
 
+def emit(text):
+    """Write one document to standard output, whole. From here a stop signal is ignored: the answer is written in one piece
+    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure."""
+    for number in STOP_SIGNALS:
+        signal.signal(number, signal.SIG_IGN)
+    data = memoryview((text + "\n").encode("utf-8"))
+    try:
+        sys.stdout.flush()
+        descriptor = sys.stdout.fileno()
+        while len(data):
+            try:
+                data = data[os.write(descriptor, data):]
+            except BlockingIOError:      # a pipe set non-blocking by its owner and full: wait until it can take more
+                select.select([], [descriptor], [], 1.0)
+    except OSError:       # the reader went away: there is nobody to answer
+        raise SystemExit(1)
+
+
 def fail(message, **extra):
     answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
-    print(dumps(wrap_up(answer)))
+    emit(dumps(wrap_up(answer)))
     raise SystemExit(1)
 
 
@@ -220,7 +269,7 @@ def stopped(signum):
     answer = wrap_up({"error": "the tool was stopped by %s before it finished: this is not an answer to the question" % name,
                       "status": "failed", "status_basis": "stopped by %s before the answer was complete" % name,
                       "interrupted": name})
-    print(dumps(answer))
+    emit(dumps(answer))
     raise SystemExit(128 + signum)
 
 
@@ -361,6 +410,7 @@ class SecretValues:
         self.out = os.environ.get("OUT") or ""
         self.path = None
         self.shown = None
+        self.run = os.urandom(8).hex()      # in every row: the file's digest is different in every run, whatever it holds
         if not enabled:
             return
         if not (self.job and self.out):
@@ -396,7 +446,7 @@ class SecretValues:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "run": self.run, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -459,7 +509,7 @@ def read_args():
 
 
 def send(result):
-    print(dumps(result, indent=2))
+    emit(dumps(result, indent=2))
 
 
 def run_main(main):
@@ -502,6 +552,8 @@ NESTED_FIELD_MAX = 300
 #   - and it meets the rule above.
 # A window that was not aimed (offset 0, no length) is held to the rule above, to MIN_WINDOW_BYTES and to the
 # printable-text test.
+REASON_WIDTH = 160            # the parser's reasons are all shorter; the values file writes one in this width
+NUMBER_WIDTH = 480            # a withheld number's readings are written in this width (the longest are about 250 characters)
 MIN_WINDOW_BYTES = 8
 MIN_AIMED_BYTES = 16
 MIN_AIMED_FIELDS = 4
@@ -666,17 +718,33 @@ def parse(ctx, start, end, depth, path):
     return rows, "ok", None, shape
 
 
-def window_accepted_by(blob, state, shape, aimed):
-    """Whether the rows of the whole window may be printed: the acceptance rule, a length and a field count that depend on
-    whether the caller aimed the window, and the test that it is not text."""
+def window_rule_failed(blob, state, shape, aimed):
+    """None when the rows of the whole window may be printed, else a short code for the first rule it fails: the acceptance
+    rule, a length and a field count that depend on whether the caller aimed the window, and the test that it is not text.
+    The code goes to the values file only."""
     if len(blob) < (MIN_AIMED_BYTES if aimed else MIN_WINDOW_BYTES):
-        return False
+        return "too_short"
     if aimed and shape["fields"] < MIN_AIMED_FIELDS:
-        return False
+        return "too_few_fields_aimed"
     # A control byte other than tab and the line ends means it is not text: the common case, decided without decoding.
     if not blob.translate(None, CONTROL_FREE) and text_characters(memoryview(blob)) is not None:
-        return False
-    return accepted(state, shape)
+        return "printable_text"
+    if state not in ("ok", "stopped"):
+        return "parse_" + state
+    if shape["fields"] < 2:
+        return "fewer_than_two_fields"
+    if not shape["minimal"]:
+        return "not_shortest_varint"
+    if not shape["ordered"]:
+        return "unordered_fields"
+    if not shape["small"]:
+        return "large_field_number"
+    return None
+
+
+def window_accepted_by(blob, state, shape, aimed):
+    """Whether the rows of the whole window may be printed (see window_rule_failed)."""
+    return window_rule_failed(blob, state, shape, aimed) is None
 
 
 def accepted(state, shape):
@@ -756,6 +824,8 @@ def main():
     aimed = offset > 0 or length is not None
     window_accepted = window_accepted_by(blob, state, shape, aimed)
 
+    # The counts of a window that is not accepted stay zero: the parse stops at the first error, so how many fields it read, how
+    # many were varints or nested, and how deep it went come from the window's bytes, as the rows would.
     counters = {"fields": 0, "varint": 0, "64-bit": 0, "32-bit": 0, "length-delimited": 0, "nested_messages": 0,
                 "text_values_withheld": 0, "bytes_values_withheld": 0, "nested_payloads_withheld": 0,
                 "number_values_withheld": 0, "deepest": 0}
@@ -767,7 +837,7 @@ def main():
         return {"source": source_real, "field_path": row["field_path"], "offset": row["offset"],
                 "payload_offset": row.get("payload_offset"), "kind": kind, "bytes": size}
 
-    def emit(items):
+    def put_rows(items):
         for row in items:
             children = row.pop("_children", None)
             span = row.pop("_span", None)
@@ -776,49 +846,48 @@ def main():
             counters["deepest"] = max(counters["deepest"], row["depth"])
             if children:
                 counters["nested_messages"] += 1
-            if not window_accepted:
-                # The window is not a message under the acceptance rule: no row is printed (what its field
-                # numbers, wire types and varints show may be its bytes), and the job's values file holds them.
+            row["source"] = source
+            # A number is printed only when it is a top-level varint: under a length-delimited field it may be
+            # the content of a string or of bytes read as a nested message, and a fixed-width value is raw bytes.
+            if row["wire_type"] in ("varint", "64-bit", "32-bit") and (row["depth"] >= 1 or row["wire_type"] != "varint"):
+                numbers = {k: row.pop(k) for k in NUMBER_KEYS if k in row}
                 serial[0] += 1
                 finding = "V%06d" % serial[0]
-                content = None
-                if span:
+                row["finding_id"] = finding
+                row["value_withheld"] = ("inside a length-delimited field, so it may be the content of a string or of bytes"
+                                         if row["depth"] >= 1 else "a fixed-width value is raw bytes")
+                counters["number_values_withheld"] += 1
+                if values.enabled:
+                    # Padded to one width: how many digits a withheld number has must not be the size of the file.
+                    padding = NUMBER_WIDTH - len(dumps({**numbers, "pad": ""}))
+                    values.add(finding, locator(row, "number", None), {**numbers, "pad": "-" * max(padding, 0)})
+            if span:
+                serial[0] += 1
+                finding = "V%06d" % serial[0]
+                row["finding_id"] = finding
+                kind = span[0]
+                counters[{"text": "text_values_withheld", "bytes": "bytes_values_withheld", "nested": "nested_payloads_withheld"}[kind]] += 1
+                if values.enabled:
                     content = blob[span[1]:span[2]]
-                    content = codecs.utf_8_decode(content, "replace", True)[0] if span[0] == "text" else content.hex()
-                values.add(finding, locator(row, "field", row.get("payload_bytes")), {"row": row, "content": content})
-            else:
-                row["source"] = source
-                # A number is printed only when it is a top-level varint: under a length-delimited field it may be
-                # the content of a string or of bytes read as a nested message, and a fixed-width value is raw bytes.
-                if row["wire_type"] in ("varint", "64-bit", "32-bit") and (row["depth"] >= 1 or row["wire_type"] != "varint"):
-                    numbers = {k: row.pop(k) for k in NUMBER_KEYS if k in row}
-                    serial[0] += 1
-                    finding = "V%06d" % serial[0]
-                    row["finding_id"] = finding
-                    row["value_withheld"] = ("inside a length-delimited field, so it may be the content of a string or of bytes"
-                                             if row["depth"] >= 1 else "a fixed-width value is raw bytes")
-                    counters["number_values_withheld"] += 1
-                    values.add(finding, locator(row, "number", None), numbers)
-                if span:
-                    serial[0] += 1
-                    finding = "V%06d" % serial[0]
-                    row["finding_id"] = finding
-                    kind = span[0]
-                    counters[{"text": "text_values_withheld", "bytes": "bytes_values_withheld", "nested": "nested_payloads_withheld"}[kind]] += 1
-                    if values.enabled:
-                        content = blob[span[1]:span[2]]
-                        content = codecs.utf_8_decode(content, "replace", True)[0] if kind == "text" else content.hex()
-                        values.add(finding, locator(row, spans[kind], span[2] - span[1]), content)
-                fields.add(row)
+                    content = codecs.utf_8_decode(content, "replace", True)[0] if kind == "text" else content.hex()
+                    values.add(finding, locator(row, spans[kind], span[2] - span[1]), content)
+            fields.add(row)
             if children:
-                emit(children)
+                put_rows(children)
 
-    emit(rows)
-    if not window_accepted and problem and values.enabled:
-        # What a withheld window failed on, with its position, for the job that asked for the values.
+    if window_accepted:
+        put_rows(rows)
+    elif values.enabled and blob:
+        # What a window that is not a message failed on, for the job that asked for the values: the window itself, whole, as
+        # hexadecimal, and the parser's finding in a fixed width. Not the rows the parse found: a file whose size follows the
+        # number of fields would tell the requester what the window's bytes parse as.
+        failed = window_rule_failed(blob, state, shape, aimed)
+        found = {"state": state.ljust(11), "reason": ((problem or {}).get("reason") or "").ljust(REASON_WIDTH),
+                 "offset": ("%020d" % problem["offset"]) if problem else "-" * 20, "rule_failed": failed.ljust(24)}
+        assert len(found["reason"]) == REASON_WIDTH and len(found["rule_failed"]) == 24 and len(found["state"]) == 11, found
         serial[0] += 1
-        values.add("V%06d" % serial[0], {"source": source_real, "field_path": None, "offset": problem["offset"], "payload_offset": None,
-                                         "kind": "diagnosis", "bytes": None}, {"state": state, "reason": problem["reason"], "offset": problem["offset"]})
+        values.add("V%06d" % serial[0], {"source": source_real, "field_path": None, "offset": offset, "payload_offset": None,
+                                         "kind": "window", "bytes": len(blob), "parse": found}, blob.hex())
     values.close()
     page = fields.finish() if fields is not None else None
     if not blob:
@@ -827,20 +896,19 @@ def main():
         structure = {"status": "valid", "reason": "the whole window parsed as protobuf wire format and meets the acceptance rule"}
     elif window_accepted:
         structure = {"status": "partial", "reason": problem["reason"], "resume_offset": ctx.stop_at}
-    elif state == "unsupported":
-        structure = {"status": "unsupported", "reason": "the window holds a group (wire type 3 or 4), which is not parsed",
-                     "rows_withheld": True}
     else:
+        # One status and one set of words for every window that is not accepted (a parse error, a group, too short, text,
+        # unordered): which of them it was, and any count, come from the window's bytes.
         structure = {"status": "not_accepted",
                      "reason": "the window is not a message the rules show: it must parse whole, be at least %d bytes (%d when offset or length was given) with at "
                                "least two fields (%d when offset or length was given), not be entirely printable text, write shortest-form varints, "
-                               "order its field numbers ascending and keep them at %d or below: no row, field number or varint is printed, since "
+                               "order its field numbers ascending and keep them at %d or below: no row, field number, varint or count is printed, since "
                                "what they show may be the bytes themselves"
                                % (MIN_WINDOW_BYTES, MIN_AIMED_BYTES, MIN_AIMED_FIELDS, NESTED_FIELD_MAX),
                      "rows_withheld": True}
     structure["bytes_in_window"] = len(blob)
     structure["consistent_with_protobuf_wire_format"] = bool(window_accepted and state == "ok")
-    if ctx.depth_limited:
+    if window_accepted and ctx.depth_limited:
         structure["fields_not_tried_as_nested_at_max_depth"] = ctx.depth_limited
     if structure["status"] == "valid":
         status, status_basis = "complete", "the whole window parsed as protobuf wire format and meets the acceptance rule"
@@ -859,7 +927,7 @@ def main():
         "structure": structure,
         "fields": fields.page if fields is not None else [],
         "field_count": counters["fields"],
-        "top_level_fields": len(rows),
+        "top_level_fields": len(rows) if window_accepted else 0,
         "counts": counters,
         "limits": {"max_depth": max_depth, "max_fields": max_fields, "max_seconds": max_seconds, "inline_rows": limit,
                    "window_default_bytes": DEFAULT_WINDOW, "window_hard_cap_bytes": HARD_WINDOW},
@@ -871,8 +939,8 @@ def main():
                 "file. Rows, field numbers and varints are printed only for a window that parses whole as a message "
                 "(at least eight bytes and two fields, not entirely printable text, shortest-form varints, ascending field numbers, none above 300; "
                 "sixteen bytes and four fields when offset or length was given); any other window, "
-                "which includes one aimed at the payload of a field the answer withheld, gets a status and counts, and its "
-                "rows are in the values file when write_values was asked for in a job run with secret_output: true. In a "
+                "which includes one aimed at the payload of a field the answer withheld, gets one status (not_accepted) and no count (field_count, top_level_fields and "
+                "counts are zero: they would come from its bytes), and its bytes are in the values file when write_values was asked for in a job run with secret_output: true. In a "
                 "printed window a top-level varint is printed raw, with its zigzag reading (and, where the top bit is set, "
                 "the two's-complement reading); nothing else that holds a value is: not the text of a string, not the bytes "
                 "of a bytes field or the payload of a nested message, not a number under a length-delimited field, not a "
@@ -881,8 +949,9 @@ def main():
                 "rule; a binary value that is accepted shows that structure (field numbers, wire types, lengths), which is "
                 "derived from its bytes: rare for a key or a token (about one random 16-byte value in 3,400), and not "
                 "impossible. A window slid across a token is held to the stricter rule for a window with an offset or a length, and a "
-                "residual remains: in a measurement on tokens inside a message, 0 to 1.2 percent of 12- to 64-character tokens had a window "
-                "that was shown, and at most 0.2 percent of a token's characters were derivable from it. A group makes the window `unsupported`. "
+                "residual remains: in a measurement on tokens that are the whole of one string field, 0 to 1.2 percent of 12- to 64-character tokens had a window "
+                "that was shown, and at most 0.2 percent of a token's characters were derivable from it; for a token split across two fields or "
+                "written as repeated six-byte pieces it is higher (up to 12.5 percent of 64-character hexadecimal tokens had a shown window, never a whole token). A group makes the window `not_accepted`, as does every other window the rules do not show. "
                 "Offsets are absolute in the file.",
     })
 
