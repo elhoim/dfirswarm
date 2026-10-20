@@ -163,13 +163,13 @@ test("the shape rule prints no more than its documented share of each random ide
   const r = rates.ransom_note_scan;
   for (const shape of ["decimal_12", "decimal_20", "hex_16", "hex_32", "base58_22"]) assert.equal(r[shape], 0, shape);
   assert.ok(r.fullwidth_12 <= 0.02, `fullwidth_12 ${r.fullwidth_12}`);
-  assert.ok(r.letters_24 <= 0.01, `letters_24 ${r.letters_24}`);
+  assert.ok(r.letters_24 <= 0.015, `letters_24 ${r.letters_24}`); // mixed-case letters: 0.5% read as words
   // what is printed anyway, as the manifest states it (random draws: bounds with room for the sampling error at N = 1,500)
   assert.ok(r.random_alnum_8 > 0.015 && r.random_alnum_8 < 0.065, `random_alnum_8 ${r.random_alnum_8}`);
   assert.ok(r.random_alnum_9 < 0.045, `random_alnum_9 ${r.random_alnum_9}`);
   assert.ok(r.random_alnum_12 < 0.025, `random_alnum_12 ${r.random_alnum_12}`);
   assert.ok(r.random_alnum_16 < 0.01, `random_alnum_16 ${r.random_alnum_16}`);
-  assert.ok(r.base32_16 > 0.01 && r.base32_16 < 0.08, `base32_16 ${r.base32_16}`);
+  assert.ok(r.base32_16 <= 0.003, `base32_16 ${r.base32_16}`); // all capitals is one case of 16 letters now: withheld
   assert.ok(r.lower_digits_8 > 0.04 && r.lower_digits_8 < 0.12, `lower_digits_8 ${r.lower_digits_8}`);
   // the classes the manifest says are printed whole
   for (const shape of ["random_alnum_7", "dash_4x4", "underscore_4x4", "dot_4x4"]) assert.equal(r[shape], 1, shape);
@@ -179,7 +179,7 @@ test("each manifest states the shape, the rates that were measured and that a na
   for (const name of ["encrypted_survey", "ransom_note_scan"]) {
     const manifest = JSON.parse(await readFile(join(ROOT, "packs", "ransomware-response", "tools", name, "manifest.json"), "utf8")) as { description: string };
     const d = manifest.description;
-    for (const text of ["100%", "3.3%", "2.2%", "0.6%", "0.1%", "3.6%", "7.1%", "0.7%", "4.9%", "38%", "an identifier of another shape is printed", "paths_withheld", "once per printed path"]) {
+    for (const text of ["100%", "3.3%", "2.2%", "0.6%", "0.1%", "2.4%", "0.5%", "7.1%", "0.7%", "4.9%", "38%", "5.8%", "41.8%", "an identifier of another shape is printed", "paths_withheld", "once per printed path"]) {
       assert.ok(d.includes(text), `${name} does not say ${text}`);
     }
   }
@@ -202,6 +202,7 @@ const PACKS = join(ROOT, "packs");
 
 test("the two tools carry the same name block, and the network pack's withholding block and the windows pack's place, page and stop blocks as shipped there", async () => {
   assert.equal(await block(SURVEY, "NAMES"), await block(NOTES, "NAMES"));
+  assert.equal(await block(SURVEY, "BACKSTOP"), await block(NOTES, "BACKSTOP"));
   const network = await block(join(PACKS, "network-forensics", "tools", "pcap_extract", "run.py"), "WITHHOLDING");
   const regkv = join(PACKS, "windows-forensics", "tools", "regkv", "run.py");
   for (const path of [SURVEY, NOTES]) {
