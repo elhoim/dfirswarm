@@ -265,12 +265,18 @@ class Shown(str):
 _TYPED = re.compile(r"\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}?"
                     r"|S-1-[0-9]{1,2}(?:-[0-9]{1,10}){1,15}"
                     r"|(?<![0-9A-Za-z])0x[0-9A-Fa-f]{1,16}(?![0-9A-Za-z])"
-                    r"|(?<![0-9A-Za-z])[0-9A-Fa-f]{16}(?![0-9A-Za-z])")
-_PIECE = re.compile(r"[A-Za-z0-9]{16,}")
+                    r"|(?<![0-9A-Za-z])[0-9A-Fa-f]{16}(?![0-9A-Za-z])"
+                    r"|(?<=[A-Za-z0-9]_)[0-9a-z]{13}(?![0-9A-Za-z])")        # the publisher id at the end of an app package family name
+_PREFIX2 = re.compile(r"(?i)glpat-[0-9a-z_-]{16,}|sk_live_[0-9a-z]{16,}|sg\.[0-9a-z_-]{16,}|aiza[0-9a-z_-]{30,}|npm_[0-9a-z]{30,}|dop_v1_[0-9a-f]{32,}|ya29\.[0-9a-z_-]{20,}")
+_PIECE = re.compile(r"[A-Za-z0-9+_=-]{16,}")
 _PLAIN_SHORT = re.compile(r"[A-Za-z0-9 ._()+-]{1,15}")
 _NAMED = re.compile(r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
-                    r"[A-Za-z0-9_]{0,12}[ \t]{0,3}[=:][ \t]{0,3}['\"]?([^\s'\"<>&;,]{3,128})")
-_USER_INFO = re.compile(r"[^\s/@:<>]{1,64}:[^\s/@<>]{1,128}@[\w\[]")
+                    r"[A-Za-z0-9_]{0,12}[ \t]{0,3}[=:](?![=:/\\])[ \t]{0,3}['\"]?([^\s'\"<>&;,]{3,128})")
+# the same rule for a string the tool wrote itself (documentation-like text such as "secret_output: true" must pass): the value is 6 or more characters with a digit or a symbol in it
+_NAMED_TEXT = re.compile(r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
+                         r"[A-Za-z0-9_]{0,12}[ \t]{0,3}[=:][ \t]{0,3}['\"]?(?=[^\s'\"<>&;,]{0,127}[0-9!#$%^*+@~])[^\s'\"<>&;,]{6,128}")
+_USER_INFO = re.compile(r"[^\s/@:<>]{1,64}:[^\s/<>]{1,128}@[\w\[]")        # the backstop's own form: the password may hold an @
+_UINFO_SPAN = re.compile(r"(?<![\w.%+-])[\w.%+-]{1,64}:[^\s/<>]{1,128}(?=@[\w\[])")   # layer 2's: up to the last @ before a host
 _BS_PEM = re.compile(r"-----BEGIN")
 _BS_PREFIX = re.compile(r"(?i)(?:akia|asia)[0-9a-z]{16}|gh[pousr]_[0-9a-z]{16}|github_pat_[0-9a-z_]{16}|xox[abeprs]-[0-9a-z-]{8}"
                         r"|glpat-[0-9a-z_-]{16}|sk_live_[0-9a-z]{16}|sk-[0-9a-z_-]{16}|aiza[0-9a-z_-]{20}|npm_[0-9a-z]{20}"
@@ -312,27 +318,35 @@ def _mask(text):
     return _TYPED.sub(lambda m: "x" * len(m.group()), text)
 
 
+_SEGMENT = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+
 def _random_piece(piece):
-    """A run of letters and digits of 16 or more that is not shaped like words: it flips between letters and digits, or between capitals and lower case."""
-    digits = sum(1 for c in piece if c.isdigit())
-    if digits == len(piece):
+    """A run of 16 or more characters that is not shaped like words. Words, CamelCase names and dates break into segments (a word, a capital
+    and its lower-case letters, a number) of 3 or more characters on average; random base62 and base64 break into segments of about 2. A
+    base64 padding (== at the end, or a + inside a run of letters and digits) is not in a word either."""
+    alnum = "".join(c for c in piece if c.isalnum())
+    if len(alnum) < LMIN - 2 or alnum.isdigit():
         return False
-    if digits == 0:
-        flips = sum(1 for a, b in zip(piece, piece[1:]) if a.islower() != b.islower())
-        return flips >= 0.35 * len(piece)
-    changes = sum(1 for a, b in zip(piece, piece[1:]) if a.isdigit() != b.isdigit())
-    return changes >= max(3, 0.18 * len(piece))
+    if piece.endswith("==") or (len(alnum) >= LMIN and "+" in piece.strip("+") and not piece.isalpha()):
+        return True
+    return len(alnum) >= LMIN and len(alnum) <= 3.0 * len(_SEGMENT.findall(alnum))
 
 
 def _spans(text, kind):
     """The spans of a string that layers 1 and 2 withhold, as (start, end, what), merged."""
     masked = _mask(text)
-    found = [(s, e, "token-shaped text") for s, e in token_spans(masked)]
+    if kind == "text":
+        found = [(s, e, "token-shaped text") for s, e in token_spans(masked)]
+    else:
+        # a name is judged by the allow-list below; of the shared deny-list only the vendor prefixes apply to it
+        found = [(m.start(), m.end(), "token-shaped text") for m in _PREFIXED.finditer(masked)]
+    found += [(m.start(), m.end(), "token-shaped text") for m in _PREFIX2.finditer(masked)]
     if kind != "text":
         for m in _PIECE.finditer(masked):
             if _random_piece(m.group()):
                 found.append((m.start(), m.end(), "random-looking text"))
-    for rx in (_USERINFO, _BARE_USERINFO):
+    for rx in (_USERINFO, _BARE_USERINFO, _UINFO_SPAN):
         for m in rx.finditer(text):
             found.append((m.start(), m.end(), "userinfo"))
     for m in _NAMED.finditer(masked):
@@ -451,7 +465,7 @@ def _seal_text(s):
         return Shown("<withheld %d characters: backstop: longer than the judged size>" % len(s))
     BOUNDARY["swept"] += 1
     plain = _norm(s)
-    why = ("a PEM marker" if _BS_PEM.search(plain) else "a named secret" if _NAMED.search(plain)
+    why = ("a PEM marker" if _BS_PEM.search(plain) else "a named secret" if _NAMED_TEXT.search(plain)
            else "a token prefix" if _BS_PREFIX.search(plain) else "user-info" if _USER_INFO.search(plain) else None)
     if why is None:
         return s
