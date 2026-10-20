@@ -396,9 +396,9 @@ def cell(value):
 # through that still looks like a secret.
 #
 # WITHHELD, by shape: a recovery password (eight groups of six digits) in a path component, whole component; a run of 10 or more digits;
-# a run of 8 or more letters and digits that has a digit in it; a letters-only run of 8 or more that is not one word, a camel-case
+# a run of 8 or more letters and digits that has a digit in it, unless it is words with one or two digits inside (tiff2pdf); a letters-only run of 8 or more that is not one word, a camel-case
 # word or all capitals; groups of 4 to 6 characters joined by one `-`, `_` or `.` (3 or more digit-only groups, or 4 or more groups that
-# each hold a digit), and four or more groups of exactly six digits joined by spaces; the value after password, secret, token,
+# each hold a digit or are all capitals), and four or more groups of exactly six digits joined by spaces; the value after password, secret, token,
 # api key, credential, auth (`password=...`); user-info; and the token shapes of the shared WITHHOLDING block above (vendor prefixes,
 # JWT, long hex, long mixed runs, base64 with `/`). A string is also judged after NFKC and with invisible characters taken out, and a
 # hit there that the string as written does not show withholds the whole string.
@@ -418,22 +418,23 @@ _RECOVERY_SHAPE = re.compile(r"(?<![0-9])[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-
 _SIX_SPACED = re.compile(r"(?<![0-9])(?:[0-9]{6} ){3,}[0-9]{6}(?![0-9])")
 _GROUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{4,6}(?![A-Za-z0-9])")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{8,}")
-_WORDY = re.compile(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)*|[A-Z]+")
+_WORD_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _NAMED = re.compile(r"(?i)(?<![A-Za-z0-9])(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
                     r"[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*([^\s\"'&;,/\\]+)")
 _CACHE = {}
 
 
 def _chains(text):
-    """Spans of groups of 4 to 6 characters joined by one `-`, `_` or `.`: 3 or more digit-only groups, or 4 or more that each hold a digit."""
+    """Spans of groups of 4 to 6 characters joined by one `-`, `_` or `.`: 3 or more digit-only groups, or 4 or more that each hold a digit or are all capitals."""
     chain = []
     for m in _GROUP.finditer(text):
         g = m.group()
-        if chain and m.start() == chain[-1][1] + 1 and text[chain[-1][1]] in "-_." and any(c.isdigit() for c in g):
+        joins = any(c.isdigit() for c in g) or g.isupper()
+        if chain and joins and m.start() == chain[-1][1] + 1 and text[chain[-1][1]] in "-_.":
             chain.append((m.start(), m.end(), g.isdigit()))
             continue
         yield from _close(chain)
-        chain = [(m.start(), m.end(), g.isdigit())] if any(c.isdigit() for c in g) else []
+        chain = [(m.start(), m.end(), g.isdigit())] if joins else []
     yield from _close(chain)
 
 
@@ -442,13 +443,32 @@ def _close(chain):
         yield chain[0][0], chain[-1][1]
 
 
+def _wordy(run, caps=1 << 30):
+    """A letters-only run that reads as words: one lowercase word (22 letters at most), one all-capital run, or camel case: capitalised
+    words and capital runs (acronyms), of which at most a quarter are shorter than 3 letters (one short part is let through in a two-part name whose second part has 5 letters or more: MyDocument)."""
+    if run.islower():
+        return len(run) <= 22
+    if run.isupper():
+        return len(run) <= caps
+    tokens = _WORD_TOKEN.findall(run)
+    return "".join(tokens) == run and all(len(t) <= 22 for t in tokens) and sum(1 for t in tokens if len(t) < 3) <= max(len(tokens) // 4, 1 if len(tokens) == 2 and len(tokens[1]) >= 5 else 0)
+
+
 def _runs(text):
     for m in _ALNUM_RUN.finditer(text):
         t = m.group()
         if t.isdigit():
             if len(t) >= 10:
                 yield m.span()
-        elif any(c.isdigit() for c in t) or _WORDY.fullmatch(t) is None:
+            continue
+        pieces = re.findall(r"[A-Za-z]+|[0-9]+", t)
+        digits = [p for p in pieces if p.isdigit()]
+        if not digits:
+            if not _wordy(t):
+                yield m.span()
+        elif len(digits) == 1 and len(digits[0]) <= 2 and all(_wordy(p, 4) for p in pieces if not p.isdigit()):
+            continue        # one or two digits inside words (tiff2pdf, libmp3lame, x264enc): not an identifier
+        else:
             yield m.span()
 
 
