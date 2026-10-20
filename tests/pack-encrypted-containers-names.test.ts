@@ -99,9 +99,10 @@ const SHAPES: Array<[string, () => string, number]> = [
   ["decimal20", () => pick(DIGITS, 20), 0],
   ["decimal10", () => pick(DIGITS, 10), 0],
   ["alnum40", () => pick(ALNUM, 40), 1],
-  ["alnum12", () => pick(ALNUM, 12), 6],
-  ["alnum9", () => pick(ALNUM, 9), 10],
-  ["alnum8", () => pick(ALNUM, 8), 10],
+  ["alnum12", () => pick(ALNUM, 12), 2],
+  ["alnum9", () => pick(ALNUM, 9), 4],
+  ["alnum8", () => pick(ALNUM, 8), 4],
+  ["lowercase+digits 12", () => pick("abcdefghijklmnopqrstuvwxyz0123456789", 12), 6],
   ["letters24", () => pick(LETTERS, 24), 5],
   ["dashed 4x4", () => groups(4, 4, "-", UPPER_DIGITS), 1],
   ["dotted 4x4", () => groups(4, 4, ".", UPPER_DIGITS), 1],
@@ -148,7 +149,7 @@ test("names: the shapes the rule does not recognise are printed, as the manifest
 
 test("names: ordinary names are shown as they are, and a withheld part leaves the rest of the name", async () => {
   const ordinary = ["README.txt", "docs/Quarterly Report 2024.docx", "IMG_20230401_123456.jpg", "src/main/java/App.java", "Windows/System32/config/SOFTWARE",
-                    "backup.tar.gz", "My Documents/notes_final_v2.txt", "libmp3lame.0.dylib", "MyDocument.nib", "2024-01-15-meeting.md"];
+                    "backup.tar.gz", "My Documents/notes_final_v2.txt", "MyDocument.nib", "QtNetwork.framework", "2024-01-15-meeting.md"];
   assert.deepEqual(await call("shown", ordinary), ordinary);
   const id = pick(HEX, 32);
   const [cut] = await call("shown", [`vault/${id}/statement final.pdf`]);

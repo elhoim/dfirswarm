@@ -407,7 +407,7 @@ def cell(value):
 # through that still looks like a secret.
 #
 # WITHHELD, by shape: a recovery password (eight groups of six digits) in a path component, whole component; a run of 10 or more digits;
-# a run of 8 or more letters and digits that has a digit in it, unless it is words with one or two digits inside (tiff2pdf); a letters-only run of 8 or more that is not one word, a camel-case
+# a run of 8 or more letters and digits that has a digit in it (System32 and a few such names of Windows are let through); a letters-only run of 8 or more that is not one word, a camel-case
 # word or all capitals; groups of 4 to 6 characters joined by one `-`, `_` or `.` (3 or more digit-only groups, or 4 or more groups that
 # each hold a digit or are all capitals), and four or more groups of exactly six digits joined by spaces; the value after password, secret, token,
 # api key, credential, auth (`password=...`); user-info; and the token shapes of the shared WITHHOLDING block above (vendor prefixes,
@@ -429,6 +429,7 @@ _RECOVERY_SHAPE = re.compile(r"(?<![0-9])[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-
 _SIX_SPACED = re.compile(r"(?<![0-9])(?:[0-9]{6} ){3,}[0-9]{6}(?![0-9])")
 _GROUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{4,6}(?![A-Za-z0-9])")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{8,}")
+_KNOWN_RUNS = frozenset(("System32", "SysWOW64", "Wow6432Node", "Windows10", "Windows11", "Windows7", "Windows8", "Windows2000", "Windows2003"))
 _WORD_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _NAMED = re.compile(r"(?i)(?<![A-Za-z0-9])(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)"
                     r"[A-Za-z0-9_-]{0,16}[ \t]*[=:][ \t]*([^\s\"'&;,/\\<][^\s\"'&;,/\\]*)")
@@ -468,18 +469,12 @@ def _wordy(run, caps=1 << 30):
 def _runs(text):
     for m in _ALNUM_RUN.finditer(text):
         t = m.group()
+        if t in _KNOWN_RUNS:
+            continue
         if t.isdigit():
             if len(t) >= 10:
                 yield m.span()
-            continue
-        pieces = re.findall(r"[A-Za-z]+|[0-9]+", t)
-        digits = [p for p in pieces if p.isdigit()]
-        if not digits:
-            if not _wordy(t):
-                yield m.span()
-        elif len(digits) == 1 and len(digits[0]) <= 2 and all(_wordy(p, 4) for p in pieces if not p.isdigit()):
-            continue        # one or two digits inside words (tiff2pdf, libmp3lame, x264enc): not an identifier
-        else:
+        elif any(c.isdigit() for c in t) or not _wordy(t):
             yield m.span()
 
 

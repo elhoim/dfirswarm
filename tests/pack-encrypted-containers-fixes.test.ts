@@ -772,3 +772,38 @@ ns["main"]()
     assert.equal(out.status, "partial");
   });
 });
+
+const HUNT_SCAN = String.raw`
+import importlib.util, json, re, sys, time
+spec = importlib.util.spec_from_file_location("rks", sys.argv[1]); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+def w(s): return b"".join(bytes([c, 0]) for c in s)
+def gens(n):
+    yield b"-" * n
+    yield b"-123456" * (n // 7)
+    yield b"1234567-" * (n // 8)
+    yield (b"123456-" * (n // 7))
+    yield b"-\x00" * (n // 2)
+    yield w(b"123456-") * (n // 14)
+    yield b"0\x00" * (n // 2)
+    yield b"-----BEGIN " * (n // 11)
+    yield b"-----BEGIN " + b"AA " * (n // 3)
+    yield b"-----BEGIN RSA " * (n // 15)
+    yield b"1" * n
+out = []
+for n in (4096, 32768):
+    worst = 0.0
+    for g in gens(n):
+        t0 = time.process_time()
+        list(mod.ascii_hits(g)); list(mod.utf16_hits(g)); list(mod.PEM.finditer(g))
+        worst = max(worst, time.process_time() - t0)
+    out.append([n, round(worst, 3)])
+print(json.dumps(out))
+`;
+
+test("the scanner's patterns are linear on 4,096 and 32,768 bytes of the shapes that make a search by dash work hardest", async () => {
+  const run = await runPySnippet(HUNT_SCAN, [SCAN], null);
+  assert.equal(run.code, 0, run.stderr);
+  const rows = JSON.parse(run.stdout) as Array<[number, number]>;
+  for (const [n, worst] of rows) assert.ok(worst < 1, `${n} bytes took ${worst} s`);
+  assert.ok(rows[1][1] < Math.max(0.05, rows[0][1] * 30), "the time grows faster than the size");
+});

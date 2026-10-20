@@ -1,6 +1,6 @@
 {
   "name": "crypto_id",
-  "description": "Identify the encryption scheme a volume's or file's first bytes show, and say what they do not. Reads: the BitLocker and BitLocker To Go signatures (no protectors), LUKS1 header fields and its eight-slot table, the LUKS2 binary header (version, label, UUID; the keyslots, digests, segments and tokens are cryptsetup luksDump's), Apple Core Storage and APFS container signatures (whether an APFS volume is encrypted is not read), and ZIP, 7-Zip, PDF and OLE signatures (their protection is archive_probe's, which is itself partly heuristic). An unsupported LUKS version or a cut-short header is named, not guessed. VeraCrypt and TrueCrypt leave no signature: high entropy over the sample is one lead among several, never an identification, and no match is never 'not encrypted'. Every answer says the next reader and what is not determined. It does not read document encryption, and prints no raw bytes unless include_head_hex is true (the first 32 bytes of the file, which are key material if the file is a key file).",
+  "description": "Identify the encryption scheme a volume's or file's first bytes show, and say what they do not. Reads: the BitLocker and BitLocker To Go signatures (no protectors), LUKS1 header fields and its eight-slot table, the LUKS2 binary header (version, label, UUID; the keyslots, digests, segments and tokens are cryptsetup luksDump's), Apple Core Storage and APFS container signatures (whether an APFS volume is encrypted is not read), and ZIP, 7-Zip, PDF and OLE signatures (their protection is archive_probe's, which is itself partly heuristic). An unsupported LUKS version or a cut-short header is named (status partial), not guessed. VeraCrypt and TrueCrypt leave no signature: high entropy over the sample is one lead among several, never an identification, and no match is never 'not encrypted'. Every answer says the next reader and what is not determined, and carries status and status_basis. It prints no raw bytes of the file (include_head_hex, which printed the first 32, is gone: a 32-byte file is a usual key file, and a call that asks for it is refused with that said); the header's text fields are printed only when they are what the format says: the LUKS cipher, mode and hash only from the closed lists of the names cryptsetup and the kernel use, the UUID only in the UUID form, anything else as '<unrecognised header text withheld>' (header_fields_withheld names the fields), and the LUKS2 label and subsystem, which are free text, with every part shaped like an identifier or a secret withheld. The path is printed the same way. It stops on SIGTERM, SIGINT and SIGHUP with one answer and exit 128 + the signal, and a file it cannot read is an error answer, not a traceback. Withholding is by shape, measured on 2,000 random draws per shape planted in a member name or path (rates, not guarantees): hexadecimal ids of 16, 32 and 64, numbers of 10 digits or more, recovery passwords written with dashes, spaces, dots, underscores or no separator, AWS access key ids, password= and api_key: assignments, user-info, and 4x4 groups of capitals and digits joined by - or . : printed whole in 0 draws; random mixed-case letters and digits of 8, 12 or 40 characters 0 draws, of 9 about 1.4%, of 16 about 0.6%; random lowercase letters and digits of 8 about 7%, of 12 about 2.4%, of 16 about 0.4%; 24 random letters about 2%, a 16-character base32 id about 3.4%, four groups of four lowercase hexadecimal digits joined by underscores about 8%, a full-width id 0 draws. NOT recognised, by design: an identifier of 7 characters or fewer, a number of 9 digits or fewer, a lowercase-only run of up to 22 letters (it reads as a word), a secret of any other shape; a file whose secrets matter is read in a job run with secret_output: true. It also changes names that are not secrets: of the file names of a documents tree 6.9% have a part withheld (10-digit timestamps, UUIDs) and 0.6% of its directories, of an application tree 16% and 3.1% (a word with a digit inside, such as libmp3lame, is withheld in part).",
   "params": {
     "path": {
       "type": "string",
@@ -13,10 +13,6 @@
     "entropy_sample": {
       "type": "integer",
       "description": "Bytes to sample for the no-signature case (default 65536, from 1024 to 16777216)"
-    },
-    "include_head_hex": {
-      "type": "boolean",
-      "description": "Also print the first 32 raw bytes of the file (default false). They are key material if the file is a key or credential file; do not copy them into a report or the ledger"
     }
   },
   "runtime": "python3",
@@ -25,6 +21,6 @@
   "example": "{\"path\": \"inputs/disk.raw\", \"offset\": 1048576}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 2,
-  "sha256": "9a76104010171d123a015ccc115a09c2752d61d64cc32c8c9c0cb4c2f874049e"
+  "version": 3,
+  "sha256": "45a811c1154e25d1c1285e3088c2f0e908f6d16eae3e402fd80800506006807c"
 }
