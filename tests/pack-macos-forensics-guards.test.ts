@@ -1,5 +1,5 @@
 /**
- * The corrections to fsevents_parse, knowledgec_query, unified_log and plist_read that an independent verification asked for, each tested on the tools
+ * The corrections to fsevents_parse, knowledgec_query, unified_log and plist_read that were found missing, each tested on the tools
  * as a job runs them and each failing on the tools before them:
  *
  *  - a filter and an order must never look at the raw bytes of a name that the answer withholds (the `stream` pattern, the lists of streams, tables, files,
