@@ -4,7 +4,7 @@ title: Jump Lists
 when: Recent and pinned items.
 needs: [artifacts/shell]
 tools: [jumplist, lnk_parse, lnk_jumplist]
-requires_host: [olecfexport]
+requires_host: [olecfexport, lnkinfo]
 ---
 
 Use when you read Jump List files. Not for the Recent folder's own links (`artifacts/links`) or for execution (`execution/overview`).

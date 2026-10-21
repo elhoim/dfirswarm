@@ -402,6 +402,42 @@ test("hostile files end in JSON, never a traceback, and the original is not chan
   });
 });
 
+test("a second run with the same arguments, in the same job, neither fails nor replaces the first run's files", async () => {
+  await withCwd(async (cwd) => {
+    const s: Setup = { hive: withSequences(G[0], 11, 10), logs: { log1: hvleLog(G[1], [{ sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]) }], { primary: 10 }) } };
+    const args = await put(cwd, s);
+    const env = await job(cwd);
+    const first = body<Answer>(await tool("registry_recover", cwd, args, env));
+    const before = new Map(await Promise.all((await everyFileUnder(join(cwd, "out"))).map(async (f) => [f, sha(await readFile(f))] as const)));
+    assert.ok(before.size >= 2);
+    const second = body<Answer>(await tool("registry_recover", cwd, args, env));
+    assert.equal(second.replayed, true);
+    assert.equal(second.status, first.status);
+    for (const [f, digest] of before) assert.equal(sha(await readFile(f)), digest, `${f} is as the first run left it`);
+    const now = await everyFileUnder(join(cwd, "out"));
+    assert.ok(now.length > before.size, "the second run's files have names of their own");
+    assert.notEqual(second.recovered_copy, first.recovered_copy);
+  });
+});
+
+test("a hive past the tool's bound is refused as JSON before it is read, and a large sparse hive is replayed in pieces", async () => {
+  await withCwd(async (cwd) => {
+    const huge = join(cwd, "work", "huge.dat");
+    await writeFile(huge, "regf");
+    const { truncate } = await import("node:fs/promises");
+    await truncate(huge, 4 * 2 ** 30 + BASE_BLOCK);
+    const refused = failed(await tool("registry_recover", cwd, { hive: "work/huge.dat" }));
+    assert.match(refused.error, /larger than the 4294967296 bytes/);
+    // A 64 MiB hive (a small one padded with zeros past its declared bins) is replayed with export off: the pieces are 1 MiB, so the memory stays small.
+    const s: Setup = { hive: withSequences(G[0], 11, 10), logs: { log1: hvleLog(G[1], [{ sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]) }], { primary: 10 }) } };
+    const args = await put(cwd, s, "pad");
+    await truncate(join(cwd, "work", "pad.dat"), 64 * 2 ** 20);
+    const out = body<Answer>(await tool("registry_recover", cwd, { ...args, export: false }));
+    assert.equal(out.replayed, true);
+    assert.equal((await stat(recoveredOf(cwd, out))).size, 64 * 2 ** 20);
+  });
+});
+
 test("a name with a quote, a bracket, a newline or 300 characters, and a raw non-UTF-8 name, is answered in JSON", async () => {
   await withCwd(async (cwd) => {
     const names = ["a\"b'c.dat", "a[1]{2}.dat", "line\nbreak.dat", "x".repeat(200) + ".dat"];

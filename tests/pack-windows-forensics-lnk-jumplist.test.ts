@@ -365,6 +365,23 @@ test("hostile inputs end in JSON, never a traceback: every prefix of a link, ran
   });
 });
 
+test("a link or a jump list past the sizes the tool reads whole is named and not read, in a bounded time and as JSON", async () => {
+  await withCwd(async (cwd) => {
+    const { truncate } = await import("node:fs/promises");
+    await writeFile(join(cwd, "work", "huge.lnk"), LOCAL.subarray(0, 20));
+    await truncate(join(cwd, "work", "huge.lnk"), 200 * 2 ** 20);
+    await writeFile(join(cwd, "work", "huge.automaticDestinations-ms"), Buffer.from("d0cf11e0a1b11ae1", "hex"));
+    await truncate(join(cwd, "work", "huge.automaticDestinations-ms"), 300 * 2 ** 20);
+    for (const name of ["huge.lnk", "huge.automaticDestinations-ms"]) {
+      const run = await tool("lnk_jumplist", cwd, { path: `work/${name}`, limit: 2 });
+      assert.doesNotMatch(run.stderr, /Traceback/, name);
+      const out = JSON.parse(run.stdout) as Answer;
+      assert.equal(out.status, "partial", name);
+      assert.match(out.status_basis, /could not be read whole/, name);
+    }
+  });
+});
+
 test("names with a quote, a bracket, a newline or 300 characters are answered in JSON", async () => {
   await withCwd(async (cwd) => {
     for (const name of ["a\"b'c.lnk", "a[1]{2}.lnk", "line\nbreak.lnk", "x".repeat(200) + ".lnk"]) {

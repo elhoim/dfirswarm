@@ -1100,6 +1100,13 @@ class Walk:
         self.problems = []
         self.type_counts = collections.Counter()
 
+    def release(self):
+        """Let go of the library's copy of the hive (it holds the whole file in memory); the counts stay."""
+        self.hive = None
+        self.bounds = None
+        import gc
+        gc.collect()
+
     def problem(self, where, what, error):
         self.problems_count += 1
         if len(self.problems) < 5000:
@@ -1476,11 +1483,13 @@ def main():
                         original = read_state(hive_path, time.monotonic() + seconds * 0.4, None, change_db, "index", values_file, None, [])
                         export_receipt["original_walk"] = {"keys": original.keys, "values": original.values, "stopped_by_time_limit": original.stopped_by_time,
                                                            "problem_count": original.problems_count}
+                        original.release()      # the library holds a hive in memory: the original's is let go before the recovered copy is read
                     except Exception as exc:
                         compare_failed = "the original hive could not be read by regipy (%s), so the recovered state is not compared with it" % type(exc).__name__
                         change_db.close()
                         change_db = None
                 walk = read_state(str(read_from), CLOCK["deadline"], key_page, change_db, "export", values_file, changes_page, sensitive_log)
+                walk.release()
                 removed = 0
                 if change_db is not None and not original.stopped_by_time and not walk.stopped_by_time:
                     for kind, path, name, ordinal in change_db.removed():
