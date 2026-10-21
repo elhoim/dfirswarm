@@ -116,8 +116,14 @@ test("an error that quotes a path names none of the mounted tree's components (P
     const run = await runTool(FS, cwd, { path: "inputs/memory.raw", mount: join(out, "m"), mode: "export", write_values: true, paths: [`${piece}/loop`], timeout_seconds: 30 }, { ...env, ...job }, bin);
     const answer = json<Fs>(run);
     assert.ok(!run.stdout.includes(piece), "the component is in the answer");
-    assert.equal(answer.counts?.failed, 1);
-    assert.match((answer.items as Item[])[0].status, /^failed: (RuntimeError: a symbolic link loop|OSError ELOOP)/);
+    // Python before 3.13 raises on a link loop while resolving the path (the error text is what must name no component); from 3.13 a
+    // non-strict resolve no longer raises, the loop is not a regular file, and the item says so. Either way the answer names no component.
+    const status = (answer.items as Item[])[0].status;
+    if (answer.counts?.failed === 1) assert.match(status, /^failed: (RuntimeError: a symbolic link loop|OSError ELOOP)/);
+    else {
+      assert.equal(answer.counts?.not_exported, 1, `neither a failure nor a refusal to export: ${status}`);
+      assert.equal(status, "not exported: not a regular file");
+    }
     // and the same on a listing
     const listed = await runTool(FS, cwd, { path: "inputs/memory.raw", mount: join(out, "m2"), mode: "list", list: `${piece}/loop`, timeout_seconds: 30 }, { ...env, ...job }, bin);
     assert.ok(!listed.stdout.includes(piece), "the component is in the answer of a listing");
