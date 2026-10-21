@@ -742,7 +742,16 @@ import each other), and holds to this:
   file's digest different in every run, because the harness shows a job output's
   size and digest to whoever asked; it runs only as an expression of bounded
   cost: how long an expression runs on text you cannot see is a bit as well, and
-  the bound makes it a small one, not none). A position is not free of
+  the bound makes it a small one per character, not none, and it adds up with the
+  volume: the job's duration still follows how much of the hidden text is of a
+  class the expression matches. So the time never reaches the answer: the
+  expression has a work budget in sizes the answer shows, a part past it is marked
+  undecided and the status is partial, and the clock of `max_seconds` does not run
+  while it does). What a sealed file's reader can do is a separate question: the
+  sandbox's `store/` is mounted read-only in an agent's VM, so an agent that opens
+  a values file reads every row. The measures above guard what is shown without
+  opening it (the answer, its status and counts, the file's size and digest). A
+  position is not free of
   the values by itself, either. A range over a key is a filter over that key
   when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
   KEY` column, so `sqlite_query` refuses a rowid range on such a table, never

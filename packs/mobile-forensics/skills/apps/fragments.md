@@ -17,7 +17,7 @@ Use only if you ran `sqlite_freespace` and must report what its fragments are. N
 
 **Status**: `complete`, `partial` (a time limit, a `-wal` or `-journal` with bytes left unread, pages not examined) or `corrupt` (the file's structure disagreed with itself where `problems` says; fragments found are kept). Check `scanned` and `problems` before writing a negative.
 
-**Filters.** `contains` needs `write_values` and only marks the rows of the values file: every fragment is a row, `match` is 1 (matched), 0 or 2 (not decided in time, and the status is partial); filter on `match` when you read the file. The answer lists every fragment and does not say which matched or how many. It is accepted only as an expression of bounded cost: no `*`, `+` or `{m,}` (write `{1,64}`), no nested repeat, lookaround or back reference, at most 256 characters and 256 steps; its run time still says a little about the text. Read the matches in the job; when the answer names an `all_results` file, that is the whole list, however many fragments there are (a page of repeated short text can give millions).
+**Filters.** `contains` needs `write_values` and only marks the rows of the values file: every fragment is a row, `match` is 1 (matched), 0 or 2 (not decided in time, and the status is partial); filter on `match` when you read the file. The answer lists every fragment and does not say which matched or how many. It is accepted only as an expression of bounded cost: no `*`, `+` or `{m,}` (write `{1,64}`), no nested repeat, lookaround or back reference, at most 256 characters and 256 steps; its run time can say that much of the free space is of a class the expression matches, but not the answer: the expression has a work budget in sizes the answer shows, and a fragment past it is `match` 2 and makes the status partial. Read the matches in the job; when the answer names an `all_results` file, that is the whole list, however many fragments there are (a page of repeated short text can give millions).
 
 Shows: that text of a stated encoding sat at a stated offset of a stated page of the file.
 
@@ -25,4 +25,4 @@ Does not show: a row, a time, an author, or that the page belonged to the table 
 
 Record: file and its digest, page, offset, length, encoding, the status and any `problems` that applied.
 
-Sensitive output: the values file is a sealed output; what you write about it is where it sits and what it is, not what it says.
+Sensitive output: the values file is a sealed output; what you write about it is where it sits and what it is, not what it says. It lies under `store/`, which your VM mounts read-only, so you can open it: the tool's measures guard the answer and the file's size and digest, not an agent that reads the file. Open it only for what the task needs.

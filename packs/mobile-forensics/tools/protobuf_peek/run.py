@@ -35,7 +35,10 @@ characters are derivable, never a whole token). The rule is tuned to that layout
 across two string fields had a shown window for 4.8 percent of 32-character hexadecimal tokens (0.8 percent of their characters
 derivable), a 64-character hexadecimal token written as repeated six-byte pieces for 12.5 percent (1.1 percent of characters), a
 32-byte token as repeated six-byte pieces for 8.1 percent (0.5 percent), and a 64-character hexadecimal token inside a nested
-message for 3.9 percent (0.4 percent); never a whole token in any of them. A window that is not
+message for 3.9 percent (0.4 percent); never a whole token in any of them. These rates hold whatever `max_fields` the caller sets:
+a window the field budget stopped is shown only when nobody aimed it (a caller who sets max_fields 4 would otherwise have an aimed window
+judged on its first four fields, whatever follows, and had a shown window for 19 to 21 percent of 64-character hexadecimal tokens, 6
+percent of 32-character ones and 1.2 percent of 24-character base62 ones, with up to 2 percent of the token's bytes derivable). A window that is not
 accepted, which includes most windows aimed at the payload of a field this tool withheld, gets a status and counts, no row, no
 field number, no varint and no number in a reason, and NO COUNT: not the number of fields, not the number of top-level fields, not
 how many were varints or nested, not how deep, and not whether the parse met a group (the parse stops at the first error, so
@@ -43,7 +46,12 @@ those numbers come from the bytes of a token as much as the rows would: a window
 character through them). Every window that is not accepted gets the same status, `not_accepted`, and the same words. Its bytes
 are in the job's values file on request, as one row of the same size as the window (hexadecimal, with the parser's finding in
 a fixed width), not as the rows the parse found: a file whose size follows the number of fields parsed would answer the same
-question. The same rule decides
+question. What the values file's size still follows is how JSON writes the TEXT of a string field: a quote or a backslash adds a
+byte, a control character or a non-ASCII one adds more (bytes, nested payloads, numbers and windows are written in a width the answer
+shows already). A caller who isolates a field with `offset` and `length` reads about log2(count+1) bits of that field's quote,
+backslash and control-character count from the size of one call, and nothing from a token of letters and digits. The text is written
+readable on purpose, so this is stated and not removed. Nor is the time of the parse of a window that is not shown: it stops at the first error,
+so how long the call took says roughly how many fields were read before it (microseconds a field, visible to whoever sees the job's duration). The same rule decides
 whether a length-delimited field is read as a nested message; printable text is text, never a nested message (a tag byte is a
 printable character).
 
@@ -65,6 +73,12 @@ a fixed-width value, which is raw bytes. The answer carries each one's offset, l
 the value goes only to the values file, on `write_values: true` in a job run with `secret_output:
 true`. `hex` (a message passed in the call) is recorded in the trace: use it only for a few bytes that
 are not sensitive, and a file for anything else.
+
+WHAT A REQUESTING AGENT CAN SEE. The answer, and the job's file list with each file's size and digest, are what a requester is shown
+without asking. The values file itself is under store/ of the sandbox, which an agent's VM mounts read-only: an agent that opens it reads
+every row, the values (and `match`) included. The measures above protect what is shown without anyone opening the file (the answer, its
+status and counts, the file's size and digest). They do not stop an agent that deliberately opens the sealed file, and this tool does not
+decide whether it may: that is the sandbox's mounts.
 """
 import binascii
 import codecs
@@ -118,41 +132,77 @@ VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, source (the real file), fie
 #      expression that is not accepted writes a file of the same size as one that is, and every row
 #      carries a random per-run `run`, so that no two runs share a digest.
 #   6. One document is written, whole: from the moment the answer is being written a stop signal is
-#      ignored, so a reader that is slow never gets a truncated answer followed by a failure.
+#      ignored, so a reader that is slow never gets a truncated answer followed by a failure. A reader that
+#      takes nothing for WRITE_STALL_SECONDS is given up on: the tool exits (141) instead of waiting for ever.
 
 WITHHELD = "<recovery-password-shaped name withheld>"
+WITHHELD_LONG = "<name too long to judge withheld>"
 PATHS_WITHHELD = [0]
 # A BitLocker recovery password is eight groups of six digits: 48 digits. People save a key under its own name, and not
 # only in the dashed form: with spaces, underscores or dots between the groups, with no separator at all, with another
-# dash, in full-width or Arabic-Indic digits, with a zero-width character inside, and a name can carry part of it. A name
-# is shaped like one when it holds RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most
-# three separator or invisible characters between two digits, after NFKC folding (which turns full-width digits,
-# superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a phone number or an id.
+# dash, comma, colon, bracket or quote mark, in full-width or Arabic-Indic digits, with a zero-width character or an accent
+# inside, and a name can carry part of it or be split across two path components. A text is shaped like one when it holds
+# RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most three characters that are neither
+# a letter nor a digit between two digits (a run of white space counts as one, and `/` is such a character), after NFKC
+# folding (which turns full-width digits, superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a
+# phone number or an id.
+# The judgment is linear in the text: the maximal runs of digits and separators are found in one pass, and only a run long
+# enough to hold RECOVERY_DIGITS digits is looked at again, at its start (a pattern tried from every digit costs 41 steps per
+# character on "41 digits and a letter", repeated). A path is judged only up to JUDGE_CHARS characters: nothing a file system
+# holds is longer, and a longer text is withheld whole instead of being read, so that the cost of one hostile cell stays small.
 RECOVERY_DIGITS = 42
-GAP = r"[\s_.\-\u00ad\u058a\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
-RECOVERY_TEXT = re.compile(r"\d(?:%s{0,3}\d){%d,}" % (GAP, RECOVERY_DIGITS - 1))
+JUDGE_CHARS = 8192
+SEPARATOR = r"[\W_]"
+DIGIT_RUN = re.compile(r"\d(?:%s{0,3}\d)*" % SEPARATOR)
+KEY_START = re.compile(r"\d(?:%s{0,3}\d){%d}" % (SEPARATOR, RECOVERY_DIGITS - 1))
+SPACES = re.compile(r"\s+")
+
+
+def folded(text):
+    """NFKC, with every run of white space as one space."""
+    return SPACES.sub(" ", unicodedata.normalize("NFKC", text))
+
+
+def key_spans(text):
+    """(start, end) of every run of `text` (already folded) that holds RECOVERY_DIGITS or more digits."""
+    return [run.span() for run in DIGIT_RUN.finditer(text)
+            if run.end() - run.start() >= RECOVERY_DIGITS and KEY_START.match(text, run.start())]
 
 
 def key_shaped(text):
-    return RECOVERY_TEXT.search(unicodedata.normalize("NFKC", text)) is not None
+    return bool(key_spans(folded(text)))
 
 
 def shown(path, count=True):
-    """A path as it may be printed: any component shaped like a recovery password is withheld."""
+    """A path as it may be printed: a component that holds digits of a text shaped like a recovery password (a key split
+    across components included) is withheld, and a path too long to judge is withheld whole."""
     if not isinstance(path, str):
         return path
+    if len(path) > JUDGE_CHARS:
+        if count:
+            PATHS_WITHHELD[0] += 1
+        return WITHHELD_LONG
     parts = path.split("/")
-    for i, part in enumerate(parts):
-        if key_shaped(part):
-            parts[i] = WITHHELD
-            if count:
-                PATHS_WITHHELD[0] += 1
+    texts = [folded(part) for part in parts]
+    spans = key_spans("/".join(texts))
+    if not spans:
+        return path
+    at, hidden = 0, []
+    for i, text in enumerate(texts):
+        if any(start < at + len(text) and end > at for start, end in spans):
+            hidden.append(i)
+        at += len(text) + 1
+    for i in hidden:
+        parts[i] = WITHHELD
+        if count:
+            PATHS_WITHHELD[0] += 1
     return "/".join(parts)
 
 
 def scrub(text):
     """Text that may quote a path, with anything shaped like a recovery password withheld."""
-    text = RECOVERY_TEXT.sub(WITHHELD, text)
+    text = DIGIT_RUN.sub(lambda run: WITHHELD if run.end() - run.start() >= RECOVERY_DIGITS and KEY_START.match(run.string, run.start())
+                         else run.group(), text)
     if key_shaped(text):      # digits only NFKC folds (superscripts, circled digits): the text is not printed at all
         return WITHHELD
     return text
@@ -219,22 +269,43 @@ def wrap_up(answer):
     return answer
 
 
+WRITE_STALL_SECONDS = 30
+
+
+def write_stalled(signum, frame):
+    sys.stderr.write("the reader took nothing for %d seconds: the answer is not delivered\n" % WRITE_STALL_SECONDS)
+    raise SystemExit(141)
+
+
 def emit(text):
     """Write one document to standard output, whole. From here a stop signal is ignored: the answer is written in one piece
-    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure."""
+    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure.
+    A reader that takes nothing for WRITE_STALL_SECONDS is given up on (exit 141): without that, a pipe nobody reads could
+    be ended only by SIGKILL."""
     for number in STOP_SIGNALS:
         signal.signal(number, signal.SIG_IGN)
     data = memoryview((text + "\n").encode("utf-8"))
+    timed = hasattr(signal, "setitimer")
+    if timed:
+        try:
+            signal.signal(signal.SIGALRM, write_stalled)
+        except ValueError:      # not the main thread: no deadline
+            timed = False
     try:
         sys.stdout.flush()
         descriptor = sys.stdout.fileno()
         while len(data):
+            if timed:
+                signal.setitimer(signal.ITIMER_REAL, WRITE_STALL_SECONDS)       # progress restarts the wait
             try:
                 data = data[os.write(descriptor, data):]
             except BlockingIOError:      # a pipe set non-blocking by its owner and full: wait until it can take more
                 select.select([], [descriptor], [], 1.0)
     except OSError:       # the reader went away: there is nobody to answer
         raise SystemExit(1)
+    finally:
+        if timed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def fail(message, **extra):
@@ -729,7 +800,11 @@ def window_rule_failed(blob, state, shape, aimed):
     # A control byte other than tab and the line ends means it is not text: the common case, decided without decoding.
     if not blob.translate(None, CONTROL_FREE) and text_characters(memoryview(blob)) is not None:
         return "printable_text"
-    if state not in ("ok", "stopped"):
+    # A parse the budget or the clock stopped is judged on the fields it read. For a window the caller aimed that would let the caller
+    # choose how many fields decide (max_fields 4: acceptance on the first four, whatever follows), and a window slid over a token has
+    # a shown window for 19 to 21 percent of 64-character hexadecimal tokens instead of 1 percent: an aimed window is shown only when
+    # the whole of it was parsed.
+    if state != "ok" and not (state == "stopped" and not aimed):
         return "parse_" + state
     if shape["fields"] < 2:
         return "fewer_than_two_fields"
@@ -951,7 +1026,7 @@ def main():
                 "impossible. A window slid across a token is held to the stricter rule for a window with an offset or a length, and a "
                 "residual remains: in a measurement on tokens that are the whole of one string field, 0 to 1.2 percent of 12- to 64-character tokens had a window "
                 "that was shown, and at most 0.2 percent of a token's characters were derivable from it; for a token split across two fields or "
-                "written as repeated six-byte pieces it is higher (up to 12.5 percent of 64-character hexadecimal tokens had a shown window, never a whole token). A group makes the window `not_accepted`, as does every other window the rules do not show. "
+                "written as repeated six-byte pieces it is higher (up to 12.5 percent of 64-character hexadecimal tokens had a shown window, never a whole token); the same whatever max_fields is set to, since an aimed window that the field budget stopped is not shown. A group makes the window `not_accepted`, as does every other window the rules do not show. "
                 "Offsets are absolute in the file.",
     })
 

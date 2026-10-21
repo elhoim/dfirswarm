@@ -51,6 +51,14 @@ presence and length, and a path component shaped like a recovery password is wit
 has no values file: it reads no secret and writes none. A future decryption step would take its
 secret from a sealed file by reference, never from an argument.
 
+WHAT IS WITHHELD AS RECOVERY-PASSWORD SHAPED. A text (a path component, a domain, a file id, a message that quotes a path) that holds 42 or
+more decimal digits (seven groups of six) with at most three characters that are neither a letter nor a digit between two digits, after
+NFKC folding: any separator (comma, colon, semicolon, plus, brackets, quote marks, `#`, accents, symbols, dashes of every kind, dots,
+underscores, a zero-width character; a run of white space counts as one), none at all, full-width and Arabic-Indic digits, and `/`, so a key
+split across two path components is withheld in each. A path or a domain longer than 8,192 characters is not judged: nothing a file system
+holds is that long, and it is printed as `<name too long to judge withheld>`, so that one hostile cell costs a constant and not a minute
+per megabyte (the pattern that judged a cell cost 0.46 s per MB of "41 digits and a letter", repeated; judging is now linear and bounded).
+
 THE FILE ID IS PRINTED, withheld names included. It is the SHA-1 of the domain, a dash and the real path, so for a row whose path is
 withheld it is a digest of the withheld name. That is the layout of an iOS backup, not a choice of this tool: the blob is stored under
 that name, `on_disk` cites it, and any listing of the backup directory shows the same digests. Hiding it here would hide nothing the
@@ -108,41 +116,77 @@ VALUES_FORMAT = "not used"
 #      expression that is not accepted writes a file of the same size as one that is, and every row
 #      carries a random per-run `run`, so that no two runs share a digest.
 #   6. One document is written, whole: from the moment the answer is being written a stop signal is
-#      ignored, so a reader that is slow never gets a truncated answer followed by a failure.
+#      ignored, so a reader that is slow never gets a truncated answer followed by a failure. A reader that
+#      takes nothing for WRITE_STALL_SECONDS is given up on: the tool exits (141) instead of waiting for ever.
 
 WITHHELD = "<recovery-password-shaped name withheld>"
+WITHHELD_LONG = "<name too long to judge withheld>"
 PATHS_WITHHELD = [0]
 # A BitLocker recovery password is eight groups of six digits: 48 digits. People save a key under its own name, and not
 # only in the dashed form: with spaces, underscores or dots between the groups, with no separator at all, with another
-# dash, in full-width or Arabic-Indic digits, with a zero-width character inside, and a name can carry part of it. A name
-# is shaped like one when it holds RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most
-# three separator or invisible characters between two digits, after NFKC folding (which turns full-width digits,
-# superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a phone number or an id.
+# dash, comma, colon, bracket or quote mark, in full-width or Arabic-Indic digits, with a zero-width character or an accent
+# inside, and a name can carry part of it or be split across two path components. A text is shaped like one when it holds
+# RECOVERY_DIGITS (seven groups of six) or more decimal digits in a run that allows at most three characters that are neither
+# a letter nor a digit between two digits (a run of white space counts as one, and `/` is such a character), after NFKC
+# folding (which turns full-width digits, superscripts and circled digits into ASCII ones). Fewer digits are a timestamp, a
+# phone number or an id.
+# The judgment is linear in the text: the maximal runs of digits and separators are found in one pass, and only a run long
+# enough to hold RECOVERY_DIGITS digits is looked at again, at its start (a pattern tried from every digit costs 41 steps per
+# character on "41 digits and a letter", repeated). A path is judged only up to JUDGE_CHARS characters: nothing a file system
+# holds is longer, and a longer text is withheld whole instead of being read, so that the cost of one hostile cell stays small.
 RECOVERY_DIGITS = 42
-GAP = r"[\s_.\-\u00ad\u058a\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
-RECOVERY_TEXT = re.compile(r"\d(?:%s{0,3}\d){%d,}" % (GAP, RECOVERY_DIGITS - 1))
+JUDGE_CHARS = 8192
+SEPARATOR = r"[\W_]"
+DIGIT_RUN = re.compile(r"\d(?:%s{0,3}\d)*" % SEPARATOR)
+KEY_START = re.compile(r"\d(?:%s{0,3}\d){%d}" % (SEPARATOR, RECOVERY_DIGITS - 1))
+SPACES = re.compile(r"\s+")
+
+
+def folded(text):
+    """NFKC, with every run of white space as one space."""
+    return SPACES.sub(" ", unicodedata.normalize("NFKC", text))
+
+
+def key_spans(text):
+    """(start, end) of every run of `text` (already folded) that holds RECOVERY_DIGITS or more digits."""
+    return [run.span() for run in DIGIT_RUN.finditer(text)
+            if run.end() - run.start() >= RECOVERY_DIGITS and KEY_START.match(text, run.start())]
 
 
 def key_shaped(text):
-    return RECOVERY_TEXT.search(unicodedata.normalize("NFKC", text)) is not None
+    return bool(key_spans(folded(text)))
 
 
 def shown(path, count=True):
-    """A path as it may be printed: any component shaped like a recovery password is withheld."""
+    """A path as it may be printed: a component that holds digits of a text shaped like a recovery password (a key split
+    across components included) is withheld, and a path too long to judge is withheld whole."""
     if not isinstance(path, str):
         return path
+    if len(path) > JUDGE_CHARS:
+        if count:
+            PATHS_WITHHELD[0] += 1
+        return WITHHELD_LONG
     parts = path.split("/")
-    for i, part in enumerate(parts):
-        if key_shaped(part):
-            parts[i] = WITHHELD
-            if count:
-                PATHS_WITHHELD[0] += 1
+    texts = [folded(part) for part in parts]
+    spans = key_spans("/".join(texts))
+    if not spans:
+        return path
+    at, hidden = 0, []
+    for i, text in enumerate(texts):
+        if any(start < at + len(text) and end > at for start, end in spans):
+            hidden.append(i)
+        at += len(text) + 1
+    for i in hidden:
+        parts[i] = WITHHELD
+        if count:
+            PATHS_WITHHELD[0] += 1
     return "/".join(parts)
 
 
 def scrub(text):
     """Text that may quote a path, with anything shaped like a recovery password withheld."""
-    text = RECOVERY_TEXT.sub(WITHHELD, text)
+    text = DIGIT_RUN.sub(lambda run: WITHHELD if run.end() - run.start() >= RECOVERY_DIGITS and KEY_START.match(run.string, run.start())
+                         else run.group(), text)
     if key_shaped(text):      # digits only NFKC folds (superscripts, circled digits): the text is not printed at all
         return WITHHELD
     return text
@@ -209,22 +253,43 @@ def wrap_up(answer):
     return answer
 
 
+WRITE_STALL_SECONDS = 30
+
+
+def write_stalled(signum, frame):
+    sys.stderr.write("the reader took nothing for %d seconds: the answer is not delivered\n" % WRITE_STALL_SECONDS)
+    raise SystemExit(141)
+
+
 def emit(text):
     """Write one document to standard output, whole. From here a stop signal is ignored: the answer is written in one piece
-    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure."""
+    (a reader that is slow, or has not started, sees all of it) and never as a truncated document followed by a failure.
+    A reader that takes nothing for WRITE_STALL_SECONDS is given up on (exit 141): without that, a pipe nobody reads could
+    be ended only by SIGKILL."""
     for number in STOP_SIGNALS:
         signal.signal(number, signal.SIG_IGN)
     data = memoryview((text + "\n").encode("utf-8"))
+    timed = hasattr(signal, "setitimer")
+    if timed:
+        try:
+            signal.signal(signal.SIGALRM, write_stalled)
+        except ValueError:      # not the main thread: no deadline
+            timed = False
     try:
         sys.stdout.flush()
         descriptor = sys.stdout.fileno()
         while len(data):
+            if timed:
+                signal.setitimer(signal.ITIMER_REAL, WRITE_STALL_SECONDS)       # progress restarts the wait
             try:
                 data = data[os.write(descriptor, data):]
             except BlockingIOError:      # a pipe set non-blocking by its owner and full: wait until it can take more
                 select.select([], [descriptor], [], 1.0)
     except OSError:       # the reader went away: there is nobody to answer
         raise SystemExit(1)
+    finally:
+        if timed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def fail(message, **extra):
@@ -1022,7 +1087,7 @@ def main():
             counts["metadata"][meta["metadata_status"]] = counts["metadata"].get(meta["metadata_status"], 0) + 1
             if meta.get("has_wrapped_file_key"):
                 counts["wrapped_file_keys"] += 1
-            record = {"file_id": scrub(file_id), "file_id_valid": valid, "domain": shown(domain), "relative_path": shown(relative),
+            record = {"file_id": scrub(file_id) if len(file_id) <= JUDGE_CHARS else WITHHELD_LONG, "file_id_valid": valid, "domain": shown(domain), "relative_path": shown(relative),
                       "flags": numeric(flags), "kind": numeric(kind), "blob": state_b,
                       **({"blob_layout": layout, "blob_bytes": size_b,
                           "on_disk": (file_id[:2] + "/" + file_id) if layout == "sharded" else file_id} if state_b == "present" else {}),
@@ -1128,8 +1193,8 @@ def main():
         "pages": paging,
         "truncated": any(p["truncated"] for p in paging.values()),
         "paths_withheld": PATHS_WITHHELD[0],
-        **({"paths_note": "A path component shaped like a recovery password is withheld from every path in this answer and in "
-                          "the files it names."} if PATHS_WITHHELD[0] else {}),
+        **({"paths_note": "A path component shaped like a recovery password (a key split across components included), or a path "
+                          "too long to judge, is withheld from every path in this answer and in the files it names."} if PATHS_WITHHELD[0] else {}),
         "note": "This lists a backup's map; it is not the phone's file system. Cite the relative path (what the phone called "
                 "the file), the domain and the file id (what was opened), and the Manifest.db row. `encryption.state` "
                 "is unknown when Manifest.plist is missing, unreadable or without IsEncrypted: do not read it as "

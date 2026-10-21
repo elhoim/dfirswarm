@@ -737,7 +737,8 @@ import importlib.util, os, re, sys
 sys.dont_write_bytecode = True      # the pack is sealed: no __pycache__ beside its tools
 spec = importlib.util.spec_from_file_location("fs", sys.argv[1]); fs = importlib.util.module_from_spec(spec); spec.loader.exec_module(fs)
 if hasattr(fs, "linear_pattern"):
-    fs.linear_pattern = lambda source: (re.compile(source, re.I), None)
+    arity = len(fs.linear_pattern("a"))      # (pattern, reason) before the work budget, (pattern, reason, cost) after it
+    fs.linear_pattern = lambda source: (re.compile(source, re.I), None) + ((1,) if arity == 3 else ())
 fs.REGEX_SECONDS = 0.25
 os.chdir(sys.argv[2])
 os.environ.update(JOB_ID="j-1", OUT=sys.argv[3], SECRET_OUTPUT="1", AGENT_ID="s1")
@@ -774,25 +775,112 @@ test("sqlite_freespace marks a fragment its expression could not be decided on i
   });
 });
 
-test("sqlite_freespace counts the time contains takes toward max_seconds, so max_seconds bounds the run", async () => {
-  // The expression's time was left out of max_seconds: `max_seconds: 3` with an expression that ran 2 s on every fragment took 10.3 s, and
-  // the worst case was 270 s of scan plus 10 s of expression inside a 300 s timeout.
+/**
+ * The real tool, with `timed_search` (the one call that runs the caller's expression) slowed by `argv[4]` seconds for every fragment,
+ * and with the work budget replaced by `argv[5]` steps when that is given: an expression that takes time on text of one class and
+ * none on text of another, without depending on how fast the machine is.
+ */
+const FREESPACE_SLOW_EXPRESSION = String.raw`
+import importlib.util, os, sys, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("fs", sys.argv[1]); fs = importlib.util.module_from_spec(spec); spec.loader.exec_module(fs)
+delay = float(sys.argv[4])
+inner = fs.timed_search
+def slow(pattern, text, seconds):
+    time.sleep(delay)
+    return inner(pattern, text, seconds)
+fs.timed_search = slow
+if len(sys.argv) > 5 and hasattr(fs, "STEP_BUDGET"):
+    fs.STEP_BUDGET = int(sys.argv[5])
+os.chdir(sys.argv[2])
+os.environ.update(JOB_ID="j-1", OUT=sys.argv[3], SECRET_OUTPUT="1", AGENT_ID="s1")
+os.makedirs(sys.argv[3], exist_ok=True)
+fs.run_main(fs.main)
+`;
+
+test("sqlite_freespace's status, its pages and its count of undecided fragments do not follow how long contains takes", async () => {
+  // The time an expression took counted toward max_seconds, so the answer said `partial` with a count of pages not reached when the hidden text
+  // was mostly of a class the expression is slow on, and `complete` when it was not: `\d{250}x` on 22 fragments of 60,000 characters, max_seconds
+  // 0.5, was partial (1 undecided, 13 pages not reached) on digits and complete on letters, three runs in three, with no noise.
   await withCwd(async (cwd) => {
-    const db = join(cwd, "work", "slow.db");
-    await build(FREELIST_DB, db, "SLOW-MARKER");
-    const out = join(cwd, "unchecked-slow");
-    const began = Date.now();
-    const run = await runPySnippet(FREESPACE_UNCHECKED, [FREESPACE, cwd, out], { db, write_values: true, contains: "(w+)+Y", min_length: 20, max_seconds: 1 });
-    const wall = (Date.now() - began) / 1000;
-    const answer = body<Free>(run);
-    assert.ok(wall < 5, `max_seconds 1 took ${wall} s`);
-    assert.notEqual(answer.stopped_before_page, null, "the time limit stopped the scan");
-    assert.equal(answer.status, "partial");
-    assert.ok(answer.problem_kinds["time limit"] >= 1);
-    assert.ok(answer.problem_kinds["contains not decided"] >= 1, "what the clock cut off is counted");
-    // The pages it read are marked, not dropped.
-    const rows = await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl"));
-    assert.equal(rows.length, answer.fragment_count);
+    const db = join(cwd, "work", "timing.db");
+    await build(FREELIST_DB, db, "TIMING-MARKER");
+    const answers: Free[] = [];
+    for (const [i, delay] of [0, 0.08].entries()) {
+      const out = join(cwd, `slow-${i}`);
+      // 40 rows of 900 characters, one fragment each at least: with 0.08 s a fragment the expression runs 3 s or more, six times max_seconds.
+      const run = await runPySnippet(FREESPACE_SLOW_EXPRESSION, [FREESPACE, cwd, out, String(delay)], { db, write_values: true, contains: "TIMING-MARKER-0[0-9]{2}", min_length: 20, max_seconds: 0.5 });
+      answers.push(body<Free>(run));
+    }
+    const [quick, slow] = answers;
+    assert.ok(quick.fragment_count >= 20, "enough fragments for the delay to add up");
+    for (const answer of answers) {
+      assert.equal(answer.status, "complete", answer.status_basis);
+      assert.equal(answer.stopped_before_page, null);
+      assert.equal(answer.scanned.pages_not_reached, 0);
+      assert.equal(answer.scanned.contains_not_decided ?? 0, 0);
+      assert.equal(answer.problem_kinds["time limit"], undefined);
+    }
+    const shape = (x: Free) => JSON.stringify({ status: x.status, scanned: x.scanned, problem_kinds: x.problem_kinds, stopped: x.stopped_before_page, n: x.fragment_count });
+    assert.equal(shape(quick), shape(slow));
+  });
+});
+
+test("sqlite_freespace gives contains a work budget in the sizes the answer shows, so what it cannot decide is the same on any text of those sizes", async () => {
+  // Digits and letters of the same lengths in the same layout: an expression that is slow on one class and fast on the other leaves the same
+  // undecided fragments, the same status and the same pages, because the budget is characters times the expression's cost bound, and the
+  // pattern and the lengths are what the caller already has.
+  await withCwd(async (cwd) => {
+    const TEXTS = String.raw`
+import random, sqlite3, sys
+path, kind = sys.argv[1:3]
+rng = random.Random(5)
+alphabet = "0123456789" if kind == "digits" else "abcdefghijklmnopqrstuvwxyz"
+db = sqlite3.connect(path)
+db.execute("PRAGMA secure_delete = OFF")
+db.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, body TEXT)")
+db.executemany("INSERT INTO message VALUES (?, ?)", [(i, "".join(rng.choice(alphabet) for _ in range(300 + 20 * i))) for i in range(1, 41)])
+db.commit()
+db.execute("DELETE FROM message")
+db.commit()
+db.close()
+`;
+    const pattern = "\\d{40}";      // cost bound 40 steps a character
+    const results: { answer: Free; rows: Value[] }[] = [];
+    let budget = 0;
+    for (const kind of ["digits", "letters"]) {
+      const db = join(cwd, "work", `${kind}.db`);
+      await build(TEXTS, db, kind);
+      if (!budget) {
+        const probe = await freespace(cwd, db, { min_length: 20 }, "probe");
+        const total = probe.answer.fragments.reduce((n, f) => n + f.characters, 0);
+        budget = Math.floor(total / 2) * 40;      // about half of the fragments fit
+      }
+      const out = join(cwd, `budget-${kind}`);
+      const run = await runPySnippet(FREESPACE_SLOW_EXPRESSION, [FREESPACE, cwd, out, "0", String(budget)], { db, write_values: true, contains: pattern, min_length: 20 });
+      const answer = body<Free>(run);
+      results.push({ answer, rows: await jsonl<Value>(join(out, "sqlite-freespace-values.jsonl")) });
+    }
+    // What the visible sizes say: fragments in order, a running total of characters times 40, and everything past the budget is undecided.
+    let running = 0;
+    const expected = results[0].answer.fragments.map((f) => { running += f.characters * 40; return running > budget; });
+    const overBudget = expected.filter(Boolean).length;
+    assert.ok(overBudget > 3 && overBudget < expected.length - 3, `the budget splits the fragments (${overBudget} of ${expected.length})`);
+    for (const { answer, rows } of results) {
+      assert.deepEqual(rows.map((v) => v.match === 2), expected);
+      assert.equal(answer.scanned.contains_not_decided, overBudget);
+      assert.equal(answer.status, "partial");
+      assert.equal(answer.problem_kinds["contains not decided"], 1);
+      assert.match(answer.problems.find((p) => p.kind === "contains not decided")?.detail ?? "", /work its expression may do/);
+      assert.equal(answer.stopped_before_page, null);
+    }
+    const [digits, letters] = results;
+    const shape = (x: Free) => JSON.stringify({ status: x.status, status_basis: x.status_basis, undecided: x.scanned.contains_not_decided, not_reached: x.scanned.pages_not_reached,
+      problem_kinds: x.problem_kinds, stopped: x.stopped_before_page, fragments: x.fragments.map((f) => [f.page, f.offset, f.bytes, f.characters, f.encoding]) });
+    assert.equal(shape(digits.answer), shape(letters.answer));
+    // And the expression ran where it was in budget: digits matched there, letters did not.
+    assert.ok(digits.rows.filter((v) => v.match === 1).length >= 3);
+    assert.equal(letters.rows.filter((v) => v.match === 1).length, 0);
   });
 });
 
@@ -1964,6 +2052,42 @@ test("manifest_db applies contains and domain to the path it prints, so a withhe
   });
 });
 
+test("manifest_db does not run a path or domain it cannot bound through the recovery-password patterns, and prints a placeholder for it", async () => {
+  // The recovery-shape pattern cost 0.46 s per MB of a path or domain cell ("41 digits and a letter", repeated): three rows of 8 MB took 11.3 s of CPU,
+  // max_seconds was only looked at between rows, and a cell of the 1 GB SQLite allows would have run past the tool's own timeout.
+  await withCwd(async (cwd) => {
+    const hostile = ("1".repeat(41) + "a").repeat(500);      // 21,000 characters
+    const ordinary = "Documents/note.txt";
+    const dir = await backup(cwd, "hostile", { entries: [
+      { id: ID_A, path: `Library/${hostile}`, blob: "none", domain: `AppDomain-${hostile}` },
+      { id: ID_B, path: ordinary, blob: "none" },
+      { id: ID_C, path: hostile, blob: "none" },
+    ] });
+    const { answer, run } = await manifest(cwd, dir);
+    assert.equal(answer.entry_count, 3);
+    assert.equal(answer.entries[0].relative_path, "<name too long to judge withheld>");
+    assert.equal(answer.entries[0].domain, "<name too long to judge withheld>");
+    assert.equal(answer.entries[1].relative_path, ordinary);
+    assert.equal(answer.entries[2].relative_path, "<name too long to judge withheld>");
+    assert.equal(run.stdout.includes("1".repeat(41)), false, "none of the cell is printed");
+    assert.ok(answer.paths_withheld >= 3);
+    // What is printed can be filtered on, and the cell behind the placeholder matches nothing.
+    assert.equal((await manifest(cwd, dir, { contains: "1111111111" })).answer.entry_count, 0);
+    assert.equal((await manifest(cwd, dir, { contains: "too long to judge" })).answer.entry_count, 2);
+    assert.equal((await manifest(cwd, dir, { domain: "<name too long to judge withheld>" })).answer.entry_count, 1);
+    // The listing stays bounded in time whatever the cell holds: the same three rows with the cell 40 times larger take seconds, not minutes.
+    const big = await backup(cwd, "hostile-big", { entries: [
+      { id: ID_A, path: ("1".repeat(41) + "a").repeat(40000), blob: "none" }, { id: ID_B, path: ordinary, blob: "none" },
+      { id: ID_C, path: ("1".repeat(41) + "a").repeat(40000), blob: "none" },
+    ] });
+    const began = Date.now();
+    const large = await manifest(cwd, big);
+    assert.equal(large.answer.entry_count, 3);
+    assert.equal(large.answer.entries[0].relative_path, "<name too long to judge withheld>");
+    assert.ok((Date.now() - began) / 1000 < 20, "3 rows of 1.7 MB took " + (Date.now() - began) / 1000 + " s");
+  });
+});
+
 test("manifest_db does not read a keyed-archive cell above 1 MiB, and says so for that row", async () => {
   // The whole cell was read and parsed: a 76 MB archive took 1.05 GB, and a larger cell has no limit but the machine's.
   await withCwd(async (cwd) => {
@@ -2175,6 +2299,66 @@ print(json.dumps(result))
   const hits = JSON.parse(run.stdout) as Record<string, number>;
   // Before: about 46, 87 and 99 percent of these tokens had a shown window that gave bytes of the token away. After: at most 3 percent of them.
   for (const [label, n] of Object.entries(hits)) assert.ok(n <= 0.03 * count, `${label}: ${n} of ${count} tokens had a window that was shown`);
+});
+
+test("protobuf_peek does not show an aimed window that the field budget stopped, so max_fields cannot raise the rate of shown windows over a token", async () => {
+  // A window the budget stopped was accepted on the fields it had read: with max_fields 4 acceptance was judged on the first four fields of any
+  // window, and a window slid over a token was shown for 19 to 21 percent of 64-character hexadecimal tokens instead of 1 percent.
+  await withCwd(async (cwd) => {
+    // Eight small varint fields, 16 bytes: a message, aimed by its length.
+    const hex = "08011002180320042805300638074008";
+    const whole = body<{ structure: { status: string }; field_count: number }>(await tool(PROTOBUF, cwd, { hex, length: 16 }));
+    assert.equal(whole.structure.status, "valid");
+    assert.equal(whole.field_count, 8);
+    type Peek = { structure: { status: string; reason: string; rows_withheld?: boolean }; field_count: number; top_level_fields: number };
+    const budgeted = body<Peek>(await tool(PROTOBUF, cwd, { hex, length: 16, max_fields: 4 }));
+    assert.equal(budgeted.structure.status, "not_accepted", "the budget stopped an aimed window: it is not shown");
+    assert.equal(budgeted.field_count, 0);
+    assert.equal(budgeted.top_level_fields, 0);
+    // The same words and the same counts as any other window that is not shown.
+    const text = body<Peek>(await tool(PROTOBUF, cwd, { hex: "68656c6c6f20776f726c64206162636465", length: 16 }));
+    assert.equal(text.structure.status, "not_accepted");
+    assert.equal(budgeted.structure.reason, text.structure.reason);
+    // A window nobody aimed (the start of the file) is still read as far as the budget goes, and said to be partial.
+    const unaimed = body<Peek>(await tool(PROTOBUF, cwd, { hex, max_fields: 4 }));
+    assert.equal(unaimed.structure.status, "partial");
+    assert.equal(unaimed.field_count, 4);
+
+    // And over tokens: every window a budget of four fields shows is a window the default budget shows too.
+    const probe = String.raw`
+import importlib.util, json, random, sys, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("pb", sys.argv[1]); pb = importlib.util.module_from_spec(spec); spec.loader.exec_module(pb)
+rng = random.Random(21)
+def varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F; n >>= 7
+        if n: out.append(b | 0x80)
+        else: out.append(b); return bytes(out)
+def shown(win, max_fields):
+    ctx = pb.Context(win, 0, 6, max_fields, time.monotonic() + 60)
+    rows, state, problem, shape = pb.parse(ctx, 0, len(win), 0, [])
+    return pb.window_accepted_by(win, state, shape, True)
+extra, windows, default_shown, four_shown = 0, 0, 0, 0
+for _ in range(int(sys.argv[2])):
+    token = "".join(rng.choice("0123456789abcdef") for _ in range(64)).encode()
+    prefix = b"\x08\x01\x12" + varint(len(token))
+    message = prefix + token + b"\x18\x02"
+    for offset in range(len(prefix), len(prefix) + len(token)):
+        for size in range(1, min(len(message) - offset, 100) + 1):
+            win = message[offset:offset + size]
+            a, b = shown(win, 100000), shown(win, 4)
+            windows += 1; default_shown += a; four_shown += b
+            extra += (b and not a)
+print(json.dumps({"windows": windows, "default_shown": default_shown, "four_shown": four_shown, "shown_only_with_four": extra}))
+`;
+    const run = await runPySnippet(probe, [PROTOBUF, "150"], null);
+    assert.equal(run.code, 0, run.stderr);
+    const counts = JSON.parse(run.stdout) as { windows: number; default_shown: number; four_shown: number; shown_only_with_four: number };
+    assert.equal(counts.shown_only_with_four, 0, `${counts.shown_only_with_four} of ${counts.windows} windows were shown only because the budget was four fields`);
+    assert.ok(counts.four_shown <= counts.default_shown);
+  });
 });
 
 test("protobuf_peek holds a window it was aimed at to 16 bytes and 4 fields, and shows no window of printable text", async () => {
@@ -2410,6 +2594,21 @@ shapes = {
     "zero-width inside": lambda: "-".join(key())[:rng.randrange(1, 40)] + "​" + "-".join(key())[0:0] + "".join(key())[0:0],
     "seven groups": lambda: "-".join(key(7)),
     "superscript digits": lambda: "".join(key()).translate(sup),
+    "commas": lambda: ",".join(key()),
+    "colons": lambda: ":".join(key()),
+    "semicolons": lambda: ";".join(key()),
+    "plus signs": lambda: "+".join(key()),
+    "parentheses": lambda: "".join("(%s)" % g for g in key()),
+    "hash signs": lambda: "#".join(key()),
+    "tildes": lambda: "~".join(key()),
+    "quote marks": lambda: "".join(rng.choice(['"%s"', "'%s'", "“%s”", "‘%s’"]) % g for g in key()),
+    "accents": lambda: "".join(g + "\u0301" for g in key()),
+    "symbols": lambda: rng.choice(["§", "©", "•", "→"]).join(key()),
+    "four or more spaces": lambda: (" " * rng.randrange(4, 12)).join(key()),
+    "tabs": lambda: "\t\t\t\t".join(key()),
+    "two path components": lambda: "".join(key(4)) + "/" + "".join(key(4)),
+    "eight path components": lambda: "/".join(key()),
+    "components and separators": lambda: "-".join(key(3)) + "/" + ", ".join(key(5)),
 }
 benign = {
     "uuid": lambda: "-".join([hexs(8), hexs(4), hexs(4), hexs(4), hexs(12)]),
@@ -2421,6 +2620,10 @@ benign = {
     "six groups": lambda: "-".join(key(6)),
     "ipv4": lambda: ".".join(str(rng.randrange(256)) for _ in range(4)),
     "photo name": lambda: "IMG_%04d.HEIC" % rng.randrange(10000),
+    "photo path": lambda: "Media/DCIM/%dAPPLE/IMG_%04d.JPG" % (rng.randrange(100, 999), rng.randrange(10000)),
+    "dated directories": lambda: "%04d/%02d/%02d/%02d/%02d/%02d" % (rng.randrange(2000, 2030), rng.randrange(1, 13), rng.randrange(1, 29), rng.randrange(24), rng.randrange(60), rng.randrange(60)),
+    "two timestamps": lambda: "%014d_%014d" % (rng.randrange(10 ** 14), rng.randrange(10 ** 14)),
+    "digits and letters": lambda: "".join(rng.choice("0123456789") if i % 7 else "k" for i in range(60)),
 }
 out = {"withheld": {}, "printed": {}}
 N = 40
@@ -2435,15 +2638,30 @@ for name, make in shapes.items():
 for name, make in benign.items():
     out["printed"][name] = sum(1 for _ in range(N) if (lambda v: t.shown("Documents/" + v, False) == "Documents/" + v and t.scrub("opening " + v) == "opening " + v)(make()))
 out["scrub_withheld"] = sum(1 for _ in range(N) if t.WITHHELD in t.scrub("cannot read " + "-".join(key()) + " (denied)"))
+# A text longer than the tool judges is withheld whole and never run through the digit patterns; one inside the bound is judged once.
+calls = []
+judge = t.key_spans
+t.key_spans = lambda text: (calls.append(len(text)), judge(text))[1]
+hostile = ("1" * 41 + "a") * 400
+out["long"] = {"printed": t.shown("Documents/" + hostile, False), "calls": len(calls), "limit": t.JUDGE_CHARS}
+inside = ("1" * 41 + "a") * 150
+t.shown("Documents/" + inside, False)
+out["inside"] = {"calls": len(calls), "longest": max(calls)}
+t.key_spans = judge
 print(json.dumps(out))
 `;
   for (const script of [FREESPACE, MANIFEST, PROTOBUF]) {
     const r = await runPySnippet(probe, [script], null);
     assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout) as { withheld: Record<string, number>; printed: Record<string, number>; scrub_withheld: number };
+    const out = JSON.parse(r.stdout) as { withheld: Record<string, number>; printed: Record<string, number>; scrub_withheld: number;
+      long: { printed: string; calls: number; limit: number }; inside: { calls: number; longest: number } };
     for (const [shape, n] of Object.entries(out.withheld)) assert.equal(n, 40, `${script}: ${n} of 40 names in the shape "${shape}" were withheld`);
     for (const [shape, n] of Object.entries(out.printed)) assert.equal(n, 40, `${script}: ${n} of 40 names in the shape "${shape}" were printed`);
     assert.equal(out.scrub_withheld, 40);
+    assert.equal(out.long.printed, "<name too long to judge withheld>", script);
+    assert.equal(out.long.calls, 0, "a path over the bound is not run through the digit patterns");
+    assert.equal(out.inside.calls, 1, "a path inside it is judged once");
+    assert.ok(out.inside.longest <= out.long.limit);
   }
 });
 
@@ -2492,6 +2710,44 @@ t.run_main(main)
         if (parsed.interrupted !== undefined) assert.ok(r.code !== 0, label);
         else { assert.equal(r.code, 0, label); assert.equal(parsed.tail, "the end"); assert.equal((parsed.rows as string[]).length, 120000); }
       }
+    }
+  });
+});
+
+test("the three tools give up on a reader that takes nothing for the write deadline, instead of waiting until they are killed", async () => {
+  // From the moment an answer was being written every stop signal was ignored, so a pipe nobody read could be ended only by SIGKILL.
+  await withCwd(async (cwd) => {
+    const code = String.raw`
+import importlib.util, sys, threading
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+t.WRITE_STALL_SECONDS = 1
+def ready():
+    sys.stderr.write("READY\n"); sys.stderr.flush()
+threading.Timer(0.5, ready).start()
+def main():
+    t.send({"rows": ["row %d" % i for i in range(120000)], "tail": "the end"})
+t.run_main(main)
+`;
+    for (const script of [FREESPACE, MANIFEST, PROTOBUF]) {
+      const r = await new Promise<{ code: number | null; killed: boolean; seconds: number; stderr: string }>((resolve, reject) => {
+        const child = spawn("python3", ["-c", code, script], { cwd, env: { ...process.env, ...AGENT } });
+        const err: Buffer[] = [];
+        const began = Date.now();
+        let killed = false;
+        const guard = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, 30000);
+        child.stderr.on("data", (c: Buffer) => {
+          err.push(c);
+          // Signalled while blocked, and nothing is ever read from standard output.
+          if (Buffer.concat(err).toString("utf8").includes("READY") && !err.some((x) => x.includes("SENT"))) { child.kill("SIGTERM"); err.push(Buffer.from("SENT")); }
+        });
+        child.on("error", reject);
+        child.on("close", (code2) => { clearTimeout(guard); resolve({ code: code2, killed, seconds: (Date.now() - began) / 1000, stderr: Buffer.concat(err).toString("utf8") }); });
+      });
+      assert.equal(r.killed, false, `${script}: the tool had to be killed`);
+      assert.equal(r.code, 141, `${script}: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /Traceback/);
+      assert.match(r.stderr, /the reader took nothing for 1 seconds/);
     }
   });
 });
