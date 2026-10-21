@@ -24,8 +24,8 @@ import sys
 import time
 from pathlib import Path
 
-TOOL = {"name": "fuzzy_hash", "version": 2}
-PARSER = "fuzzy_hash/2"
+TOOL = {"name": "fuzzy_hash", "version": 3}
+PARSER = "fuzzy_hash/3"
 DEFAULT_ENGINE_TIMEOUT = 120
 TOTAL_BUDGET = 270                       # seconds for the whole call: the manifest's own limit is 300
 VERSION_TIMEOUT = 10
@@ -196,17 +196,21 @@ def shutil_which(name):
     return None
 
 
-def sha256_of(path):
+def sha256_of(path, deadline):
+    """(the digest or None, bytes hashed, whether the whole file was): the pass ends at the call's own clock, one block of
+    1 MiB after it, and then gives no digest at all, only how far it got."""
     digest = hashlib.sha256()
     size = 0
     with open(path, "rb") as fh:
         while True:
+            if time.monotonic() > deadline:
+                return None, size, False
             block = fh.read(1 << 20)
             if not block:
                 break
             size += len(block)
             digest.update(block)
-    return digest.hexdigest(), size
+    return digest.hexdigest(), size, True
 
 
 class Logs:
@@ -377,8 +381,13 @@ class Run:
 
 
 def hash_one(runner, path, label):
-    sha, size = sha256_of(path)
-    entry = {"path": path, "bytes": size, "sha256": sha}
+    sha, hashed, whole = sha256_of(path, runner.deadline)
+    entry = {"path": path, "bytes": hashed if whole else os.path.getsize(path), "sha256": sha}
+    if not whole:
+        entry["sha256_status"] = "not_attempted"
+        entry["bytes_hashed"] = hashed
+        runner.problems.append("sha256 of %s: the call's time budget of %d seconds ran out after %d of %d bytes: no digest is given, and the engines were not run on it"
+                               % (label, TOTAL_BUDGET, hashed, entry["bytes"]))
     runner.partial.append(entry)
     for engine, argv, parse in (("ssdeep", ["ssdeep", "-b", "--", path], parse_ssdeep), ("tlsh", ["tlsh", "-f", path], parse_tlsh)):
         run = runner.call(argv, "%s %s" % (label, engine))
@@ -451,29 +460,32 @@ def main():
         fail("a file could not be read: %s" % describe(exc))
     comparison = None
     if len(files) == 2:
-        distance, unavailable = None, None
+        distance, unavailable, attempt_failed = None, None, False
         a, b = files[0]["tlsh"], files[1]["tlsh"]
         if a and b:
             run = runner.call(["tlsh", "-c", paths[0], "-f", paths[1]], "tlsh compare")
             line = first_line(run["stdout"])
             token = line.split(None, 1)[0] if line else ""
             if run["status"] != "ok":
-                unavailable = {"input": "both", "reason": "tlsh comparison %s: %s" % (run["status"], run["reason"])}
+                unavailable = {"input": "both", "reason": "tlsh comparison %s: %s" % (run["status"], run.get("reason") or "no reason given")}
+                attempt_failed = True
             elif DISTANCE_RX.match(token):
                 distance = int(token)
             else:
                 unavailable = {"input": "both", "reason": "tlsh returned an unrecognised comparison line: %r" % line[:200]}
+                attempt_failed = True
         else:
             missing = [k for k, d in (("path", a), ("compare_to", b)) if not d]
             reasons = {k: files[0 if k == "path" else 1]["tlsh_unavailable"] for k in missing}
             unavailable = {"input": "both" if len(missing) == 2 else missing[0],
                            "reason": "; ".join("%s: %s" % (k, reasons[k]) for k in missing) if len(missing) == 2 else reasons[missing[0]]}
-        if unavailable and unavailable["reason"] and "unrecognised" in unavailable["reason"]:
-            runner.problems.append("tlsh comparison: %s" % unavailable["reason"])
-        elif unavailable and unavailable["reason"] and re.search(r"timeout|failed|launch_failed", unavailable["reason"]):
+        # A comparison that could not be made because the program was asked and did not answer (or was not asked, the call's budget
+        # being spent) is a problem; one that an engine's own "too short" answer rules out is not, and a digest missing for a
+        # file has its own problem already.
+        if attempt_failed or (unavailable and unavailable["reason"] and re.search(r"unrecognised|timeout|failed|launch_failed|not_attempted", unavailable["reason"])):
             runner.problems.append("tlsh comparison: %s" % unavailable["reason"])
         comparison = {
-            "same_sha256": files[0]["sha256"] == files[1]["sha256"],
+            "same_sha256": (files[0]["sha256"] == files[1]["sha256"]) if files[0]["sha256"] and files[1]["sha256"] else None,
             "tlsh_distance": distance,
             "unavailable": unavailable,
             "note": "A smaller TLSH distance means more similar bytes; it is a lead, not attribution. A distance of its own proves nothing "
