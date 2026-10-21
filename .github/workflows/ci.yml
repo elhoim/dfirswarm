@@ -17,14 +17,17 @@ jobs:
     runs-on: ubuntu-latest
     # The node and shell suites together took 19 min on the limits branch and
     # 20 min 15 s on the next push, which the old 20 cut off mid-suite: a limit
-    # is there to stop a hang, not a suite that has grown.
-    timeout-minutes: 35
+    # is there to stop a hang, not a suite that has grown. The pack tests since
+    # (windows, reverse engineering, virtualization) made it 30 to 35 min (the
+    # slowest success 34 min 54 s of the 35, and 14 runs cut off at 35 min 18 s),
+    # so the limit is 60: a hang is still stopped, a grown suite is not.
+    timeout-minutes: 60
     steps:
       # actions/checkout runs `git init` on the runner, and git prints its
       # init.defaultBranch hint unless one is configured.
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -73,11 +76,13 @@ jobs:
     # newest 22; this is the floor, so the claim is tested, not assumed.
     name: typecheck · node tests · Node 22.19 (the engines floor)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The node suites alone take 13 to 20 min now (the slowest success 20 min 0 s
+    # of the 20): 35, the same step up as the job above.
+    timeout-minutes: 35
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.19.0
           cache: npm
@@ -98,11 +103,12 @@ jobs:
     # builds on node:24. The node suites again, on 24.
     name: node tests · Node 24 (the VM image's)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 14 to 19 min now (the slowest success 19 min 12 s of the 20): 35.
+    timeout-minutes: 35
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -131,7 +137,7 @@ jobs:
         with:
           # The base commit is read with git archive, so the history is needed.
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -169,7 +175,7 @@ jobs:
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -217,7 +223,7 @@ jobs:
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -255,7 +261,7 @@ jobs:
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm

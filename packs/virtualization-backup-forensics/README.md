@@ -51,9 +51,11 @@ time) is shown only when it fits a plain grammar for its kind; anything else is
 actor, a message) has token-shaped runs, user-info and the value after a name that
 says it is a secret withheld, and a second check, written apart from the first
 two, reads the serialised answer back. This is a heuristic, not a guarantee: a
-short password used alone as a name is not recognised (a flag with its value, such
-as `-password x`, and a secret's name followed by something that is not a word are
-withheld in a name), so the skills say to run the tools as jobs with
+short password used alone as a name is not recognised, nor, after a secret's name,
+a value of 4 characters or fewer, a tag, a counter, a date or a time stamp (a flag
+with its value, such as `-password x`, `--secret-key x` or `--master-keyX`, and a
+secret's name followed by something that is not a word, in any word after it or in groups
+of 4 characters or more in a row, are withheld in a name), so the skills say to run the tools as jobs with
 `secret_output: true`.
 
 ## Two things the skills keep repeating
