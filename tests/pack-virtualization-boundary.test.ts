@@ -213,7 +213,14 @@ def linear():
                             ("t10_underscores", lambda n: ("t10.AB" + "_" * n)[:n]), ("t10_runs", lambda n: ("t10.AB_" * n)[:n]), ("t10_words", lambda n: ("t10.ATA_x_" * n)[:n]),
                             ("iqn_dots", lambda n: ("iqn.2020-01.a." * n)[:n]), ("iqn_tail", lambda n: ("iqn.2020-01.a:" + "a" * n)[:n]), ("naa", lambda n: ("naa." + "a" * n)[:n]),
                             ("eui_wwn_vml", lambda n: ("eui.wwn-0xvml." * n)[:n]), ("win", lambda n: ("WIN-" + "A" * n)[:n]), ("password_brackets", lambda n: ("password=<" * n)[:n]),
-                            ("flag_brackets", lambda n: ("-password <" * n)[:n])):
+                            ("flag_brackets", lambda n: ("-password <" * n)[:n]), ("key_flags", lambda n: ("--a-b-c-d-e-key " * n)[:n]), ("key_dashes", lambda n: ("-a" * n)[:n]),
+                            ("placeholder_words", lambda n: ("password=<redacted> abcdefgh " * n)[:n]), ("t10_free_letters", lambda n: ("t10.ATA_____x_____" + "a" * n)[:n]),
+                            ("iqn_letters", lambda n: ("iqn.2020-01.a:" + "a" * n)[:n]), ("two_d", lambda n: ("t10.AB_" + "WD2D" * n)[:n]), ("secret_tags", lambda n: ("pwd-srv01 " * n)[:n]),
+                            ("secret_words", lambda n: ("password" * n)[:n]), ("secret_dots", lambda n: ("pwd.vmdk" * n)[:n]),
+                            ("secret_groups", lambda n: ("password-ab12-cd34-" * n)[:n]), ("secret_counters", lambda n: ("Token-000001-" * n)[:n]), ("secret_stamps", lambda n: ("pwd-D2024-10-04T020013_AB12 " * n)[:n]),
+                            ("secret_brackets", lambda n: ("[token-(pwd-" * n)[:n]), ("glued_flags", lambda n: ("--master-keyabcdefgh --userpass" * n)[:n]), ("camel_flags", lambda n: ("--apiToken -AdminPassword " * n)[:n]),
+                            ("key_files", lambda n: ("--key ~/.ssh/id_rsa --tls-auth ta.key " * n)[:n]), ("iqn_hex", lambda n: ("iqn.2010-06.com.purestorage:flasharray." + "a1" * n)[:n]), ("flag_dashes", lambda n: ("--a-b-c-d-e-password" * n)[:n]),
+                            ("secret_tags_long", lambda n: ("pwd-" + "srv01-" * n)[:n])):
         row = {}
         for n in req["sizes"]:
             text = make_text(n)
@@ -505,7 +512,7 @@ test("a secret name glued to a letter or written in CamelCase (adminPassword=, v
 
 // ---- time and size: every layer is linear ---------------------------------------------------------------------------------
 
-test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`, a run of backslashes, `eyJeyJ`, `\\u20\\u20`, `t10.AB` and a run of underscores, `iqn.`, `naa.`, `eui.`, `WIN-` runs, `password=<` runs), in CPU seconds", async () => {
+test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`, a run of backslashes, `eyJeyJ`, `\\u20\\u20`, `t10.AB` and a run of underscores, `iqn.`, `naa.`, `eui.`, `WIN-` runs, `password=<` runs, `--a-b-c-key` flags, `password=<redacted> abcdefgh` repeated, `t10.` and `iqn.` ids with a long run of one letter, `WD2D` runs, `pwd-srv01` and `pwd.vmdk` repeated, groups of four, counters, time stamps and brackets after a secret's name, glued and CamelCase flags, key files, `iqn.` ids with a hexadecimal serial), in CPU seconds", async () => {
   for (const [label, script] of TOOLS) {
     for (const field of [null, "name", "file", "uid"]) {
       const t = await host(script, { op: "linear", sizes: [5000, 20000, 100000], field });
