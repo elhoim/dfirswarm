@@ -26,7 +26,7 @@ import type { Run } from "./windows-pack-harness.ts";
 import { SHAPES, leaked, plant, prng } from "./windows-canary.ts";
 import { hive } from "./windows-hive.ts";
 import type { HiveKey } from "./windows-hive.ts";
-import { BASE_BLOCK, differingPages, dirtLog, hvleLog, withSequences } from "./windows-t1-fixtures.ts";
+import { BASE_BLOCK, differingPages, dirtLog, hvleLog, pathWithOnlyPython, withSequences } from "./windows-t1-fixtures.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -225,10 +225,8 @@ test("the independent reader: regfexport's counts agreeing, disagreeing, and abs
   });
   await withCwd(async (cwd) => {
     // Not installed at all (a PATH that holds python3 and nothing else): said, and not a failure of the read.
-    const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
-    await mkdir(join(cwd, "onlypython"));
-    await symlink(python, join(cwd, "onlypython", "python3"));
-    const out = body<Answer>(await tool("registry_recover", cwd, await put(cwd, s), { PATH: join(cwd, "onlypython") }));
+    const onlyPython = await pathWithOnlyPython(cwd);
+    const out = body<Answer>(await tool("registry_recover", cwd, await put(cwd, s), { PATH: onlyPython }));
     assert.equal(out.records.independent_reader.regfexport.ran, false);
     assert.match(out.records.independent_reader.regfexport.why, /not in this image/);
     assert.equal(out.status, "complete", "an absent second reader is said, and is not a failure of the read");

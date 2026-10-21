@@ -15,6 +15,24 @@
  *   jump lists         the DestList stream as libyal's jump list notes lay it out (see tests/pack-windows-forensics.test.ts).
  */
 
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+/**
+ * A directory to use as the whole PATH of a tool: it holds python3 and nothing else, so a program the tool looks for with `which` is
+ * not found. python3 is a script that runs the interpreter of this host by its real path, because a virtual environment's interpreter
+ * finds its packages from where it stands and a link to it from elsewhere would not.
+ */
+export async function pathWithOnlyPython(where: string): Promise<string> {
+  const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
+  const dir = join(where, "onlypython");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "python3"), `#!/bin/sh\nexec "${python}" "$@"\n`, "utf8");
+  await chmod(join(dir, "python3"), 0o755);
+  return dir;
+}
+
 const rol = (x: number, n: number): number => ((x << n) | (x >>> (32 - n))) >>> 0;
 
 /** The .NET Marvin32 hash, as the registry's transaction logs use it: seeded with a 64-bit seed, the result is the high word shifted up beside the low one. */

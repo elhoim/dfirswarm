@@ -25,7 +25,7 @@ import { test } from "node:test";
 import { withCwd } from "./tool-library-harness.ts";
 import { REGIPY, WIN, py, stub } from "./windows-pack-harness.ts";
 import { hive } from "./windows-hive.ts";
-import { BASE_BLOCK, FILETIME_A, cfb, destList, differingPages, hvleLog, lnk, withSequences } from "./windows-t1-fixtures.ts";
+import { BASE_BLOCK, FILETIME_A, cfb, destList, differingPages, hvleLog, lnk, pathWithOnlyPython, withSequences } from "./windows-t1-fixtures.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -440,11 +440,9 @@ test("dissect.target: not installed, or a target that is not one directory, is n
   await withCwd(async (cwd, bin) => {
     await collection(join(cwd, "c"));
     // Not installed (PATH holds python3 and the recipe's own needs, nothing else).
-    const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
-    await mkdir(join(cwd, "onlypython"));
-    await symlink(python, join(cwd, "onlypython", "python3"));
+    const onlyPython = await pathWithOnlyPython(cwd);
     const absent = join(cwd, "out-absent");
-    assert.equal(recipe(cwd, ["run", "--target", target("c"), "--out", absent], { PATH: join(cwd, "onlypython") }).code, 0);
+    assert.equal(recipe(cwd, ["run", "--target", target("c"), "--out", absent], { PATH: onlyPython }).code, 0);
     const none = (await coverage(absent)).families["dissect-target"];
     assert.equal(none.status, "not_attempted");
     assert.match(none.reason, /not installed/);

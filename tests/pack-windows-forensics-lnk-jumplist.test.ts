@@ -22,7 +22,7 @@ import { test } from "node:test";
 import { withCwd } from "./tool-library-harness.ts";
 import { body, everyFileUnder, failed, stub, tool } from "./windows-pack-harness.ts";
 import { SHAPES, leaked, plant, prng } from "./windows-canary.ts";
-import { FILETIME_A, cfb, destList, lnk } from "./windows-t1-fixtures.ts";
+import { FILETIME_A, cfb, destList, lnk, pathWithOnlyPython } from "./windows-t1-fixtures.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -244,10 +244,8 @@ EOF`;
   // Absent: said by name.
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "a.lnk"), LOCAL);
-    const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
-    await mkdir(join(cwd, "onlypython"));
-    await symlink(python, join(cwd, "onlypython", "python3"));
-    const out = body<Answer>(await tool("lnk_jumplist", cwd, { path: "work/a.lnk" }, { PATH: join(cwd, "onlypython") }));
+    const onlyPython = await pathWithOnlyPython(cwd);
+    const out = body<Answer>(await tool("lnk_jumplist", cwd, { path: "work/a.lnk" }, { PATH: onlyPython }));
     assert.equal(out.lnkinfo.not_run, 1);
     assert.match(JSON.stringify(out.lnkinfo.why_not_run), /not in this image|lnkinfo/);
   });
