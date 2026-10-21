@@ -31,6 +31,11 @@ import { BASE_BLOCK, differingPages, dirtLog, hvleLog, withSequences } from "./w
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
+/**
+ * The key and value records are read with regipy, which CI does not install: where it is missing the replay (stdlib only) is still
+ * tested with `export: false`, and the cases that read records are skipped with the reason.
+ */
+const RECORDS = !REGIPY;
 const skip = REGIPY;
 
 /** A hive whose Run value says which generation it is: generation n is the state after n log entries. */
@@ -45,7 +50,7 @@ const BINS = G[0].length - BASE_BLOCK;
 type Setup = { hive: Buffer; logs?: Record<string, Buffer> };
 async function put(cwd: string, s: Setup, name = "h"): Promise<Record<string, unknown>> {
   await writeFile(join(cwd, "work", `${name}.dat`), s.hive);
-  const args: Record<string, unknown> = { hive: `work/${name}.dat`, limit: 5 };
+  const args: Record<string, unknown> = { hive: `work/${name}.dat`, limit: 5, export: RECORDS };
   for (const [role, data] of Object.entries(s.logs ?? {})) {
     await writeFile(join(cwd, "work", `${name}.${role}`), data);
     args[role] = `work/${name}.${role}`;
@@ -59,7 +64,7 @@ const job = async (cwd: string, n = 1): Promise<Record<string, string>> => {
 const recoveredOf = (cwd: string, out: Answer): string => join(cwd, out.recovered_copy as string);
 const keysOf = async (cwd: string, out: Answer): Promise<Answer[]> => (await readFile(join(cwd, out.records.keys_file), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Answer);
 
-test("two entries across LOG1 and LOG2 are applied in order: the copy is the expected state byte for byte, and nothing else is touched", { skip }, async () => {
+test("two entries across LOG1 and LOG2 are applied in order: the copy is the expected state byte for byte, and nothing else is touched", async () => {
   await withCwd(async (cwd) => {
     const s: Setup = {
       hive: withSequences(G[0], 12, 10),
@@ -90,16 +95,18 @@ test("two entries across LOG1 and LOG2 are applied in order: the copy is the exp
     assert.deepEqual(receipt.replay.order.map((o: Answer) => [o.log, o.sequence]), [["log1", 10], ["log2", 11]]);
     assert.equal(receipt.hive_original.sha256, before[0], "the receipt holds the original's digest");
     assert.equal(receipt.recovered.sha256, sha(withSequences(G[2], 12, 12)));
-    // The records are the recovered state, and the changes name the one value that differs.
-    const keys = await keysOf(cwd, out);
-    assert.ok(keys.some((r) => JSON.stringify(r).includes("gen2.exe")), "the recovered state is what keys.jsonl holds");
-    assert.ok(!keys.some((r) => JSON.stringify(r).includes("gen0.exe")), "the old value is not");
-    assert.equal(out.records.changes.compared, true);
-    assert.equal(out.records.changes.inline.some((c: Answer) => c.change === "value_changed" && c.name === "App"), true);
+    if (RECORDS) {
+      // The records are the recovered state, and the changes name the one value that differs.
+      const keys = await keysOf(cwd, out);
+      assert.ok(keys.some((r) => JSON.stringify(r).includes("gen2.exe")), "the recovered state is what keys.jsonl holds");
+      assert.ok(!keys.some((r) => JSON.stringify(r).includes("gen0.exe")), "the old value is not");
+      assert.equal(out.records.changes.compared, true);
+      assert.equal(out.records.changes.inline.some((c: Answer) => c.change === "value_changed" && c.name === "App"), true);
+    }
   });
 });
 
-test("an entry is applied only when it is the next one the hive needs", { skip }, async () => {
+test("an entry is applied only when it is the next one the hive needs", async () => {
   const cases: Array<[string, Setup, RegExp]> = [
     ["a wrong pages hash ends the log there", { hive: withSequences(G[0], 11, 10), logs: { log1: hvleLog(G[1], [{ sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]), corrupt: "hash1" }], { primary: 10 }) } }, /hash/],
     ["a wrong header hash ends the log there", { hive: withSequences(G[0], 11, 10), logs: { log1: hvleLog(G[1], [{ sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]), corrupt: "hash2" }], { primary: 10 }) } }, /hash|header|signature|entry/],
@@ -117,12 +124,12 @@ test("an entry is applied only when it is the next one the hive needs", { skip }
       assert.match(JSON.stringify(out.unrecovered), why, label);
       assert.deepEqual(out.unrecovered[0].hive_ranges.length >= 0, true);
       // What the hive holds is still read (the state as it is), and the answer does not call it recovered.
-      assert.match(out.records.source, /^the hive as it is/, label);
+      if (RECORDS) assert.match(out.records.source, /^the hive as it is/, label);
     });
   }
 });
 
-test("an entry older than the hive's state is not written over newer pages (the state regipy's replay would produce)", { skip }, async () => {
+test("an entry older than the hive's state is not written over newer pages (the state regipy's replay would produce)", async () => {
   await withCwd(async (cwd) => {
     // The hive is at generation 1, sequence 12/12 +1 dirty; the log holds an older entry (sequence 9) that would put generation 0 back.
     const s: Setup = { hive: withSequences(G[1], 13, 12), logs: { log1: hvleLog(G[0], [{ sequence: 9, hiveBinsDataSize: BINS, pages: differingPages(G[1], G[0]) }], { primary: 9 }) } };
@@ -130,13 +137,17 @@ test("an entry older than the hive's state is not written over newer pages (the 
     assert.equal(out.entries_applied, 0);
     assert.equal(out.replayed, false);
     assert.equal(out.recovered_copy ?? null, null);
-    const keys = await keysOf(cwd, out);
-    assert.ok(keys.some((r) => JSON.stringify(r).includes("gen1.exe")), "the newer state stands");
-    assert.ok(!keys.some((r) => JSON.stringify(r).includes("gen0.exe")), "the older page is not put over it");
+    if (RECORDS) {
+      const keys = await keysOf(cwd, out);
+      assert.ok(keys.some((r) => JSON.stringify(r).includes("gen1.exe")), "the newer state stands");
+      assert.ok(!keys.some((r) => JSON.stringify(r).includes("gen0.exe")), "the older page is not put over it");
+    }
+    // Without regipy the same is shown by the hive: it is the generation-1 file with its dirty numbers, unchanged.
+    assert.equal(sha(await readFile(join(cwd, "work", "h.dat"))), sha(withSequences(G[1], 13, 12)));
   });
 });
 
-test("an old-format (DIRT) log is applied as a whole, only when its own numbers agree with each other and with the hive", { skip }, async () => {
+test("an old-format (DIRT) log is applied as a whole, only when its own numbers agree with each other and with the hive", async () => {
   const sectors: Array<{ index: number; data: Buffer }> = [];
   for (let i = 0; i < BINS / 512; i++) {
     const a = G[0].subarray(BASE_BLOCK + i * 512, BASE_BLOCK + (i + 1) * 512);
@@ -165,7 +176,7 @@ test("an old-format (DIRT) log is applied as a whole, only when its own numbers 
   });
 });
 
-test("a hive whose bins grow in the log grows in the copy, and a dirty hive with no log named is read as it is and said to be partial", { skip }, async () => {
+test("a hive whose bins grow in the log grows in the copy, and a dirty hive with no log named is read as it is and said to be partial", async () => {
   const big = generation(1, 40);
   assert.ok(big.length > G[0].length, "the fixture grows");
   await withCwd(async (cwd) => {
@@ -260,19 +271,27 @@ test("withheld values: random canaries in a SAM user's V and in values named for
   });
 });
 
-test("write_values is refused outside a job before anything is made, and in a job as secret output it writes the whole values to a 0600 file only", { skip }, async () => {
+test("write_values is refused outside a job and in a job that is not secret output, before anything is made", async () => {
   const canaries = plant(SHAPES.find((s) => s.name === "ghp")!, 6, 9);
   await withCwd(async (cwd) => {
-    const s: Setup = { hive: secretHive(canaries.map((c) => c.text)) };
-    const args = await put(cwd, s);
+    const args = await put(cwd, { hive: secretHive(canaries.map((c) => c.text)) });
     const before = new Set(await everyFileUnder(cwd));
     const refused = failed(await tool("registry_recover", cwd, { ...args, write_values: true }));
     assert.match(refused.error, /write_values is refused/);
     assert.deepEqual(new Set(await everyFileUnder(cwd)), before, "nothing was made");
-    // A job that is not secret output is refused too.
     const env = await job(cwd);
     const plain = failed(await tool("registry_recover", cwd, { ...args, write_values: true }, env));
     assert.match(plain.error, /refused/);
+    assert.deepEqual(new Set(await everyFileUnder(cwd)), before, "a job that is not secret output made nothing");
+  });
+});
+
+test("in a job run as secret output write_values writes the whole values to a 0600 file only, and a second run keeps the first", { skip }, async () => {
+  const canaries = plant(SHAPES.find((s) => s.name === "ghp")!, 6, 9);
+  await withCwd(async (cwd) => {
+    const s: Setup = { hive: secretHive(canaries.map((c) => c.text)) };
+    const args = await put(cwd, s);
+    const env = await job(cwd);
     const secret = await tool("registry_recover", cwd, { ...args, write_values: true }, { ...env, SECRET_OUTPUT: "1" });
     const out = body<Answer>(secret);
     assert.equal(out.contains_secret_values, true);
@@ -447,7 +466,7 @@ test("the tool starts nothing in a session of its own", async () => {
 
 // ---- fuzz -------------------------------------------------------------------------------------------------------------------
 
-test("structure-aware mutations of a log (400 cases): JSON every time, the original unchanged, and a copy only when the receipt says it was replayed", { skip }, async () => {
+test("structure-aware mutations of a log (400 cases): JSON every time, the original unchanged, and a copy only when the receipt says it was replayed", async () => {
   const base = hvleLog(G[2], [
     { sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]) },
     { sequence: 11, hiveBinsDataSize: BINS, pages: differingPages(G[1], G[2]) },
