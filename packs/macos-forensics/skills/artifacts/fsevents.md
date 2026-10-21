@@ -9,7 +9,7 @@ requires_host: []
 
 Use when you read `.fseventsd` records for what changed. Not for ordering or dating a record, flags or an external volume's log (`artifacts/fsevents-dating`, only if the question needs the order or a date).
 
-Find `.fseventsd` in each acquired volume's own root, the Data volume included, and keep its record files and `fseventsd-uuid`. That file names this log; it is not the APFS volume UUID. A merged tree can hide which volume a directory came from.
+Find `.fseventsd` in each acquired volume's own root, the Data volume included, and keep its record files and `fseventsd-uuid`. It names this log, not the APFS volume UUID. A merged tree can hide which volume a directory came from.
 
     /.fseventsd/fseventsd-uuid    the log's identity
     /.fseventsd/<16 hex digits>   gzip record files, one or more members each
@@ -22,4 +22,4 @@ For a record that matters keep the file, the format version, the event id, the r
 
 **Does not show.** When a change happened, who made it, what it contained, or that a path absent from the log was never touched. A negative reads: "no matching record was decoded from these files, by this parser and filter", with the formats supported, the failures counted and the retention limits stated.
 
-**Sensitive output.** A path can hold an identifier (a user, a share, a token in a file name). Each path passes the shared boundary by field type, and a component that looks like a token is shown as `<withheld N characters: reason>` (`status` is `partial` when the backstop had to replace one); a plain password, a BitLocker key or an ordinary-looking name is printed. `contains` is a restricted regular expression matched on the path as printed, so a piece of a withheld name matches nothing, and `contains_blind_records` counts the records it could not see into. Read a volume whose names matter as a job with `secret_output: true`; `write_values` there puts the originals in a private file under `$OUT`. Cite the record, never a withheld name.
+**Sensitive output.** A path can hold an identifier (a user, a share, a token in a file name). Each path passes the shared boundary by field type, and a component that looks like a token is shown as `<withheld N characters: reason>` (`status` is `partial` when the backstop had to replace one); a plain password, a BitLocker key or an ordinary-looking name is printed. A `tmp-id-…` alias is the same for the same id in every run. `contains` is a restricted regular expression matched on the path as printed, so a piece of a withheld name matches nothing, and `contains_blind_records` counts the records it could not see into. Read a volume whose names matter as a job with `secret_output: true`; `write_values` there puts the originals in a private file under `$OUT`. Cite the record, never a withheld name.
