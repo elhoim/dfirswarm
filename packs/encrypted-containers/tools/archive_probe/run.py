@@ -425,7 +425,7 @@ CHECKED = "<withheld by the output check>"
 MAX_JUDGED = 4096        # characters judged in one string (a name, a component, a header string); longer is withheld whole
 MAX_RUN = 256            # the longest run of name characters judged in a string that holds a `/`
 _NAME_RUN = re.compile(r"[A-Za-z0-9_+%-]+")
-_RECOVERY_SHAPE = re.compile(r"(?<![0-9])[0-9]{6}(?:[^0-9A-Za-z]{0,3}[0-9]{6}){7}(?![0-9])")
+_RECOVERY_SHAPE = re.compile(r"[0-9]{6}(?:[^0-9A-Za-z]{0,3}[0-9]{6}){7}")      # no look-arounds: a digit glued to the first or last group hides nothing
 _SIX_SPACED = re.compile(r"(?<![0-9])(?:[0-9]{6} ){3,}[0-9]{6}(?![0-9])")
 _GROUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{4,6}(?![A-Za-z0-9])")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{8,}")
@@ -596,7 +596,7 @@ def shown(path, count=True):
 _CHECK_QUICK = re.compile(r"(?i)[0-9]{6}|PRIVATE KEY|[A-Za-z0-9+_=-]{24}|[0-9a-f]{16}|//[^/?#\s@]+@|pass|pwd|secret|token|api[_-]?key|AKIA|ASIA|gh.?_|github_pat|xox|eyJ|sk-|AIza|glpat|npm_")
 _CHECK_PREFIX = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{12}|gh[pousr]_[A-Za-z0-9]{16}|github_pat_[A-Za-z0-9_]{16}|xox[abeprs]-[A-Za-z0-9]{8}|eyJ[A-Za-z0-9_-]{8}"
                            r"|sk-[A-Za-z0-9_-]{16}|AIza[0-9A-Za-z_-]{16}|glpat-[A-Za-z0-9_-]{12}|npm_[A-Za-z0-9]{16}")
-_CHECK_DIGITS = re.compile(r"(?<![0-9])(?:[0-9]{6}[-_. ]?){8}(?![0-9])")
+_CHECK_DIGITS = re.compile(r"(?<![0-9])(?:[0-9]{6}[-_. ]?){8}(?![0-9])|[0-9]{6}(?:[-_. ][0-9]{6}){7}")
 _CHECK_PEM = re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY|PRIVATE KEY-----")
 _CHECK_RUN = re.compile(r"[A-Za-z0-9+_=-]{24,}")
 _CHECK_HEX = re.compile(r"(?<![0-9A-Za-z])(?=[0-9]*[a-fA-F])(?=[a-fA-F]*[0-9])[0-9a-fA-F]{16,}(?![0-9A-Za-z])")     # 16 or more hex digits, letters and digits both
@@ -790,8 +790,10 @@ def interrupted_answer(signum, **extra):
                       "signal": signum, **extra}), flush=True)
 
 
-def emit(answer):
-    """Print the answer once, with the stop signals held back until it is out, and leave with 128 + the signal if one was noted."""
+def claim_answer():
+    """Take the one answer (an answer or an error): the stop is disarmed, the stop signals are held back, and `answered` is set under the
+    lock, so that a watchdog that has read its due time but not yet taken the lock finds the answer claimed and prints nothing. When the
+    stop was claimed first, wait for the thread that has it to end the tool."""
     disarm_stop()
     held = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM}
     signal.pthread_sigmask(signal.SIG_BLOCK, held)
@@ -801,6 +803,11 @@ def emit(answer):
             STOP["answered"] = True
     if not mine:
         stand_by()
+
+
+def emit(answer):
+    """Print the answer once, with the stop signals held back until it is out, and leave with 128 + the signal if one was noted."""
+    claim_answer()
     text = json.dumps(seal(answer), indent=2, ensure_ascii=True)
     sys.stdout.write(text + "\n")
     sys.stdout.flush()
@@ -1025,8 +1032,7 @@ SEARCH = {"cut": False}
 
 
 def fail(message, **extra):
-    stand_by()
-    disarm_stop()
+    claim_answer()
     remove_pending_pages()
     print(json.dumps(seal({"error": message, "status": "failed",
                            "status_basis": "the tool stopped with an error (see error); no container was read", **extra}), ensure_ascii=True))
@@ -1159,8 +1165,10 @@ def read_eocd(path, size):
     comment ends exactly at the end of the file, and whose directory starts with a
     directory signature, are the candidates; with several, the one that declares the
     most entries is read, and the others are named in `other_records`, so that the
-    caller can say that they disagree. With none, the last signature is read as
-    before and `after_comment` says that no record ends the file.
+    caller can say that they disagree. A sound record of another archive that lies
+    wholly before the chosen archive (a second archive appended to the first) is
+    named the same way. With none, the last signature is read as before and
+    `after_comment` says that no record ends the file.
     """
     tail_len = min(size, 65535 + 22 + 20 + 56)
     with open(path, "rb") as fh:
@@ -1193,9 +1201,21 @@ def read_eocd(path, size):
         richer = [r for r in sound if r["entries"] > 0]
         if richer:
             chosen = min(richer, key=lambda r: (-r["entries"], r["eocd_at"]))
+    # An archive in front of the chosen one in the same file (a second archive appended: 7-Zip lists the first, `zipfile` the last): a
+    # sound record that does not end the file and whose whole archive, comment included, ends before the chosen archive begins. The
+    # chosen archive begins where its own directory offset says. A stored ZIP inside a member (a jar that holds one) puts a sound
+    # record inside the chosen archive, after that start, and is not counted; where the start cannot be worked out (an unresolved Zip64
+    # offset, an offset that does not fit the file) nothing is counted.
+    begins = chosen["eocd_at"] - (76 if chosen["zip64"] else 0) - chosen["cd_bytes"] - chosen["cd_offset"]
+    if chosen["zip64_unresolved"] or begins < 0:
+        begins = -1
+    separate = [r for r in sound if r is not chosen and r["after_comment"] > 0 and r["eocd_at"] + 22 + r["comment_bytes"] <= begins]
+    pool = pool + [r for r in separate if not any(r is p for p in pool)]
     start = chosen["eocd_at"] - (size - tail_len)
     chosen["after_comment_zero"] = chosen["after_comment"] > 0 and not tail[start + 22 + chosen["comment_bytes"]:].strip(b"\x00")
-    others = [r for r in pool if r is not chosen and (r["entries"], r["cd_bytes"]) != (chosen["entries"], chosen["cd_bytes"])]
+    # Another archive is named whatever it declares (two archives of one shape differ in their flags); a record in a comment, only when it
+    # declares something else.
+    others = [r for r in pool if r is not chosen and (any(r is q for q in separate) or (r["entries"], r["cd_bytes"]) != (chosen["entries"], chosen["cd_bytes"]))]
     chosen["other_record_count"] = len(others)
     chosen["other_records"] = [{"offset": r["eocd_at"], "entries": r["entries"], "central_directory_bytes": r["cd_bytes"],
                                 "comment_bytes": r["comment_bytes"]} for r in others[:8]]

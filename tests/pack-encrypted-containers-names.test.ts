@@ -133,6 +133,12 @@ const SHAPES: Array<[string, () => string, number]> = [
   ...[["en dash", "\u2013"], ["em dash", "\u2014"], ["hyphen U+2010", "\u2010"], ["non-breaking hyphen", "\u2011"], ["minus sign", "\u2212"], ["middle dot", "\u00b7"],
       ["comma", ","], ["semicolon", ";"], ["colon", ":"], ["plus", "+"], ["pipe", "|"], ["tab", "\t"], ["two spaces", "  "]].map(([label, sep]): [string, () => string, number] =>
     [`recovery password, ${label}`, () => six(sep), 0]),
+  // One decimal digit glued to the first or the last group: the groups are still eight groups of six digits.
+  ...[["comma", ","], ["en dash", "\u2013"], ["pipe", "|"], ["plus", "+"], ["semicolon", ";"], ["colon", ":"], ["hyphen", "-"], ["none", ""]].flatMap(([label, sep]): Array<[string, () => string, number]> => [
+    [`recovery password, ${label}, a digit glued to the first group`, () => pick(DIGITS, 1) + six(sep), 0],
+    [`recovery password, ${label}, a digit glued to the last group`, () => six(sep) + pick(DIGITS, 1), 0],
+    [`recovery password, ${label}, a digit glued to both ends`, () => pick(DIGITS, 1) + six(sep) + pick(DIGITS, 1), 0],
+  ]),
   ["recovery password, two groups to a component over four components", () => Array.from({ length: 4 }, () => groups(2, 6, "-", DIGITS)).join("/"), 0],
   ["recovery password, two groups to a component over four components with backslashes", () => Array.from({ length: 4 }, () => groups(2, 6, "-", DIGITS)).join("\\"), 0],
   ["recovery password, one group to a component", () => six("/"), 0],
@@ -305,6 +311,31 @@ test("the output check alone does not catch a number of 10 to 20 digits or an id
     const got = JSON.parse(run.stdout) as { rows: Array<{ name: string }>; replaced: number };
     assert.equal(got.replaced, 0, path);
     strings.forEach((s, i) => assert.equal(got.rows[i].name, s));
+  }
+});
+
+const SEAL_ONLY = String.raw`
+import json, re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+ns = {"re": re}
+for name in ("WITHHOLDING", "NAMES"):
+    b, e = "# BEGIN SHARED " + name, "# END SHARED " + name
+    exec(text[text.index(b):text.index(e)], ns)
+data = json.load(sys.stdin)
+print(json.dumps({"rows": ns["seal"]({"rows": data["strings"]})["rows"], "replaced": ns["NAMES"]["replaced"]}))
+`;
+
+test("the output check alone passes a recovery password with a separator outside its five, or cut over path components: the first layer holds those", async () => {
+  const passes = [`docs/${six(",")}.txt`, `docs/${six("\u2013")}.txt`, `docs/${six("|")}.txt`, `docs/${six("+")}.txt`,
+                  `docs/${Array.from({ length: 4 }, () => groups(2, 6, "-", DIGITS)).join("/")}.txt`, `docs/${six("/")}.txt`];
+  const caught = [`docs/${six("-")}.txt`, `docs/${pick(DIGITS, 1)}${six("-")}.txt`, `docs/${six(".")}${pick(DIGITS, 1)}.txt`, `docs/${six(" ")}.txt`];
+  for (const path of [RKS, AP, CID]) {
+    const run = await runPySnippet(SEAL_ONLY, [path], { strings: [...passes, ...caught] });
+    assert.equal(run.code, 0, run.stderr);
+    const got = JSON.parse(run.stdout) as { rows: string[]; replaced: number };
+    passes.forEach((s, i) => assert.equal(got.rows[i], s, `${s.length} characters in ${path}`));
+    caught.forEach((_s, i) => assert.equal(got.rows[passes.length + i], "<withheld by the output check>", `${path}`));
+    assert.equal(got.replaced, caught.length);
   }
 });
 

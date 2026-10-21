@@ -15,8 +15,9 @@ differ, and one archive can mix encrypted and plain members. The directory being
 readable is a separate finding from any member being encrypted. A name that is not valid text
 is shown escaped and does not hide the other members; a directory larger than
 `max_metadata_bytes`, or declared larger than the file, is not listed (`partial`). A comment can hold an End
-record of its own, and bytes can follow the archive: when more than one End record ends the file and they
-disagree (`end_records_disagree`), or bytes that are not zeros follow the comment, the answer is `partial` and
+record of its own, bytes can follow the archive, and a second archive can be appended (7-Zip lists the first,
+`zipfile` the last): when End records disagree (`end_records_disagree`, an earlier archive found in the last
+64 KiB included), or bytes that are not zeros follow the comment, the answer is `partial` and
 `protected` is not `false`.
 
 **7-Zip and RAR.** Separate data encryption from header encryption. Printable strings

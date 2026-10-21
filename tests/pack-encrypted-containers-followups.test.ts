@@ -119,7 +119,7 @@ const DIGITS = "0123456789";
 const flagged = () => ["AK", "IA", pick("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16)].join("");
 const recoveryKey = () => Array.from({ length: 8 }, () => String(Math.floor(rnd() * 65536) * 11).padStart(6, "0")).join("-");
 
-type Member = { name?: string; nameBytes?: Buffer; flags?: number };
+type Member = { name?: string; nameBytes?: Buffer; flags?: number; data?: Buffer };
 
 /** A ZIP from the APPNOTE's record layouts: local headers, the central directory, an End record with a comment, and bytes after it. */
 function zipOf(members: Member[], opts: { comment?: Buffer; tail?: Buffer; declared?: number } = {}): Buffer {
@@ -136,7 +136,7 @@ function zipOf(members: Member[], opts: { comment?: Buffer; tail?: Buffer; decla
     local.writeUInt32LE(1, 18);
     local.writeUInt32LE(1, 22);
     local.writeUInt16LE(name.length, 26);
-    const record = Buffer.concat([local, name, Buffer.from("x")]);
+    const record = Buffer.concat([local, name, m.data ?? Buffer.from("x")]);
     const c = Buffer.alloc(46);
     c.writeUInt32LE(0x02014b50, 0);
     c.writeUInt16LE(20, 4);
@@ -282,6 +282,46 @@ test("archive_probe does not take the End record a ZIP comment holds for the arc
   });
 });
 
+test("archive_probe names a sound archive that lies wholly before the one that ends the file (a second archive appended)", async () => {
+  // Archive A (six members, five encrypted) followed by archive B (one plain member): 7-Zip lists A with a "data after the end of archive"
+  // warning, `zipfile` lists B. The tool answered `complete`, 1 entry, 0 encrypted, not protected, and named nothing.
+  await withCwd(async (cwd) => {
+    const listed = async (file: string, zip: Buffer) => {
+      await writeFile(join(cwd, "work", file), zip);
+      return answer(await tool(PROBE, cwd, { path: `work/${file}` }));
+    };
+    const a = zipOf(SIX);
+    const b = zipOf([{ name: "plain.txt", flags: 0x0800 }]);
+    const both = await listed("a-then-b.zip", Buffer.concat([a, b]));
+    assert.equal(both.status, "partial");
+    assert.notEqual(both.protected, false, "not protected is not said of a file that holds an encrypted archive");
+    assert.equal(both.end_records_disagree.read.entries, 1);
+    assert.deepEqual(both.end_records_disagree.others.map((o: Json) => o.entries), [6]);
+    assert.equal(both.end_records_disagree.others[0].offset, a.length - 22);
+    assert.match(both.status_basis, /other End record with a different directory/);
+    assert.match(both.not_determined[0], /which End record is the archive's/);
+    // The other way round (the larger archive last) and three archives: every earlier archive is named.
+    const rev = await listed("b-then-a.zip", Buffer.concat([b, a]));
+    assert.deepEqual([rev.status, rev.entry_count, rev.encrypted_entries, rev.end_records_disagree.others.length], ["partial", 6, 5, 1]);
+    const three = await listed("three.zip", Buffer.concat([a, zipOf([{ name: "x" }, { name: "y" }]), b]));
+    assert.equal(three.status, "partial");
+    assert.deepEqual(three.end_records_disagree.others.map((o: Json) => o.entries).sort(), [2, 6]);
+    // Two archives of one shape (one member each, a name of one length) that differ only in the flag: named all the same.
+    const same = await listed("same-shape.zip", Buffer.concat([zipOf([{ name: "a", flags: 0x0801 }]), zipOf([{ name: "b", flags: 0x0800 }])]));
+    assert.deepEqual([same.status, same.entry_count, same.encrypted_entries, same.end_records_disagree.others.length], ["partial", 1, 0, 1]);
+    assert.notEqual(same.protected, false);
+    // A stored ZIP inside a member is not another archive: a jar that holds one, even as the last member, stays complete, and so does
+    // an archive behind a stub (offsets are relative to the archive).
+    const inner = zipOf(SIX);
+    const jar = await listed("jar.zip", zipOf([{ name: "a.class" }, { name: "inner.zip", data: inner }]));
+    assert.deepEqual([jar.status, jar.entry_count, jar.protected, jar.end_records_disagree], ["complete", 2, false, undefined]);
+    const stub = await listed("stub.zip", Buffer.concat([Buffer.from("#!/bin/sh\nexit 0\n"), zipOf([{ name: "inner.zip", data: inner }, { name: "z" }])]));
+    assert.deepEqual([stub.status, stub.entry_count, stub.end_records_disagree], ["complete", 2, undefined]);
+    const sfx = await listed("sfx.zip", Buffer.concat([Buffer.from("MZ stub".repeat(40)), zipOf(SIX)]));
+    assert.deepEqual([sfx.status, sfx.entry_count, sfx.encrypted_entries, sfx.protected], ["complete", 6, 5, true]);
+  });
+});
+
 test("archive_probe says so when no End record ends the file, and does not call such a list complete", async () => {
   await withCwd(async (cwd) => {
     const listed = async (file: string, zip: Buffer) => {
@@ -376,6 +416,54 @@ for (const [mask, how] of [["", "SIGALRM ends a read a signal can interrupt"], [
     });
   });
 }
+
+/** The watchdog's moment, placed by hand: the hard stop is due, the thread has read its due time and not yet taken the lock, and the main
+ * thread prints an error answer through the tool's own `fail`. Whatever the thread prints after that is a second document. */
+const FAIL_RACE = String.raw`
+import json, os, re, signal, sys, threading, time
+text = open(sys.argv[1], encoding="utf-8").read()
+ns = {"re": re, "json": json, "os": os, "sys": sys}
+for name in ("WITHHOLDING", "NAMES", "STOP"):
+    b, e = "# BEGIN SHARED " + name, "# END SHARED " + name
+    exec(text[text.index(b):text.index(e)], ns)
+start = text.index("def fail(")
+exec(text[start:text.index("\n\n\n", start)], ns)
+STOP = ns["STOP"]
+ns["install_stop"](last_word=lambda signum: ns["interrupted_answer"](signum))
+STOP["limit"] = 1
+STOP["hard_due"] = time.perf_counter() - 1          # due already
+read, go = threading.Event(), threading.Event()
+def watchdog():
+    due = STOP["hard_due"]                           # what the real watchdog does first ...
+    assert due is not None and time.perf_counter() >= due
+    read.set()
+    go.wait(5)                                       # ... then the lock is taken some instructions later
+    ns["hard_stop"](STOP["signal"])
+t = threading.Thread(target=watchdog, daemon=True)
+t.start()
+read.wait(5)
+try:
+    ns["fail"]("the file cannot be read")
+except SystemExit as exc:
+    sys.stdout.flush()
+    go.set()
+    t.join(5)
+    sys.stderr.write("main ended, code %s\n" % exc.code)
+    sys.stderr.flush()
+    os._exit(exc.code)
+`;
+
+test("fail() claims the stop as emit() does: a watchdog that has read its due time prints no second document", async () => {
+  for (const path of [PROBE, SCAN, ID]) {
+    const run = await runPySnippet(FAIL_RACE, [path], null);
+    const docs = run.stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(docs.length, 1, `${docs.length} documents from ${path}: ${run.stdout}${run.stderr}`);
+    const got = JSON.parse(docs[0]) as Json;
+    assert.deepEqual([got.status, got.error], ["failed", "the file cannot be read"]);
+    assert.equal(run.code, 1, run.stderr);
+    assert.match(run.stderr, /main ended, code 1/);
+  }
+});
 
 test("archive_probe reads a mapped 7z header through the descriptor first, so that a stalled page is a stalled read the watchdog ends", async () => {
   // A page fault in a mapped file stops the interpreter, signal handlers and threads with it: a 9.8 GB archive that was kept on a cloud
@@ -487,7 +575,13 @@ test("the manifests carry the limits of the withholding rule as they are measure
       "a number of 9 digits or fewer",
       "with the rule removed",
       "is bounded",
+      "with one decimal digit glued to the first or last group",
+      "with a letter in it or glued to it",
+      "anything but a hyphen, underscore, dot, space or nothing",
+      "of 24 at most 0.1% and of 40 none",
     ]) assert.ok(text.includes(needle), `${tool}: the manifest does not say "${needle}"`);
+    assert.match(text, /stop is the clock's, not the work's/i, `${tool}: the hard stop is the clock's`);
+    if (tool === "archive_probe") assert.ok(text.includes("a second archive appended"), "the second archive");
     assert.doesNotMatch(text, /random mixed-case letters and digits of 8, 12 or 40 characters 0 draws, of 9 about 1\.4%/, `${tool}: the old table`);
   }
 });
