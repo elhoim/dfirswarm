@@ -203,7 +203,7 @@ test("doc_probe: a relationship part of 300,000 relationships ends at max_second
   });
 });
 
-test("pe_info: twenty DT_NEEDED names of 3.9 KB each, with a query, are answered in seconds, and 4,096 of them end at max_seconds, partial, saying how many were not read", async () => {
+test("pe_info: twenty DT_NEEDED names of 3.9 KB each, with a query, are answered in seconds, and 4,096 of them are read inside 8 s, or end at max_seconds, partial, saying how many were not read", async () => {
   await withCwd(async (cwd) => {
     const name = "a/" + pieces(7, 150) + "?x=1";
     await put(cwd, "work/twenty.elf", buildElf({ cls: 64, needed: Array.from({ length: 20 }, () => name) }));
@@ -217,10 +217,16 @@ test("pe_info: twenty DT_NEEDED names of 3.9 KB each, with a query, are answered
     const b = body(await tool(PE_INFO, cwd, { path: "work/many.elf", max_seconds: 1 }));
     const seconds = (Date.now() - started) / 1000;
     assert.ok(seconds < 8, `${seconds.toFixed(1)} s with max_seconds 1`);
-    assert.equal(b.status, "partial");
-    assert.ok(b.limits_hit.some((l: string) => /the DT_NEEDED read stopped at max_seconds/.test(l)), JSON.stringify(b.limits_hit));
-    assert.ok(b.problems.some((p: string) => /DT_NEEDED: \d+ of 4096 names were not read/.test(p)), JSON.stringify(b.problems));
-    assert.ok(b.needed_libraries.length > 0 && b.needed_libraries.length < 4096);
+    if (b.status === "complete") {
+      // a machine fast enough to read all 4,096 names inside the second: every name is there and nothing is claimed unread
+      assert.equal(b.needed_libraries.length, 4096);
+    } else {
+      assert.equal(b.status, "partial");
+      assert.ok(b.limits_hit.some((l: string) => /the DT_NEEDED read stopped at max_seconds/.test(l)), JSON.stringify(b.limits_hit));
+      const unread = b.problems.map((p: string) => /DT_NEEDED: (\d+) of 4096 names were not read/.exec(p)).find((m: RegExpExecArray | null) => m);
+      assert.ok(unread, JSON.stringify(b.problems));
+      assert.equal(b.needed_libraries.length + Number(unread![1]), 4096, "every name is either listed or counted as unread");
+    }
   });
 });
 
