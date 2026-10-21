@@ -9,7 +9,9 @@ those and counts them. It does not print them.
 What it does, in order:
 
     walks a tree in print order (directories and names ordered by the text the answer prints for
-    them; names that are withheld in an order drawn afresh each run) and follows no link, and takes every regular file
+    them; names that are withheld in an order drawn afresh each run, a name withheld for a value its
+    note holds among them: a first pass reads the notes for those values before the walk that prints
+    is ordered, and takes at most 40% of max_seconds) and follows no link, and takes every regular file
     whose name matches a note-like pattern as a CANDIDATE BY NAME; a name match is
     not a note, and the answer says so for each one;
     reads each candidate once (up to max_size), detects its encoding (byte-order
@@ -65,6 +67,8 @@ free name.
 What it does not locate: a long token with no label and no known shape (a 64-digit hex
 string after the word "Token") is neither located nor counted.
 """
+import builtins
+import collections
 import datetime
 import errno
 import functools
@@ -82,6 +86,7 @@ PARSER = "ransom_note_scan/3"
 DEFAULT_MAX_SIZE = 200000
 MAX_SIZE_CEILING = 16 << 20
 DEFAULT_SECONDS, MAX_SECONDS = 480, 540    # the manifest allows 600: the walk stops here so that what it has is written and sealed
+FIRST_PASS_SHARE = 0.4                     # of max_seconds, at most, the first pass (the notes read for the values their paths hold) may take
 DEFAULT_EXCLUDE_TOP = ["proc", "sys", "dev"]
 # Values seen are compared with each other to say "the same value as F000001" without
 # saying the value; the comparison is held in memory, and capped.
@@ -849,16 +854,18 @@ WITHHELD = "<identifier-shaped name withheld>"
 WITHHELD_PATHS = [0]              # printed paths that had a component withheld (one per call of shown)
 _IDRUN = re.compile(r"[A-Za-z0-9]{8,}")
 _WORDY = re.compile(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)*|[A-Z]+")
-_PAIR_SEPARATORS = re.compile(r"[:._ -]")
+_PAIR_SEPARATORS = re.compile(r"[^0-9A-Za-z]")
 _DIGIT_GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 SINGLE_CASE_RUN = 16              # a run of letters of one case is a word below this many letters, a random run from here on
 HEX_PAIRS = 8                     # this many pairs of hex digits joined by one separator are a byte string
-# Directory names every Windows, Linux and ESXi host has, whose letters and digits would otherwise be taken for an identifier. A component
+# Directory names every Windows, Linux and ESXi host has, whose letters and digits would otherwise be taken for an identifier, and the names
+# of the exceptions Python raises (the tools print the type of an error: IsADirectoryError reads as letters that are not words). A component
 # is printed as it is when it is one of these, whole and in any case.
 WELL_KNOWN = frozenset((
     "system32", "syswow64", "inetcache", "inetcookies", "inethistory", "msocache", "psreadline", "framework", "framework64",
-    "sqlserver", "gpucache", "dawnwebgpucache", "dawngraphitecache", "grshadercache", "indexeddb", "overlay2", "datastore1"))
+    "sqlserver", "gpucache", "dawnwebgpucache", "dawngraphitecache", "grshadercache", "indexeddb", "overlay2", "datastore1")
+) | frozenset(name.lower() for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException))
 
 
 def fold(name):
@@ -880,15 +887,19 @@ def fold(name):
 
 
 def _hex_pairs(text):
-    """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two."""
-    run = 0
-    for piece in _PAIR_SEPARATORS.split(text):
-        if len(piece) == 2 and piece[0] in HEX_DIGITS and piece[1] in HEX_DIGITS:
-            run += 1
-            if run >= HEX_PAIRS:
-                return True
-        else:
-            run = 0
+    """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two. A separator is any character that is not
+    an ASCII letter or a digit (the pairs of `id[aa-bb-...-hh]`, `key=aa:bb:...` and `(aa.bb...)` are found: a neighbour of the run that is
+    not a letter or a digit does not hide a pair at its end), and only a letter or a digit glued to a pair makes it no pair. A run does not
+    cross a slash: a path is read one component at a time."""
+    for part in text.split("/"):
+        run = 0
+        for piece in _PAIR_SEPARATORS.split(part):
+            if len(piece) == 2 and piece[0] in HEX_DIGITS and piece[1] in HEX_DIGITS:
+                run += 1
+                if run >= HEX_PAIRS:
+                    return True
+            else:
+                run = 0
     return False
 
 
@@ -901,8 +912,9 @@ def shaped(name):
     """Whether a name holds a token shaped like an identifier. The name is folded first (fold). A token is a run of 8 or more ASCII
     letters and digits. It is identifier-shaped when it holds both letters and digits, or is 10 or more digits, or is letters only and is
     not one word, one capitalised word, several capitalised words or all capitals, or is 16 or more letters of one case. So are 8 or more
-    pairs of hex digits joined by one separator (a colon, a dash, a dot, an underscore or a space), and groups of digits joined by a space
-    or a comma that hold 10 digits or more."""
+    pairs of hex digits joined by one separator (any character that is not a letter, a digit or a slash: a colon, a dash, a dot, an underscore,
+    a space, a bracket, an equals sign), whatever stands at either end of the run unless it is a letter or a digit glued to a pair, and groups
+    of digits joined by a space or a comma that hold 10 digits or more."""
     text = fold(name)
     for m in _IDRUN.finditer(text):
         token = m.group(0)
@@ -962,17 +974,22 @@ def shown(path, values=(), keep_last=False, count=True):
 _ORDER_SALT = os.urandom(16)
 
 
-def print_order(entries, judged):
+def print_order(entries, judged, hidden=None):
     """The directory entries in the order an answer prints them: by the text printed for each (the marker for a name that is judged
-    and withheld, the name itself otherwise; `judged(entry)` says whether the answer prints the entry's name through the judge), and the
-    entries that print alike in an order drawn afresh every run (a keyed hash of the raw name under a salt of this run). The rank of a
+    and withheld, the name itself otherwise; `judged(entry)` says whether the answer prints the entry's name through the judge;
+    `hidden(entry)`, when given, says that a name the first rule lets through is withheld all the same, because the note beneath it holds
+    its value: it sorts as the marker does), and the entries that print alike in an order drawn afresh every run (a keyed hash of the whole
+    path, the directory above included, under a salt of this run: the same name in two directories has two unrelated ranks). The rank of a
     withheld name among its siblings, the order a directory lists them in and the inode never show in what an answer lists, in the
     order of its rows, in the numbers it hands out or in which entries a limit keeps."""
     texts = []
     for entry in entries:
         name = entry.name
         try:
-            texts.append((_judge(name) or name) if judged(entry) else name)
+            if hidden is not None and hidden(entry):
+                texts.append(WITHHELD)
+            else:
+                texts.append((_judge(name) or name) if judged(entry) else name)
         except OSError:
             texts.append(_judge(name) or name)
     order = sorted(range(len(entries)), key=texts.__getitem__)
@@ -983,7 +1000,7 @@ def print_order(entries, judged):
             j += 1
         group = order[i:j]
         if len(group) > 1:
-            group.sort(key=lambda n: (hashlib.blake2b(entries[n].name.encode("utf-8", "surrogatepass"), key=_ORDER_SALT, digest_size=8).digest(), n))
+            group.sort(key=lambda n: (hashlib.blake2b(entries[n].path.encode("utf-8", "surrogatepass"), key=_ORDER_SALT, digest_size=8).digest(), n))
         out.extend(group)
         i = j
     return [entries[n] for n in out]
@@ -1000,13 +1017,14 @@ def print_order(entries, judged):
 BOUNDARY = {"replaced": 0, "by": {}, "where": [], "not_listed": 0}
 OWN_NAMES = set()                 # the names of the files this run wrote (their digest is the name of the root and of the table)
 FREE_KEYS = frozenset(("sha256", "tail_hex", "suffix_hex"))
+PROSE_KEYS = frozenset(("reason", "status_basis", "partial_reasons"))    # the tool's own sentences: "(4294967296 bytes)" there is a size, not a name
 SERIAL_KEYS = frozenset(("note_id", "finding_id", "first_note_id", "duplicate_of"))      # a sequence number this tool counted: N000001, F1000000
 _SERIAL = re.compile(r"[NF][0-9]{6,12}")
 MAX_REPLACED_LISTED = 20
 MAX_JUDGED = 1 << 16
-_SUSPECT = re.compile(r"[A-Za-z0-9]{8}|(?:[0-9A-Fa-f]{2}[:._ -]){4}|[0-9]{3}[ ,][0-9]{3}")
+_SUSPECT = re.compile(r"[A-Za-z0-9]{8}|(?:[0-9A-Fa-f]{2}[^0-9A-Za-z/]){4}|[0-9]{3}[ ,][0-9]{3}")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]+")
-_PAIRS = re.compile(r"(?<![^:._ -])[0-9A-Fa-f]{2}(?:[:._ -][0-9A-Fa-f]{2}){7}(?![^:._ -])")
+_PAIRS = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{2}(?:[^0-9A-Za-z/][0-9A-Fa-f]{2}){7}(?![0-9A-Za-z])")
 _GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
 
 
@@ -1028,16 +1046,18 @@ def _read_as(text):
 
 
 @functools.lru_cache(maxsize=65536)
-def _why(text):
-    """The reason a string may not be printed (a fixed sentence, never a part of the string), or None."""
+def _why(text, prose=False):
+    """The reason a string may not be printed (a fixed sentence, never a part of the string), or None. `prose` is a sentence of the tool's
+    own (a reason, a status basis): a number of 10 or more digits followed by " bytes" is a size there and is not read as a name."""
     flat = _read_as(text)
-    for run in _ALNUM_RUN.findall(flat):
+    for found in _ALNUM_RUN.finditer(flat):
+        run = found.group()
         size = len(run)
         if size < 8 or run.lower() in WELL_KNOWN:
             continue
         digits = sum(1 for c in run if c.isdigit())
         if digits == size:
-            if size >= 10:
+            if size >= 10 and not (prose and flat.startswith(" bytes", found.end())):
                 return "a long run of digits"
         elif digits:
             return "letters and digits in one run"
@@ -1057,8 +1077,8 @@ def _why(text):
 _CLEAN = set()                    # short strings already found clean (keys, repeated words): not read again
 
 
-def _refuse(text, evidence):
-    """Why this string may not be printed, or None."""
+def _refuse(text, evidence, prose=False):
+    """Why this string may not be printed, or None. `prose` is set for the tool's own sentences (see _why)."""
     size = len(text)
     if size < 8 or text in _CLEAN or text in OWN_NAMES:
         return None
@@ -1072,18 +1092,20 @@ def _refuse(text, evidence):
             size = len(text)
             if size < 8:
                 return None
-    why = None if text.isascii() and not _SUSPECT.search(text) else _why(text)
-    if why is None and size <= 64 and len(_CLEAN) < 20000:
+    why = None if text.isascii() and not _SUSPECT.search(text) else _why(text, prose)
+    if why is None and not prose and size <= 64 and len(_CLEAN) < 20000:
         _CLEAN.add(text)
     return why
 
 
 def _place(where):
-    """The place of a string as text: the keys that are plain words and the indexes above it, never a key that came from a name."""
+    """The place of a string as text: the keys that are plain words and the indexes above it, never a key that came from a name (a key is a
+    word only when it is also one to the second check: a key of letters and digits is not printed, whatever it looks like)."""
     parts = []
     while where is not None:
         where, label = where
-        parts.append(label if isinstance(label, int) or re.fullmatch(r"[a-z][a-z_0-9]{0,40}", str(label)) else "*")
+        word = not isinstance(label, int) and re.fullmatch(r"[a-z][a-z_0-9]{0,40}", str(label)) and _why(str(label)) is None
+        parts.append(label if isinstance(label, int) or word else "*")
     return "/" + "/".join(str(p) for p in reversed(parts))
 
 
@@ -1104,14 +1126,14 @@ def _read_back(value, where, key, evidence):
     if isinstance(value, str):
         if len(value) < 8 or key in FREE_KEYS or (key in SERIAL_KEYS and _SERIAL.fullmatch(value)):
             return value
-        why = _refuse(value, evidence)
+        why = _refuse(value, evidence, key in PROSE_KEYS)
         return _replaced(why, where) if why else value
     if isinstance(value, dict):
         pairs, changed = [], False
         for k, v in value.items():
             nk = _read_back(k, (where, "(key)"), None, None) if isinstance(k, str) and len(k) >= 8 else k
             if isinstance(v, (str, dict, list, tuple)):
-                nv = _read_back(v, (where, k), k if isinstance(k, str) else None, evidence)
+                nv = _read_back(v, (where, k if nk is k else "(key)"), k if isinstance(k, str) else None, evidence)
             else:
                 nv = v
             changed = changed or nk is not k or nv is not v
@@ -1125,7 +1147,7 @@ def _read_back(value, where, key, evidence):
             out[nk] = nv
         return out
     if isinstance(value, (list, tuple)):
-        items = [_read_back(v, (where, i), None, evidence) for i, v in enumerate(value)]
+        items = [_read_back(v, (where, i), key, evidence) for i, v in enumerate(value)]
         return value if all(a is b for a, b in zip(items, value)) else items
     return value
 
@@ -1179,14 +1201,15 @@ def judged_entry(entry):
     return entry.is_dir(follow_symlinks=False) or bool(NAME_HINTS.search(entry.name))
 
 
-def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
+def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped, hidden=None, dry=False):
     """Yield (path, size, mtime_ns) of the regular files under `top` whose name looks like a note's.
 
-    Directories and entries are taken in print order (print_order) and no link is followed. A directory that
-    cannot be listed is an exception; one skipped at the top by name is an exclusion; a name
+    Directories and entries are taken in print order (print_order; `hidden` names the entries whose name the notes beneath hold the value
+    of) and no link is followed. A directory that cannot be listed is an exception; one skipped at the top by name is an exclusion; a name
     match that is a link, a special file or cannot be examined is a rejection with its reason.
     Anything that does not match by name is counted and not listed. When the tool's own clock runs out the
-    walk ends and `stopped` says how much of the tree it had not reached.
+    walk ends and `stopped` says how much of the tree it had not reached. `dry` is the first pass (values_pass): nothing is listed, counted
+    or printed, and the entries come in the order the directory lists them.
     """
     stack = [(top, True)]
     while stack:
@@ -1196,11 +1219,12 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
         directory, is_top = stack.pop()
         try:
             with os.scandir(directory) as it:
-                entries = print_order(list(it), judged_entry)
+                entries = list(it) if dry else print_order(list(it), judged_entry, hidden)
         except OSError as exc:
             counters["directories_failed"] += 1
-            exceptions.add({"path": shown(directory), "status": "failed", "what": "directory",
-                            "reason": "the directory could not be listed", "error": describe(exc)})
+            if not dry:
+                exceptions.add({"path": shown(directory), "status": "failed", "what": "directory",
+                                "reason": "the directory could not be listed", "error": describe(exc)})
             continue
         counters["directories_visited"] += 1
         subdirs = []
@@ -1214,15 +1238,17 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
                     counters["links_not_followed"] += 1
                     if named:
                         counters["name_matches"] += 1
-                        rejected.add({"path": shown(entry.path), "status": "rejected",
-                                      "reason": "a symbolic link: links are not followed, so the target was not read"})
+                        if not dry:
+                            rejected.add({"path": shown(entry.path), "status": "rejected",
+                                          "reason": "a symbolic link: links are not followed, so the target was not read"})
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if is_top and entry.name in exclude_top:
                         counters["directories_excluded"] += 1
-                        exclusions.append(seal_row({"path": shown(entry.path),
-                                                    "reason": "named in exclude_top_level_dirs: a top-level %s directory of a Linux root; "
-                                                              "its contents were not read. Name it as the root to read it" % shown(entry.name, count=False)}))
+                        if not dry:
+                            exclusions.append(seal_row({"path": shown(entry.path),
+                                                        "reason": "named in exclude_top_level_dirs: a top-level %s directory of a Linux root; "
+                                                                  "its contents were not read. Name it as the root to read it" % shown(entry.name, count=False)}))
                         continue
                     subdirs.append(entry.path)
                     continue
@@ -1231,6 +1257,9 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
                 counters["entries_failed"] += 1
                 if named:
                     counters["name_matches"] += 1
+                if dry:
+                    pass
+                elif named:
                     rejected.add({"path": shown(entry.path), "status": "rejected",
                                   "reason": "the entry could not be examined", "error": describe(exc)})
                 else:
@@ -1241,14 +1270,86 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped):
                 counters["special_files_skipped"] += 1
                 if named:
                     counters["name_matches"] += 1
-                    rejected.add({"path": shown(entry.path), "status": "rejected",
-                                  "reason": "not a regular file (%s)" % kind_of(st.st_mode)})
+                    if not dry:
+                        rejected.add({"path": shown(entry.path), "status": "rejected",
+                                      "reason": "not a regular file (%s)" % kind_of(st.st_mode)})
                 continue
             counters["files_visited"] += 1
             if named:
                 counters["name_matches"] += 1
                 yield entry.path, st.st_size, st.st_mtime_ns
         stack.extend((d, False) for d in reversed(subdirs))
+
+
+# The longest a match of each pattern can be (with a little to spare); url and identifier_candidate have no bound.
+SPANS = {"onion": 72, "email": 400, "bitcoin": 88, "monero": 104, "ethereum": 56, "tox": 88}
+CHUNK = 1 << 18
+
+
+def matches(pattern, text, kind):
+    """The matches of `pattern` in `text`, exactly the ones pattern.finditer(text) finds and in the same order, with the clock looked at
+    between pieces of the text (finditer looks at nothing until a match comes: a megabyte of "a.a.a." has none and takes seconds). Yields
+    None, once, when the clock ran out. A pattern with a longest match is run piece by piece: a piece is searched with enough text after
+    it that no match starting in it is cut, and the next piece starts where the last match ended or at the end of the piece."""
+    span = SPANS.get(kind)
+    if span is None:
+        if out_of_time():
+            yield None
+            return
+        yield from pattern.finditer(text)
+        return
+    pos, size = 0, len(text)
+    while pos < size:
+        if out_of_time():
+            yield None
+            return
+        edge = min(size, pos + CHUNK)
+        last = pos
+        for m in pattern.finditer(text, pos, min(size, edge + span)):
+            if m.start() >= edge:
+                break
+            yield m
+            last = m.end()
+        pos = max(edge, last)
+
+
+def first_values(text):
+    """The values of a note the second pass keeps for withholding names: the same ones in the same order, at most NAME_VALUES_CAP."""
+    values = []
+    for kind, pattern, group in KINDS:
+        for m in matches(pattern, text, kind):
+            if m is None:
+                return values
+            values.append(m.group(group))
+            if len(values) >= NAME_VALUES_CAP:
+                return values
+    return values
+
+
+def values_pass(top, exclude_top, max_size):
+    """The first pass: the paths below `top` whose name holds a value of the note beneath them (case-insensitive, 8 characters or more, the
+    rule shown() applies), or None when the pass did not finish. The notes are read before the walk that prints is ordered, so that a name
+    withheld for a value sorts as every withheld name does and not by its text."""
+    matched = set()
+    base = top.rstrip(os.sep) or os.sep
+    for path, _size, _mtime in walk(top, exclude_top, None, None, None, collections.Counter(), {}, dry=True):
+        names, where = [], path
+        while len(where) > len(base) and where != base:
+            names.append((where, os.path.basename(where).lower()))
+            where = os.path.dirname(where)
+        if all(len(name) < 8 for _, name in names):       # a value is 8 characters or more: no name here can hold one
+            continue
+        try:
+            decoded = decode_note(read_note(path, max_size))
+        except Unreadable:
+            continue
+        if decoded.get("binary"):
+            continue
+        lows = {v.lower() for v in first_values(decoded["text"]) if len(v) >= 8}
+        for where, low in names:
+            if any(v in low for v in lows):
+                matched.add(where)
+    return None if out_of_time() else matched
 
 
 class Unreadable(Exception):
@@ -1350,7 +1451,7 @@ def main():
     except SecretValuesRefused as exc:
         fail(str(exc), write_values="refused", written=False)
     PROGRESS["values"] = values
-    set_deadline(max_seconds)
+    started = time.monotonic()
 
     real = os.path.realpath(root)
     notes = NoReplacePage("ransom_note_scan", [real, "notes"], limit)
@@ -1373,8 +1474,15 @@ def main():
     stopped = {}
     PROGRESS["coverage"] = counters
 
+    # The first pass takes at most FIRST_PASS_SHARE of the time; the clock the rest of the run keeps is the one the caller set.
+    STOP["deadline"] = started + max_seconds * FIRST_PASS_SHARE
+    matched = values_pass(root, set(exclude_top), max_size)
+    STOP["deadline"] = started + max_seconds
+    # Unfinished, any name of 8 characters or more could be a value of a note not read yet: those are ordered like withheld names.
+    hidden = (lambda entry: entry.path in matched) if matched is not None else (lambda entry: len(entry.name) >= 8)
+
     try:
-        for path, size, mtime_ns in walk(root, set(exclude_top), exceptions, exclusions, rejected, counters, stopped):
+        for path, size, mtime_ns in walk(root, set(exclude_top), exceptions, exclusions, rejected, counters, stopped, hidden):
             try:
                 blob = read_note(path, max_size)
             except Unreadable as exc:
@@ -1415,8 +1523,8 @@ def main():
                 if cut:
                     break
                 offsets.reset()
-                for m in pattern.finditer(text):
-                    if out_of_time():                     # the clock runs inside a note too: a 16 MiB note holds millions of matches
+                for m in matches(pattern, text, kind):
+                    if m is None or out_of_time():        # the clock runs inside a note too: a 16 MiB note holds millions of matches, or none
                         cut = True
                         break
                     value = m.group(group)
@@ -1546,6 +1654,8 @@ def main():
             if earliest else None),
         "coverage": {**counters, "name_matches_read": candidate_count, "bytes_read": bytes_read, "max_size": max_size},
         "time_limit": {"max_seconds": max_seconds, "reached": bool(stopped), **stopped},
+        "first_pass": ("complete: the notes were read for the values their paths hold before the walk was ordered" if matched is not None else
+                       "stopped by its share of the time limit: names of 8 characters or more are ordered by the keyed hash alone, as withheld names are"),
         "exclusions": exclusions,
         "exceptions": exceptions.page,
         "pages": pages,

@@ -43,6 +43,7 @@ signal (SIGTERM, SIGINT, SIGHUP) ends the tool with one JSON answer, status `fai
 `interrupted`, exit code 128 + the signal, after removing the files it was still writing.
 Exit code 0 means the survey ran; `status` and `complete` say whether it covered the tree.
 """
+import builtins
 import collections
 import datetime
 import errno
@@ -477,16 +478,18 @@ WITHHELD = "<identifier-shaped name withheld>"
 WITHHELD_PATHS = [0]              # printed paths that had a component withheld (one per call of shown)
 _IDRUN = re.compile(r"[A-Za-z0-9]{8,}")
 _WORDY = re.compile(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)*|[A-Z]+")
-_PAIR_SEPARATORS = re.compile(r"[:._ -]")
+_PAIR_SEPARATORS = re.compile(r"[^0-9A-Za-z]")
 _DIGIT_GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 SINGLE_CASE_RUN = 16              # a run of letters of one case is a word below this many letters, a random run from here on
 HEX_PAIRS = 8                     # this many pairs of hex digits joined by one separator are a byte string
-# Directory names every Windows, Linux and ESXi host has, whose letters and digits would otherwise be taken for an identifier. A component
+# Directory names every Windows, Linux and ESXi host has, whose letters and digits would otherwise be taken for an identifier, and the names
+# of the exceptions Python raises (the tools print the type of an error: IsADirectoryError reads as letters that are not words). A component
 # is printed as it is when it is one of these, whole and in any case.
 WELL_KNOWN = frozenset((
     "system32", "syswow64", "inetcache", "inetcookies", "inethistory", "msocache", "psreadline", "framework", "framework64",
-    "sqlserver", "gpucache", "dawnwebgpucache", "dawngraphitecache", "grshadercache", "indexeddb", "overlay2", "datastore1"))
+    "sqlserver", "gpucache", "dawnwebgpucache", "dawngraphitecache", "grshadercache", "indexeddb", "overlay2", "datastore1")
+) | frozenset(name.lower() for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException))
 
 
 def fold(name):
@@ -508,15 +511,19 @@ def fold(name):
 
 
 def _hex_pairs(text):
-    """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two."""
-    run = 0
-    for piece in _PAIR_SEPARATORS.split(text):
-        if len(piece) == 2 and piece[0] in HEX_DIGITS and piece[1] in HEX_DIGITS:
-            run += 1
-            if run >= HEX_PAIRS:
-                return True
-        else:
-            run = 0
+    """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two. A separator is any character that is not
+    an ASCII letter or a digit (the pairs of `id[aa-bb-...-hh]`, `key=aa:bb:...` and `(aa.bb...)` are found: a neighbour of the run that is
+    not a letter or a digit does not hide a pair at its end), and only a letter or a digit glued to a pair makes it no pair. A run does not
+    cross a slash: a path is read one component at a time."""
+    for part in text.split("/"):
+        run = 0
+        for piece in _PAIR_SEPARATORS.split(part):
+            if len(piece) == 2 and piece[0] in HEX_DIGITS and piece[1] in HEX_DIGITS:
+                run += 1
+                if run >= HEX_PAIRS:
+                    return True
+            else:
+                run = 0
     return False
 
 
@@ -529,8 +536,9 @@ def shaped(name):
     """Whether a name holds a token shaped like an identifier. The name is folded first (fold). A token is a run of 8 or more ASCII
     letters and digits. It is identifier-shaped when it holds both letters and digits, or is 10 or more digits, or is letters only and is
     not one word, one capitalised word, several capitalised words or all capitals, or is 16 or more letters of one case. So are 8 or more
-    pairs of hex digits joined by one separator (a colon, a dash, a dot, an underscore or a space), and groups of digits joined by a space
-    or a comma that hold 10 digits or more."""
+    pairs of hex digits joined by one separator (any character that is not a letter, a digit or a slash: a colon, a dash, a dot, an underscore,
+    a space, a bracket, an equals sign), whatever stands at either end of the run unless it is a letter or a digit glued to a pair, and groups
+    of digits joined by a space or a comma that hold 10 digits or more."""
     text = fold(name)
     for m in _IDRUN.finditer(text):
         token = m.group(0)
@@ -590,17 +598,22 @@ def shown(path, values=(), keep_last=False, count=True):
 _ORDER_SALT = os.urandom(16)
 
 
-def print_order(entries, judged):
+def print_order(entries, judged, hidden=None):
     """The directory entries in the order an answer prints them: by the text printed for each (the marker for a name that is judged
-    and withheld, the name itself otherwise; `judged(entry)` says whether the answer prints the entry's name through the judge), and the
-    entries that print alike in an order drawn afresh every run (a keyed hash of the raw name under a salt of this run). The rank of a
+    and withheld, the name itself otherwise; `judged(entry)` says whether the answer prints the entry's name through the judge;
+    `hidden(entry)`, when given, says that a name the first rule lets through is withheld all the same, because the note beneath it holds
+    its value: it sorts as the marker does), and the entries that print alike in an order drawn afresh every run (a keyed hash of the whole
+    path, the directory above included, under a salt of this run: the same name in two directories has two unrelated ranks). The rank of a
     withheld name among its siblings, the order a directory lists them in and the inode never show in what an answer lists, in the
     order of its rows, in the numbers it hands out or in which entries a limit keeps."""
     texts = []
     for entry in entries:
         name = entry.name
         try:
-            texts.append((_judge(name) or name) if judged(entry) else name)
+            if hidden is not None and hidden(entry):
+                texts.append(WITHHELD)
+            else:
+                texts.append((_judge(name) or name) if judged(entry) else name)
         except OSError:
             texts.append(_judge(name) or name)
     order = sorted(range(len(entries)), key=texts.__getitem__)
@@ -611,7 +624,7 @@ def print_order(entries, judged):
             j += 1
         group = order[i:j]
         if len(group) > 1:
-            group.sort(key=lambda n: (hashlib.blake2b(entries[n].name.encode("utf-8", "surrogatepass"), key=_ORDER_SALT, digest_size=8).digest(), n))
+            group.sort(key=lambda n: (hashlib.blake2b(entries[n].path.encode("utf-8", "surrogatepass"), key=_ORDER_SALT, digest_size=8).digest(), n))
         out.extend(group)
         i = j
     return [entries[n] for n in out]
@@ -628,13 +641,14 @@ def print_order(entries, judged):
 BOUNDARY = {"replaced": 0, "by": {}, "where": [], "not_listed": 0}
 OWN_NAMES = set()                 # the names of the files this run wrote (their digest is the name of the root and of the table)
 FREE_KEYS = frozenset(("sha256", "tail_hex", "suffix_hex"))
+PROSE_KEYS = frozenset(("reason", "status_basis", "partial_reasons"))    # the tool's own sentences: "(4294967296 bytes)" there is a size, not a name
 SERIAL_KEYS = frozenset(("note_id", "finding_id", "first_note_id", "duplicate_of"))      # a sequence number this tool counted: N000001, F1000000
 _SERIAL = re.compile(r"[NF][0-9]{6,12}")
 MAX_REPLACED_LISTED = 20
 MAX_JUDGED = 1 << 16
-_SUSPECT = re.compile(r"[A-Za-z0-9]{8}|(?:[0-9A-Fa-f]{2}[:._ -]){4}|[0-9]{3}[ ,][0-9]{3}")
+_SUSPECT = re.compile(r"[A-Za-z0-9]{8}|(?:[0-9A-Fa-f]{2}[^0-9A-Za-z/]){4}|[0-9]{3}[ ,][0-9]{3}")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]+")
-_PAIRS = re.compile(r"(?<![^:._ -])[0-9A-Fa-f]{2}(?:[:._ -][0-9A-Fa-f]{2}){7}(?![^:._ -])")
+_PAIRS = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{2}(?:[^0-9A-Za-z/][0-9A-Fa-f]{2}){7}(?![0-9A-Za-z])")
 _GROUPS = re.compile(r"(?<![0-9])[0-9]{3,}(?:[ ,][0-9]{3,})+(?![0-9])")
 
 
@@ -656,16 +670,18 @@ def _read_as(text):
 
 
 @functools.lru_cache(maxsize=65536)
-def _why(text):
-    """The reason a string may not be printed (a fixed sentence, never a part of the string), or None."""
+def _why(text, prose=False):
+    """The reason a string may not be printed (a fixed sentence, never a part of the string), or None. `prose` is a sentence of the tool's
+    own (a reason, a status basis): a number of 10 or more digits followed by " bytes" is a size there and is not read as a name."""
     flat = _read_as(text)
-    for run in _ALNUM_RUN.findall(flat):
+    for found in _ALNUM_RUN.finditer(flat):
+        run = found.group()
         size = len(run)
         if size < 8 or run.lower() in WELL_KNOWN:
             continue
         digits = sum(1 for c in run if c.isdigit())
         if digits == size:
-            if size >= 10:
+            if size >= 10 and not (prose and flat.startswith(" bytes", found.end())):
                 return "a long run of digits"
         elif digits:
             return "letters and digits in one run"
@@ -685,8 +701,8 @@ def _why(text):
 _CLEAN = set()                    # short strings already found clean (keys, repeated words): not read again
 
 
-def _refuse(text, evidence):
-    """Why this string may not be printed, or None."""
+def _refuse(text, evidence, prose=False):
+    """Why this string may not be printed, or None. `prose` is set for the tool's own sentences (see _why)."""
     size = len(text)
     if size < 8 or text in _CLEAN or text in OWN_NAMES:
         return None
@@ -700,18 +716,20 @@ def _refuse(text, evidence):
             size = len(text)
             if size < 8:
                 return None
-    why = None if text.isascii() and not _SUSPECT.search(text) else _why(text)
-    if why is None and size <= 64 and len(_CLEAN) < 20000:
+    why = None if text.isascii() and not _SUSPECT.search(text) else _why(text, prose)
+    if why is None and not prose and size <= 64 and len(_CLEAN) < 20000:
         _CLEAN.add(text)
     return why
 
 
 def _place(where):
-    """The place of a string as text: the keys that are plain words and the indexes above it, never a key that came from a name."""
+    """The place of a string as text: the keys that are plain words and the indexes above it, never a key that came from a name (a key is a
+    word only when it is also one to the second check: a key of letters and digits is not printed, whatever it looks like)."""
     parts = []
     while where is not None:
         where, label = where
-        parts.append(label if isinstance(label, int) or re.fullmatch(r"[a-z][a-z_0-9]{0,40}", str(label)) else "*")
+        word = not isinstance(label, int) and re.fullmatch(r"[a-z][a-z_0-9]{0,40}", str(label)) and _why(str(label)) is None
+        parts.append(label if isinstance(label, int) or word else "*")
     return "/" + "/".join(str(p) for p in reversed(parts))
 
 
@@ -732,14 +750,14 @@ def _read_back(value, where, key, evidence):
     if isinstance(value, str):
         if len(value) < 8 or key in FREE_KEYS or (key in SERIAL_KEYS and _SERIAL.fullmatch(value)):
             return value
-        why = _refuse(value, evidence)
+        why = _refuse(value, evidence, key in PROSE_KEYS)
         return _replaced(why, where) if why else value
     if isinstance(value, dict):
         pairs, changed = [], False
         for k, v in value.items():
             nk = _read_back(k, (where, "(key)"), None, None) if isinstance(k, str) and len(k) >= 8 else k
             if isinstance(v, (str, dict, list, tuple)):
-                nv = _read_back(v, (where, k), k if isinstance(k, str) else None, evidence)
+                nv = _read_back(v, (where, k if nk is k else "(key)"), k if isinstance(k, str) else None, evidence)
             else:
                 nv = v
             changed = changed or nk is not k or nv is not v
@@ -753,7 +771,7 @@ def _read_back(value, where, key, evidence):
             out[nk] = nv
         return out
     if isinstance(value, (list, tuple)):
-        items = [_read_back(v, (where, i), None, evidence) for i, v in enumerate(value)]
+        items = [_read_back(v, (where, i), key, evidence) for i, v in enumerate(value)]
         return value if all(a is b for a, b in zip(items, value)) else items
     return value
 
@@ -1398,12 +1416,13 @@ def main():
                "parameters": {"root": shown_root, "sample": sample_size, "tail_bytes": tail_bytes, "read_budget_bytes": budget.total,
                               "max_seconds": max_seconds, "exclude_top_level_dirs": [shown(x, count=False) for x in exclude_top],
                               "census": full_census}}
-    census.finish(receipt)
     if getattr(census, "shown", None):
         OWN_NAMES.add(census.shown)
 
     regular = counters["regular_files_visited"]
-    print(json.dumps(release({
+    # The answer is read back before the census is closed, so that a string only the answer holds (an unrecognised parameter named like an
+    # identifier) that is replaced there is counted when the receipt is read back: the receipt and the answer say the same status.
+    answer = release({
         "root": shown_root,
         "parser": PARSER,
         "complete": complete,
@@ -1462,7 +1481,13 @@ def main():
                 "family until a reference matches. Take the questions this cannot answer (extent, recoverability, family, "
                 "timing) to file-format validation, a known-good counterpart or a documented layout. coverage and complete say "
                 "what was and was not read; a file in read_failed or unmeasured was not shown to be anything.",
-    }), indent=2))
+    })
+    census.finish(receipt)
+    if getattr(census, "shown", None):
+        OWN_NAMES.add(census.shown)
+        if isinstance(answer.get("census"), dict):
+            answer["census"]["file"] = census.shown
+    print(json.dumps(answer, indent=2))
 
 
 if __name__ == "__main__":

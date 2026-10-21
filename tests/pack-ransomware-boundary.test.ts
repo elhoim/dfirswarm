@@ -18,7 +18,7 @@ import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { ROOT, runPySnippet, withCwd } from "./tool-library-harness.ts";
-import { NOTES, SURVEY, body, filesUnder, refused, tool } from "./ransomware-pack-harness.ts";
+import { LOAD, NOTES, SURVEY, body, filesUnder, refused, runWithoutFirstRule, tool } from "./ransomware-pack-harness.ts";
 
 const HEX = "0123456789abcdef";
 const pick = (alphabet: string, n: number): string => Array.from({ length: n }, () => alphabet[randomInt(alphabet.length)]).join("");
@@ -177,11 +177,6 @@ test("twin trees with the raw id of one withheld directory swapped give the same
 
 // ---- P2-B: the check at the point of output -----------------------------------------------------------------------------------
 
-const LOAD = String.raw`
-import importlib.util, io, json, os, sys
-def load(p, n="m"):
-    s = importlib.util.spec_from_file_location(n, p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
-`;
 
 const UNIT = LOAD + String.raw`
 out = {}
@@ -239,19 +234,6 @@ test("the backstop replaces an identifier-shaped string in a path, a key, an ext
   assert.equal(r.clean_untouched, true);
 });
 
-/** Run a tool's main() with the first rule removed (it judges nothing, scrubs nothing): only the backstop is left. */
-const NO_FIRST_LAYER = LOAD + String.raw`
-m = load(sys.argv[1])
-m.shaped = lambda name: False
-m.scrub = lambda text, kind="text": text
-m._judge.cache_clear()
-sys.stdin = io.StringIO(sys.argv[2])
-try:
-    m.main()
-except SystemExit:
-    pass
-`;
-
 test("with the first rule removed, no identifier reaches the answer, a row or a file of either tool: the backstop alone holds", async () => {
   await withCwd(async (cwd) => {
     const dirId = hexId();
@@ -273,7 +255,7 @@ test("with the first rule removed, no identifier reaches the answer, a row or a 
     for (const [script, label] of [[SURVEY, "encrypted_survey"], [NOTES, "ransom_note_scan"]] as const) {
       const out = join(cwd, "out-" + label);
       await mkdir(out);
-      const run = await runWith(script, JSON.stringify({ root: "work/ev", limit: 1 }), cwd, out);
+      const run = await runWithoutFirstRule(script, JSON.stringify({ root: "work/ev", limit: 1 }), cwd, out);
       assert.doesNotMatch(run.stderr, /Traceback/, label);
       const printed = run.stdout + Object.values(await written(out)).join("\n");
       for (const id of [dirId, deepId, noteExt]) assert.ok(!printed.includes(id), `${label} printed ${id} with the first rule removed`);
@@ -281,27 +263,11 @@ test("with the first rule removed, no identifier reaches the answer, a row or a 
       assert.equal(answer.status, "partial", label);
       assert.ok((answer.boundary?.strings_replaced_at_the_output ?? 0) >= 3, `${label}: ${JSON.stringify(answer.boundary)}`);
       if (label === "encrypted_survey") assert.ok(printed.includes(evidenceId), "an ordinary encrypted file's name is still printed: it is the evidence");
-      const rooted = await runWith(script, JSON.stringify({ root: `work/case-${rootId}/ev` }), cwd, join(cwd, "out-root-" + label));
+      const rooted = await runWithoutFirstRule(script, JSON.stringify({ root: `work/case-${rootId}/ev` }), cwd, join(cwd, "out-root-" + label));
       assert.ok(!(rooted.stdout + Object.values(await written(join(cwd, "out-root-" + label))).join("\n")).includes(rootId), `${label} printed the id of its root`);
     }
   });
 });
-
-function runWith(script: string, args: string, cwd: string, out: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return import("node:child_process").then(
-    ({ spawn }) =>
-      new Promise((resolve, reject) => {
-        const child = spawn("python3", ["-c", NO_FIRST_LAYER, script, args], { cwd, env: { ...process.env, AGENT_ID: "s1", JOB_ID: "j000001", OUT: out } });
-        const stdout: Buffer[] = [];
-        const stderr: Buffer[] = [];
-        child.stdout.on("data", (c: Buffer) => stdout.push(c));
-        child.stderr.on("data", (c: Buffer) => stderr.push(c));
-        child.on("error", reject);
-        child.on("close", (code) => resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }));
-        child.stdin.end("");
-      }),
-  );
-}
 
 test("the backstop and the name rule agree on random names (1,000 cases, count only)", async () => {
   const code = LOAD + String.raw`
@@ -544,6 +510,9 @@ for n, p in (("encrypted_survey", sys.argv[1]), ("ransom_note_scan", sys.argv[2]
           "groups_short": "12 " * (size // 3), "digit_run_sep": "1" * (size - 2) + " 1", "digits": "1" * size, "arabic_digits": "١" * size,
           "arabic_groups": "١٢٣ " * (size // 4), "zwsp_hex": "a​1" * (size // 3), "nfkc_expand": "ﷺ" * (size // 3), "caps": "A" * size,
           "caps_lower": "Ab" * (size // 2), "lower": "a" * size, "slashes": "a1/" * (size // 3), "userinfo": "a:" * (size // 4) + "@",
+          "pairs_brackets": "ab[" * (size // 3), "pairs_glued": "xab-" * (size // 4), "pairs_any_separator": "ab(ab)ab=ab|" * (size // 12),
+          "pairs_seven_then_glue": ("ab:" * 7 + "xab ") * (size // 25), "pairs_slashes": "ab/" * (size // 3), "pairs_newlines": "ab\n" * (size // 3),
+          "pairs_long_then_x": "ab-cd " * (size // 6 - 1) + "abc", "pairs_with_fullwidth": "ａｂ:" * (size // 3),
         }
         for label, text in cases.items():
             for fn, call in (("shown", lambda t: m.shown("a/" + t + "/b", count=False)), ("why", lambda t: m._why(t)), ("refuse", lambda t: m._refuse(t, None)),
