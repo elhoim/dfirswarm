@@ -1,10 +1,10 @@
 ---
 id: normalise/container-members
-title: Preserve container identity when members become files
-when: A delivery is an archive, or a tree extracted from one, and member identity matters.
+title: Container identity when members become files
+when: A delivery is an archive, or a tree extracted from one.
 needs: [evidence/archives]
 tools: [archive_extract, collection_manifest_verify]
-requires_host: []
+requires_host: [7z]
 ---
 
 Use when a collector's output arrives as a zip or tar, or you extracted one. Not for the archive's own safety rules (`evidence/archives`) or for source paths (`normalise/layout`).

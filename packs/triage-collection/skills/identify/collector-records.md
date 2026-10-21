@@ -1,19 +1,20 @@
 ---
 id: identify/collector-records
-title: What each collector's records can and cannot tell you
-when: You rely on a collector's own records (copy, skip, upload, log, hash list), or a collector's version or mode matters.
+title: What a collector's records say
+when: You rely on a collector's own copy, skip, upload or log records.
 needs: []
-tools: [collection_manifest_parse]
+tools: [collection_manifest_parse, collection_manifest_verify]
 requires_host: []
+mentions: [CyLR]
 ---
 
 Use when you read what a collector says it did. Not for naming the collector from a layout (`identify/collector`, `identify/collector-clues`).
 
 Run `collection_manifest_parse`: one canonical record per row or line, the raw row's locator, and each adapter's schema in `adapters`. A record whose shape no adapter knows is `partial` or `unsupported`; `failures_recorded.count` is then `null`, which is not zero. The collector's version is `unknown` unless a record states it. What each family leaves, and what to take from it:
 
-- **KAPE.** Per run: `*_CopyLog.csv` (source, destination, size, SHA-1 of the source, the file's own times, the copy time), `*_SkipLog.csv` (source and the collector's reason) and `*_ConsoleLog.txt`. A copy row is a claim that a file was copied; its SHA-1 covers the source bytes the collector read. A deferred copy and a skip are the collector's outcomes. Keep each run apart. Which targets were configured is not in these records.
+- **KAPE.** Per run: `*_CopyLog.csv` (source, destination, size, SHA-1 of the source, the file's own times, the copy time), `*_SkipLog.csv` (source and the collector's reason) and `*_ConsoleLog.txt`. A copy row is a claim that a file was copied; its SHA-1 column is named for the source file. A deferred copy and a skip are the collector's outcomes. Keep each run apart. Which targets were configured is not in these records.
 - **Velociraptor** (the container this pack was checked against, 0.77.2). `uploads.json` rows say where an upload was stored (`vfs_path`), its logical size and its stored size; a failed upload is not there but in the result rows (`results/*.json`, an upload record with `Error`) and in `log.json`. An upload smaller than its file is sparse or partial: its digest is of another byte sequence than the stored one. Read the artefact result tables as derived output, apart from the uploaded bytes.
-- **UAC** (3.4.0; the log levels differ in 2.9.1). `uac.log` lines with an ERR level are errors; a summary that says 0 errors is not one, and a line that fits no shape is kept unlabelled. A `hash_executables` list is a claim about files of the source host: a file in `[root]` is not hashed there unless a list names it. Bodyfile and live-response output are command output, not copies.
+- **UAC** (3.4.0; the log levels differ in 2.9.1). `uac.log` lines with an ERR level are errors; a summary that says 0 errors is not one, and a line that fits no shape is kept unlabelled. A `hash_executables` list is a claim about files of the source host; whether a collected copy of one is in `[root]` is for the join (`collection_manifest_verify`) to say. Bodyfile and live-response output are command output, not copies.
 - **CyLR.** No record is read: a mirrored tree is compatible with it and with a hand copy. Say so; do not invent a profile or a manifest.
 - **Cado and others.** Name the product and export type, read what it supplied, and assert no layout this pack has not seen.
 

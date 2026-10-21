@@ -1,7 +1,7 @@
 ---
 id: verify/collector-effects
-title: Collector footprint and acquisition chronology
-when: Events in the data may be the collector's own, or the order of deployment, collection and transfer matters.
+title: Collector footprint and chronology
+when: Events may be the collector's own, or the order of collection steps matters.
 needs: []
 tools: [collection_manifest_parse, timestamp_decode]
 requires_host: []

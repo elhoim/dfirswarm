@@ -1,9 +1,9 @@
 ---
 id: verify/raw-and-derived
-title: Raw artefacts, companion files and derived reports
-when: A delivery mixes collected artefacts with parsed output, or a hive, database or log is read from it.
+title: Raw artefacts, companions and derived reports
+when: A delivery mixes collected artefacts with parsed output.
 needs: []
-tools: [collection_path_map, file_type]
+tools: [collection_path_map, collection_manifest_verify]
 requires_host: []
 ---
 
