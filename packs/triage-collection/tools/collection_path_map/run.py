@@ -2333,6 +2333,9 @@ def finish(hits, why, depth, weak):
     if len(rels) > 1:
         return {"status": "ambiguous", "rel": None, "matched_by": why, "depth": depth, "candidates": rels[:REC_FIRST],
                 "reason": "%d delivered files differ from each other only by case" % len(rels)}
+    if len(hits) > len(rels):
+        return {"status": "ambiguous", "rel": None, "matched_by": why, "depth": depth, "candidates": rels[:REC_FIRST],
+                "reason": "the name appears %d times (an archive can hold one name twice)" % len(hits)}
     if not regular:
         return {"status": "not_regular", "rel": rels[0], "matched_by": why, "depth": depth, "candidates": rels,
                 "reason": "the delivered entry is a link or a special file: it is not followed"}

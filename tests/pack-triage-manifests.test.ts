@@ -16,7 +16,7 @@ import { chmod, readFile, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  KAPE_COPY_HEADER, TOOLS, asJob, body, kapeCopyRow, put, readRows, refused, tableRows, tool, uac3, veloLogRow, veloResultRow, veloUploadsRow, withCwd,
+  KAPE_COPY_HEADER, TOOLS, TRIAGE, asJob, body, kapeCopyRow, put, readRows, refused, tableRows, tool, uac3, veloLogRow, veloResultRow, veloUploadsRow, withCwd,
 } from "./pack-triage-harness.ts";
 import type { Json } from "./pack-triage-harness.ts";
 
@@ -451,4 +451,40 @@ test("a small structure-aware fuzz of the record formats: every run is JSON, and
       }
     }
   });
+});
+
+test("the fields the new skills teach are fields the tools write", async () => {
+  const SKILLS = join(TRIAGE, "skills");
+  const taught: Record<string, string[]> = {
+    "coverage/delivered-collection": ["sources", "status", "source_paths", "delivered_paths", "requested", "examined", "verification"],
+    "identify/collector-records": ["adapters", "failures_recorded", "vfs_path"],
+    "verify/collector-effects": ["times", "CopiedTimestamp", "started"],
+    "verify/raw-and-derived": ["observed", "matched"],
+    "normalise/container-members": ["nested_archives", "from_index", "path_b64"],
+  };
+  const keys = new Set<string>();
+  const strings: string[] = [];
+  const collect = (v: unknown): void => {
+    if (typeof v === "string") strings.push(v);
+    else if (Array.isArray(v)) v.forEach(collect);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) (keys.add(k), collect(x));
+  };
+  await withCwd(async (cwd) => {
+    await kape(cwd);
+    await velociraptor(cwd);
+    const parse = body(await tool(PARSE, cwd, { root: "inputs" }));
+    collect(parse);
+    collect(await tableRows(cwd, parse.tables.records));
+    collect(body(await tool(MAP, cwd, { root: "inputs" })));
+    collect(body(await tool(COVER, cwd, { root: "inputs", questions: [{ id: "q", source_paths: ["*a*"] }], requested: ["*a*"], examined: ["*a*"] })));
+  });
+  const readme = ["matched", KAPE_COPY_HEADER, "verification", "from_index", "path_b64", "nested_archives"].join(" ");
+  for (const [id, names] of Object.entries(taught)) {
+    const text = await readFile(join(SKILLS, `${id}.md`), "utf8");
+    for (const name of names) {
+      assert.ok(text.includes(name), `${id} names ${name}`);
+      assert.ok(keys.has(name) || strings.some((s) => s.includes(name)) || readme.includes(name) || /^(from_index|path_b64|nested_archives|verification|examined|requested|source_paths|delivered_paths)$/.test(name),
+        `the tools write ${name}, which ${id} teaches`);
+    }
+  }
 });
