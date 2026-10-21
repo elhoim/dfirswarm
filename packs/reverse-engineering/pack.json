@@ -1,7 +1,7 @@
 {
   "id": "reverse-engineering",
   "name": "Reverse Engineering Pack",
-  "version": "1.6.3",
+  "version": "1.7.1",
   "description": "Static triage of a binary or a document under quarantine: what the file actually is, PE and ELF structure, entropy and packing, obfuscated strings, capability mapping, macros and embedded objects, and rules. Nothing from the evidence is ever executed.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -57,6 +57,7 @@
       "skills/runtimes/python-packaged.md": "2fb8be1d1f0dea0686f8adfba9066873cf525c6b2e96fb0a48a09d77a2580623",
       "skills/code/static-inspection.md": "3cb55eec74e8c06c4e69f919de64c1f92e3f40e66f183df4cf4c1840e43a492a",
       "skills/triage/quarantine.md": "67e54196b0bf206feb6107054903bea7b6fe384466cddc602cdc21cf45afe28d",
+      "skills/reverse-engineering/router.md": "733871064383e7b724fe7f0d79962b909d260a0e4729e8bcdd354e564f3513ac",
       "skills/scripts/static-analysis.md": "affbe7759e0b4f49c7613a603307edaef05d80b5e3bc55a992dad12a0a08ba99",
       "skills/rules/authoring.md": "69f5cc20f032ed367ef83cab58b64de51c135c217fc6aa9f4f224db71ceb2cb1",
       "skills/rules/yara.md": "8eadb83d84456b726ba99dff1c6e0d0547ace586aff7b47d4af58c8e2f16c3c9",
@@ -68,7 +69,7 @@
       "skills/packing/static-recovery.md": "b253d8af43bcb8a23c1460561aa2c9948ce42e0587b75bf1e058fbda2136db6b",
       "requires/host.json": "35d6940ebf96fe7342b6be31f503561267f756ec91203661c0940860b0dd0171",
       "requires/python.txt": "f0f18bd3e9e860703a9a7599d84f281b999764d16f1619aeef6b89a670c5566b",
-      "skills/INDEX.md": "8ecaa0b669985cb0bf06f0f63172f1b96c60945c93f1610666309fb20d5a905f"
+      "skills/INDEX.md": "d9a2e3dab5cdcf8516f4db5c3a7fef49fac651a8d4daa0072b332d0e898a22c4"
     }
   },
   "tools": [
@@ -83,5 +84,11 @@
     "reverse-engineering/capa-floss",
     "reverse-engineering/static-binary"
   ],
-  "skills": 20
+  "skills": 21,
+  "method_only": [
+    {
+      "path": "skills/reverse-engineering/router.md",
+      "why": "the pack's router: it names the other notes by the question each answers and holds no rule, tool or program of its own"
+    }
+  ]
 }
