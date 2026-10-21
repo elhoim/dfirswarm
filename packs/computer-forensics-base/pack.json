@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.11.2",
+  "version": "1.11.3",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -47,8 +47,8 @@
       "tools/sig_carve/run.py": "6791409615e69f8ec58ae9012e3d922c004ebea5894aa4d167309f1fe6707463",
       "tools/timestamp_decode/manifest.json": "2f30bf7f821cf955f4fa9a08a82d52a73d420947d1a182034cdd41f1e52527a8",
       "tools/timestamp_decode/run.py": "1c8f1de9b21828bcccc0b137b39fd5fd86c114e7a3b45f20ec682c774e4a85a4",
-      "tools/timeline_super/manifest.json": "433f42e9f0589c717d250711d4905afbb23b102d98d958d28cdb3034ab010e69",
-      "tools/timeline_super/run.py": "4e14d4c705286828295c399befae2c92b3009c754051a456a50ea39b41b3895f",
+      "tools/timeline_super/manifest.json": "0dd13b6ecfefd95c8a8ce7d89eb410041b6c7b47c8aeb8151df71c682f55b886",
+      "tools/timeline_super/run.py": "6d15656ce6f04454db3ecbb29bc177c4707b207f6f77ac3e79544efada0bf922",
       "tests/pack.test.sh": "4fd2b94956fed060021eba9d9fc9b812516dc7c6413cee639477aa36642cd053",
       "tests/run_tests.py": "91e0d82b456267b0f27e0bc7e4efbb7abf22f8be76879275166d66a8eb662d02",
       "tests/support.py": "ed8a4670ddbf90e4562e57319ea31501be0d0920571d7bdfdfe7e9392b37def8",
