@@ -129,7 +129,7 @@ class LosslessPage:
 
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=True, default=str))
+        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
         self._out.write("\n")
 
     def add(self, row: object) -> None:
