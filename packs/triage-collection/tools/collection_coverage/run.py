@@ -2332,6 +2332,9 @@ def finish(hits, why, depth, weak):
     if len(rels) > 1:
         return {"status": "ambiguous", "rel": None, "matched_by": why, "depth": depth, "candidates": rels[:REC_FIRST],
                 "reason": "%d delivered files differ from each other only by case" % len(rels)}
+    if len(hits) > len(rels):
+        return {"status": "ambiguous", "rel": None, "matched_by": why, "depth": depth, "candidates": rels[:REC_FIRST],
+                "reason": "the name appears %d times (an archive can hold one name twice)" % len(hits)}
     if not regular:
         return {"status": "not_regular", "rel": rels[0], "matched_by": why, "depth": depth, "candidates": rels,
                 "reason": "the delivered entry is a link or a special file: it is not followed"}
@@ -2744,7 +2747,7 @@ def statement_for(q, outcomes_unknown, integrity_given, examined_given):
     parts = []
     head = "Question %s%s: " % (q.id, " (%s)" % q.what if q.what else "")
     if q.files:
-        parts.append("%d delivered file(s) match%s" % (q.files, "es" if q.files == 1 else ""))
+        parts.append("%d delivered file(s) match" % q.files)
     else:
         parts.append("no delivered file matches")
     if q.copied:
@@ -2926,6 +2929,9 @@ def main():
                      "collectors_recognised": sorted({s["collector"] for s in sources}),
                      "records_not_read_whole": [{"log": s["log"], "status": s["status"], "reason": s.get("reason")} for s in sources if s["status"] != "parsed"][:FIRST_PROBLEMS],
                      "census_complete": census.complete, "census_stopped": census.stopped, "census_capped": census.capped},
+        "census": {"files": census.files, "directories": census.dirs, "symbolic_links_not_followed": census.links, "special_files_not_read": census.special,
+                   "errors": census.errors_total, "first_errors": [{k: shown(v, "census error") if k == "path" else v for k, v in e.items()} for e in census.errors],
+                   "stopped": census.stopped, "capped": census.capped, "complete": census.complete},
         "verification": verification_info,
         "examined_given": bool(examined),
         "tables": tables,

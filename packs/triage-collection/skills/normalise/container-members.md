@@ -4,12 +4,12 @@ title: Container identity when members become files
 when: A delivery is an archive, or a tree extracted from one.
 needs: [evidence/archives]
 tools: [archive_extract, collection_manifest_verify]
-requires_host: [7z]
+requires_host: []
 ---
 
 Use when a collector's output arrives as a zip or tar, or you extracted one. Not for the archive's own safety rules (`evidence/archives`) or for source paths (`normalise/layout`).
 
-1. Inventory before you extract. The `collection-intake` recipe reads a zip or tar (not a 7z) in one pass and extracts nothing: every member with its number `n`, kind and SHA-256, the collector's records as canonical rows, and one verification row per delivery claim. The base `archive-members` recipe lists any archive's members with the exact name bytes (`path_b64`), sizes, times, link targets and flags. Keep `n`: the same number is `archive_extract`'s `from_index`.
+1. Inventory before you extract. The `collection-intake` recipe reads a zip or tar (no other format) in one pass and extracts nothing: every member with its number `n`, kind and SHA-256, the collector's records as canonical rows, and one verification row per delivery claim. The base `archive-members` recipe lists any archive's members with the exact name bytes (`path_b64`), sizes, times, link targets and flags. Keep `n`: the same number is `archive_extract`'s `from_index`.
 2. Keep what a tree no longer shows: the original name bytes (a name that is not UTF-8 is renamed on some file systems), duplicate names (two members, two rows), links and devices (not recreated; each is a row with its target), sparse representations, extended attributes, and each member's compression or encryption state. A partial listing, an unreadable member or a member over a budget is a stated limit, not a missing file.
 3. Follow one chain per file, container to member to extracted object, and cite it by the container's hash, the member's `n` and the extracted job path. Two members that extract to one path are a collision: say which one the file is.
 4. A nested archive or image is named (`looks_like`, `nested_archives`), never opened by the first pass. Extract it in a call of its own with its own budgets and classify what it holds separately; a disk image inside a collection is not a logical collection.
