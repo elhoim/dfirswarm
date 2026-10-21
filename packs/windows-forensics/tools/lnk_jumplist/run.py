@@ -1013,10 +1013,10 @@ def collect(path, max_files):
                 try:
                     st = os.lstat(full)
                 except OSError as exc:
-                    skipped.append({"file": full, "reason": "could not be examined: " + describe(exc)})
+                    skipped.append({"file": full, "reason": "could not be examined: " + describe(exc), "unopened": True})
                     continue
                 if not stat.S_ISREG(st.st_mode):
-                    skipped.append({"file": full, "reason": ("a symbolic link is not followed" if stat.S_ISLNK(st.st_mode) else "not a regular file") + ": it was not opened"})
+                    skipped.append({"file": full, "reason": ("a symbolic link is not followed" if stat.S_ISLNK(st.st_mode) else "not a regular file") + ": it was not opened", "unopened": True})
                     continue
                 if len(targets) >= max_files:
                     over += 1
@@ -1114,6 +1114,11 @@ def main():
         reasons.append("the tool's own time limit (%d seconds) was reached: files after it were not read" % int(seconds))
     if over:
         reasons.append("%d file(s) past max_files (%d) were not read" % (over, max_files))
+    unopened = sum(1 for item in skipped if item.get("unopened"))
+    if unopened:
+        reasons.append("%d file(s) named like a link or a jump list were not opened (a symbolic link is not followed; a pipe, a socket or a device is never opened): skipped_first and the receipt name them" % unopened)
+    if run.not_attempted:
+        reasons.append("%d file(s) were not read because their first bytes are neither a link, a compound file nor a customDestinations-ms name (skipped_first names them)" % len(run.not_attempted))
     if run.unread:
         reasons.append("%d file(s) or stream(s) could not be read whole" % run.unread)
     if run.container_problems:
@@ -1130,6 +1135,8 @@ def main():
         status = "partial" if reasons else "complete"
         basis = "; ".join(reasons) if reasons else "every file was read to its end, every container is consistent, and every link's structure is complete" + (
             " and agrees with lnkinfo where lnkinfo was run" if run.lnkinfo["checked"] else "")
+        if not reasons and run.lnkinfo["not_run"]:
+            basis += "; lnkinfo, the independent reader, was not run for %d link(s) (lnkinfo.why_not_run says why)" % run.lnkinfo["not_run"]
     receipt = {"parser": PARSER, "status": status, "status_basis": basis, "path": path, "counts": run.counts, "kinds": kinds, "integrity": run.integrity,
                "container_problems": run.container_problems, "lnkinfo": run.lnkinfo, "skipped": len(unread_names)}
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".receipt-")

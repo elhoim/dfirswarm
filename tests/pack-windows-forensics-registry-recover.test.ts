@@ -57,6 +57,16 @@ async function put(cwd: string, s: Setup, name = "h"): Promise<Record<string, un
   }
   return args;
 }
+/** The process id a stand-in wrote to its file (the tool starts the stand-in, so it is waited for until it differs from `not`). */
+async function pidOf(file: string, not?: number): Promise<number> {
+  for (let i = 0; i < 100; i++) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    const id = Number(text.trim().split("\n").filter(Boolean).pop());
+    if (id && id !== not) return id;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`the stand-in never wrote a process id to ${file}`);
+}
 const job = async (cwd: string, n = 1): Promise<Record<string, string>> => {
   await mkdir(join(cwd, "out"), { recursive: true });
   return { JOB_ID: `j00000${n}`, OUT: join(cwd, "out") };
@@ -430,7 +440,7 @@ test("a program it starts stays in its group: its own clock ends regfexport, and
     const out = body<Answer>(await tool("registry_recover", cwd, { ...args, max_seconds: 2 }, {}, bin));
     assert.ok(Date.now() - began < 8000, `returned in ${Date.now() - began} ms`);
     assert.notEqual(out.records.independent_reader.regfexport.finished, true);
-    const pid = Number((await readFile(pidFile, "utf8")).trim());
+    const pid = await pidOf(pidFile);
     await new Promise((r) => setTimeout(r, 300));
     assert.throws(() => process.kill(pid, 0), "regfexport is gone");
     // SIGTERM: partial JSON, 143.
@@ -438,16 +448,7 @@ test("a program it starts stays in its group: its own clock ends regfexport, and
     const chunks: Buffer[] = [];
     child.stdout.on("data", (c: Buffer) => chunks.push(c));
     child.stdin.end(JSON.stringify({ ...args, max_seconds: 60 }));
-    for (let i = 0; i < 100; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      try {
-        const p = Number((await readFile(pidFile, "utf8")).trim());
-        if (p !== pid) break;
-      } catch {
-        /* not yet */
-      }
-    }
-    const second = Number((await readFile(pidFile, "utf8")).trim());
+    const second = await pidOf(pidFile, pid);
     child.kill("SIGTERM");
     const code = await new Promise<number | null>((resolve) => child.on("close", (c) => resolve(c)));
     assert.equal(code, 143);
