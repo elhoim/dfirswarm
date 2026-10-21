@@ -178,9 +178,10 @@ async function block(path: string, name: string): Promise<string> {
 const processBlock = (path: string): Promise<string> => block(path, "PROCESS");
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
-// The text of each block as the network pack carries it (its PR 1a, head f5ad0030): a copy here is a copy of that text, and a
-// change to either side shows as a change of this hash, to be made in both places.
-const NETWORK_PROCESS_SHA = "072a9f28f521a9bc039e717811ef0a2b4e9118169fca908bfd4467969cefddac";
+// The text of each block as the network pack carries it: a copy here is a copy of that text, and a change to either side shows
+// as a change of this hash, to be made in both places. The process block is the one with the poll() guard in kill_tree, the seen
+// set in the walk and the libproc route on macOS.
+const NETWORK_PROCESS_SHA = "d6dc512281472e451aa994429aab766d808c330114650ecad2a72aeeada8a944";
 const NETWORK_WITHHOLDING_SHA = "e90959c1c374a2ce465fdd85e1c8a5e9c9f5fe1d6088192a3291baa9da0c23c2";
 
 test("the tool and the recipes that start programs carry one process block, the network pack's text, and nothing in the pack starts a program in a session or a group of its own", async () => {
