@@ -11,9 +11,6 @@
  * - the entry lines of INDEX.md are the pack's skills, and cost at most 1,000 tokens as the harness counts them;
  * - every profile of images/profiles.json, and the base pack beside any one, two or three other packs, is shown within
  *   2,500 tokens (measured by scripts/pack-index-budgets.ts, which prints the table).
- *
- * KNOWN_PENDING_ROUTER lists, by name, a pack whose router has not landed yet. A listed pack must have no router today;
- * the day it names one this suite fails until the pack is removed from the list, which turns every invariant on for it.
  */
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -22,11 +19,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BYTES_PER_TOKEN, readPackIndex, SKILL_BUDGET, splitSkill } from "../extensions/skills.ts";
 import { loadCorpus, measureCombinations, measureProfiles, ROOT } from "../scripts/pack-index-budgets.ts";
-
-/** Packs that name no router yet, and why. Remove a pack here in the pull request that gives it one. */
-const KNOWN_PENDING_ROUTER: Readonly<Record<string, string>> = {
-  "reverse-engineering": "its router is in the open reverse-engineering router pull request",
-};
 
 const ROUTER_MAX_TOKENS = 400;
 const tokensOf = (text: string): number => Buffer.byteLength(text) / BYTES_PER_TOKEN;
@@ -49,11 +41,8 @@ async function skillsOf(skillsDir: string): Promise<Map<string, { meta: Record<s
   return out;
 }
 
-/**
- * What is wrong with one pack's router and index, in words; empty when nothing is. With `routerExpected` false only the
- * rules that do not need a router are checked (a pack whose router is pending).
- */
-export async function packProblems(packDir: string, routerExpected = true): Promise<string[]> {
+/** What is wrong with one pack's router and index, in words; empty when nothing is. */
+async function packProblems(packDir: string): Promise<string[]> {
   const problems: string[] = [];
   const skillsDir = join(packDir, "skills");
   const skills = await skillsOf(skillsDir);
@@ -71,12 +60,6 @@ export async function packProblems(packDir: string, routerExpected = true): Prom
   if (index.tokens > SKILL_BUDGET.pack) problems.push(`the index is ${index.tokens} tokens, over ${SKILL_BUDGET.pack}`);
 
   const marked = [...skills.values()].filter((s) => s.meta.router === "true").map((s) => String(s.meta.id));
-  if (!routerExpected) {
-    if (index.router !== null) problems.push(`INDEX.md names the router ${index.router}, which this pack was not expected to have`);
-    if (marked.length) problems.push(`${marked.join(", ")} says router: true, which this pack was not expected to have`);
-    return problems;
-  }
-
   const router = index.router;
   const text = await readFile(join(skillsDir, "INDEX.md"), "utf8").catch(() => "");
   if (!router) {
@@ -113,19 +96,9 @@ test("every pack under packs/ names a router that resolves, within 400 tokens, n
   const corpus = await loadCorpus();
   const failures: string[] = [];
   for (const name of corpus.names) {
-    const pending = Object.hasOwn(KNOWN_PENDING_ROUTER, name);
-    for (const problem of await packProblems(join(ROOT, "packs", name), !pending)) failures.push(`${name}: ${problem}`);
+    for (const problem of await packProblems(join(ROOT, "packs", name))) failures.push(`${name}: ${problem}`);
   }
   assert.deepEqual(failures, []);
-});
-
-test("a pack on the pending list still has no router, and the list names only packs that exist", async () => {
-  const corpus = await loadCorpus();
-  for (const name of Object.keys(KNOWN_PENDING_ROUTER)) {
-    assert.ok(corpus.names.includes(name), `${name} is on KNOWN_PENDING_ROUTER but there is no such pack`);
-    const router = corpus.indexes.get(name)!.router;
-    assert.equal(router, null, `${name} now names the router ${router}: remove it from KNOWN_PENDING_ROUTER in tests/pack-index-budgets.test.ts so that every router invariant applies to it`);
-  }
 });
 
 test("every profile, and the base pack beside any one, two or three other packs, is shown within the run's 2,500 tokens", async () => {
@@ -228,14 +201,5 @@ test("the check fails an index that passes 1,000 tokens, lists a skill twice or 
   });
   await withFixture({ "INDEX.md": indexFile("t/router", ["t/a", "t/a", "t/router"]), "t/a.md": skillFile("t/a"), "t/b.md": skillFile("t/b"), "t/router.md": goodRouter(["t/a", "t/b"]) }, async (dir) => {
     assert.deepEqual(await packProblems(dir), ["INDEX.md does not list t/b", "INDEX.md lists a skill twice"]);
-  });
-});
-
-test("a pack on the pending list is held to the rules that need no router, and a router it grows is refused", async () => {
-  await withFixture({ "INDEX.md": indexFile(null, ["t/a"]), "t/a.md": skillFile("t/a") }, async (dir) => {
-    assert.deepEqual(await packProblems(dir, false), []);
-  });
-  await withFixture({ "INDEX.md": indexFile("t/router", ["t/a", "t/router"]), "t/a.md": skillFile("t/a"), "t/router.md": goodRouter(["t/a"]) }, async (dir) => {
-    assert.deepEqual(await packProblems(dir, false), ["INDEX.md names the router t/router, which this pack was not expected to have", "t/router says router: true, which this pack was not expected to have"]);
   });
 });
