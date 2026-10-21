@@ -4,6 +4,7 @@
  * stub `icat` on PATH.
  */
 import { spawn } from "node:child_process";
+import type { Writable } from "node:stream";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,6 +12,27 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const LIB = join(ROOT, "tool-library");
+
+/**
+ * Write the JSON stdin of a child and close it. A child that exits without reading its stdin (a fixture builder run
+ * through `runPySnippet`) is not an error of the harness: without a listener the EPIPE of a loaded runner would surface
+ * as an uncaught exception that kills the whole test file. `undefined` is no stdin at all (the pipe is closed with no
+ * bytes); `null` is the JSON document `null` for a tool, which the tools' own tests send on purpose, and no stdin for
+ * a snippet (`noneForNull`), which is how a builder that reads nothing is called.
+ */
+/** Whether an error of a child's stdin only means the child exited without reading it (the only error the helpers ignore). */
+export function childGone(err: { code?: string }): boolean {
+  return err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED";
+}
+
+function feedStdin(stream: Writable | null, stdin: unknown, noneForNull = false): void {
+  if (!stream) return;
+  stream.on("error", (err: NodeJS.ErrnoException) => {
+    if (!childGone(err)) throw err; // any other failure of the write surfaces (an uncaught exception fails the test file)
+  });
+  if (stdin === undefined || (noneForNull && stdin === null)) stream.end();
+  else stream.end(JSON.stringify(stdin));
+}
 
 export async function runPy(
   script: string,
@@ -35,7 +57,7 @@ export async function runPy(
         stderr: Buffer.concat(stderr).toString("utf8"),
       }),
     );
-    child.stdin.end(JSON.stringify(stdin));
+    feedStdin(child.stdin, stdin);
   });
 }
 
@@ -61,7 +83,7 @@ export async function runSh(
         stderr: Buffer.concat(stderr).toString("utf8"),
       }),
     );
-    child.stdin.end(JSON.stringify(stdin));
+    feedStdin(child.stdin, stdin);
   });
 }
 
@@ -84,7 +106,7 @@ export async function runPySnippet(
         stderr: Buffer.concat(stderr).toString("utf8"),
       }),
     );
-    child.stdin.end(JSON.stringify(stdin));
+    feedStdin(child.stdin, stdin, true);
   });
 }
 
