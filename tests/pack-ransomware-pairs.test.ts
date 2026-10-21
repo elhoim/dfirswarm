@@ -261,7 +261,7 @@ test("the manifests and the skill list the pairs and groups that are printed, wi
   for (const name of ["encrypted_survey", "ransom_note_scan"]) {
     const d = (JSON.parse(await read(`tools/${name}/manifest.json`)) as { description: string }).description;
     for (const text of [
-      "any character that is not a letter, a digit or a slash",
+      "joined by one character that is not a letter, a digit or a slash",
       "glued to a pair",
       "7 pairs of hex digits joined by a colon, a dot or a space 100% (by a dash 29%)",
       "three groups of 3, 3 and 4 digits joined by a dash 100%",
@@ -272,9 +272,9 @@ test("the manifests and the skill list the pairs and groups that are printed, wi
     }
   }
   const scan = (JSON.parse(await read("tools/ransom_note_scan/manifest.json")) as { description: string }).description;
-  for (const text of ["first pass", "first_pass", "sorts as a withheld name too", "each note is read twice", "pieces of 256 KiB"]) {
+  for (const text of ["first pass", "first_pass", "sorts as a withheld name too", "is read a second time", "pieces of 256 KiB"]) {
     assert.ok(scan.includes(text), `ransom_note_scan does not say: ${text}`);
   }
   const skill = await read("skills/scope/triage-tools.md");
-  for (const text of ["7\nhex pairs", "dashed 3-3-4 digits", "8 or more hex pairs"]) assert.ok(skill.includes(text), `the skill does not say: ${text}`);
+  for (const text of ["7 hex pairs", "deny-list", "8 or more hex pairs with one separator"]) assert.ok(skill.replace(/\s+/g, " ").includes(text), `the skill does not say: ${text}`);
 });

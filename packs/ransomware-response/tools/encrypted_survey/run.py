@@ -492,20 +492,34 @@ WELL_KNOWN = frozenset((
 ) | frozenset(name.lower() for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException))
 
 
+# The characters whose NFKC form holds a slash (a full-width solidus, the "a/c" and "c/o" signs) read as a separator that is not a slash: a
+# path is split at the real slashes only, and a folded one would cut a run of pairs into pieces of one.
+_SLASH_LIKE = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}
+# Characters that show nothing and are not format characters: a combining grapheme joiner, variation selectors, Mongolian free variation
+# selectors, hangul and khmer fillers, a braille blank, tag and musical controls, the other default-ignorable code points.
+_INVISIBLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
+                        "\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+
+
+def _unseen(ch):
+    """Whether a non-ASCII character shows nothing of its own: a format character, a combining mark, a default-ignorable code point."""
+    return unicodedata.category(ch) in ("Cf", "Mn", "Mc", "Me") or _INVISIBLE.match(ch) is not None
+
+
 def fold(name):
-    """The name as the rule reads it: NFKC (a full-width letter or digit is the ASCII one), every decimal digit of any script as its
-    ASCII digit, and no format character (a zero-width space or joiner cannot split a token)."""
+    """The name as the rule reads it: NFKC (a full-width letter or digit is the ASCII one; a full-width solidus is a separator, not a
+    slash), every decimal digit of any script as its ASCII digit, and nothing that shows nothing: no format character, no combining mark
+    (taken off the letter it sits on before the two are composed), no default-ignorable code point (a zero-width space, a variation
+    selector, a filler cannot split a token)."""
     if name.isascii():
         return name
     out = []
-    for ch in unicodedata.normalize("NFKC", name):
+    for ch in unicodedata.normalize("NFKC", "".join(c for c in name.translate(_SLASH_LIKE) if c.isascii() or not _unseen(c))):
         if ord(ch) < 128:
             out.append(ch)
-        elif unicodedata.category(ch) == "Cf":
-            continue
         elif unicodedata.category(ch) == "Nd":
             out.append(str(unicodedata.decimal(ch)))
-        else:
+        elif not _unseen(ch):
             out.append(ch)
     return "".join(out)
 
@@ -514,7 +528,7 @@ def _hex_pairs(text):
     """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two. A separator is any character that is not
     an ASCII letter or a digit (the pairs of `id[aa-bb-...-hh]`, `key=aa:bb:...` and `(aa.bb...)` are found: a neighbour of the run that is
     not a letter or a digit does not hide a pair at its end), and only a letter or a digit glued to a pair makes it no pair. A run does not
-    cross a slash: a path is read one component at a time."""
+    cross a slash: a path is read one component at a time (a full-width solidus is not a slash: fold turns it into a separator)."""
     for part in text.split("/"):
         run = 0
         for piece in _PAIR_SEPARATORS.split(part):
@@ -537,8 +551,9 @@ def shaped(name):
     letters and digits. It is identifier-shaped when it holds both letters and digits, or is 10 or more digits, or is letters only and is
     not one word, one capitalised word, several capitalised words or all capitals, or is 16 or more letters of one case. So are 8 or more
     pairs of hex digits joined by one separator (any character that is not a letter, a digit or a slash: a colon, a dash, a dot, an underscore,
-    a space, a bracket, an equals sign), whatever stands at either end of the run unless it is a letter or a digit glued to a pair, and groups
-    of digits joined by a space or a comma that hold 10 digits or more."""
+    a space, a bracket, an equals sign; a letter or a digit glued to a pair at an end of the run makes that pair no pair), and groups of
+    digits joined by a space or a comma that hold 10 digits or more. The rule is a shape: a longer or different separator, a different
+    grouping and other scripts are not covered (see the manifests)."""
     text = fold(name)
     for m in _IDRUN.finditer(text):
         token = m.group(0)
@@ -656,16 +671,26 @@ class Sealed(dict):
     """A row that has been through the backstop: it is not read again (its evidence name would not pass without the claim made for it)."""
 
 
+_FOLDS_TO_SLASH = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}      # NFKC turns these into a slash: not a path separator here
+_UNSEEN = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
+                     "\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+
+
 def _read_as(text):
-    """The string as the check reads it: NFKC, decimal digits of any script as ASCII digits, no format character."""
+    """The string as the check reads it: NFKC (a full-width solidus is a separator, not a slash), decimal digits of any script as ASCII
+    digits, nothing that shows nothing (no format character, no combining mark, no default-ignorable code point; a mark is taken off the
+    character it sits on before the two are composed into one)."""
     if text.isascii():
         return text
+    seen = lambda ch: unicodedata.category(ch) in ("Cf", "Mn", "Mc", "Me") or _UNSEEN.match(ch) is not None     # noqa: E731
     kept = []
-    for ch in unicodedata.normalize("NFKC", text):
-        category = unicodedata.category(ch)
-        if category == "Cf":
-            continue
-        kept.append(str(unicodedata.decimal(ch)) if category == "Nd" and ord(ch) > 127 else ch)
+    for ch in unicodedata.normalize("NFKC", "".join(c for c in text.translate(_FOLDS_TO_SLASH) if c.isascii() or not seen(c))):
+        if ch.isascii():
+            kept.append(ch)
+        elif unicodedata.category(ch) == "Nd":
+            kept.append(str(unicodedata.decimal(ch)))
+        elif not seen(ch):
+            kept.append(ch)
     return "".join(kept)
 
 

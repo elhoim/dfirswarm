@@ -388,7 +388,7 @@ test("ransom_note_scan: the clock runs inside a note, and the note is reported a
     await mkdir(ev, { recursive: true });
     await writeFile(join(ev, "README.txt"), "x@y.zz ".repeat(1_000_000)); // a million e-mail addresses: seconds of matching
     const started = Date.now();
-    const answer = body<{ status: string; status_basis: string; coverage: Record<string, number>; notes: Row[]; indicator_counts: { email: { occurrences: number } } }>(
+    const answer = body<{ status: string; status_basis: string; coverage: Record<string, number>; notes: Row[]; indicator_counts: { email?: { occurrences: number } } }>(
       await tool(NOTES, cwd, { root: "work/ev", max_size: 8_000_000, max_seconds: 1 }),
     );
     const seconds = (Date.now() - started) / 1000;
@@ -396,7 +396,9 @@ test("ransom_note_scan: the clock runs inside a note, and the note is reported a
     assert.equal(answer.coverage.notes_partly_scanned, 1);
     assert.match(String(answer.notes[0].scan_stopped), /time limit/);
     assert.match(answer.status_basis, /partly scanned/);
-    assert.ok(answer.indicator_counts.email.occurrences < 1_000_000, "the note was scanned to its end");
+    // How many addresses were counted before the clock ran out depends on the speed of the CPU (on a slow one none may be): the clock stop is
+    // what is asserted, not a count.
+    assert.ok((answer.indicator_counts.email?.occurrences ?? 0) < 1_000_000, "the note was scanned to its end");
     assert.ok(seconds < 8, `the run took ${seconds} s past a 1 s limit`);
   });
 });

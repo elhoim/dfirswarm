@@ -95,6 +95,7 @@ DUPLICATE_CAP = 50000
 DUPLICATE_VALUE_CAP = 1024
 # The values of one note that are kept to withhold a path that carries one.
 NAME_VALUES_CAP = 5000
+MAX_WINDOWS = 64                  # the windows of the names of a path that are looked for in a note before it is matched for the values its path holds
 # A note shorter than this is not digested: a digest of it is a digest of what it holds.
 SHORT_NOTE = 128
 
@@ -457,6 +458,8 @@ KINDS = [
     ("identifier_candidate", IDENTIFIER, 1),
 ]
 WALLET_KINDS = ("bitcoin", "monero", "ethereum")
+# A path component has no slash, so a value that has one (a URL) is in no name: it is not one of the values kept to withhold a name.
+NAMEABLE = {"onion": True, "email": True, "url": False, "bitcoin": True, "monero": True, "ethereum": True, "tox": True, "identifier_candidate": True}
 # Words that make a text read like a note. A list of words, not of values: nothing here is
 # secret, and two of them together are a marker, not a finding.
 LANGUAGE = ("decrypt", "your files", "encrypted", "ransom", "bitcoin", "private key",
@@ -868,20 +871,34 @@ WELL_KNOWN = frozenset((
 ) | frozenset(name.lower() for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException))
 
 
+# The characters whose NFKC form holds a slash (a full-width solidus, the "a/c" and "c/o" signs) read as a separator that is not a slash: a
+# path is split at the real slashes only, and a folded one would cut a run of pairs into pieces of one.
+_SLASH_LIKE = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}
+# Characters that show nothing and are not format characters: a combining grapheme joiner, variation selectors, Mongolian free variation
+# selectors, hangul and khmer fillers, a braille blank, tag and musical controls, the other default-ignorable code points.
+_INVISIBLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
+                        "\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+
+
+def _unseen(ch):
+    """Whether a non-ASCII character shows nothing of its own: a format character, a combining mark, a default-ignorable code point."""
+    return unicodedata.category(ch) in ("Cf", "Mn", "Mc", "Me") or _INVISIBLE.match(ch) is not None
+
+
 def fold(name):
-    """The name as the rule reads it: NFKC (a full-width letter or digit is the ASCII one), every decimal digit of any script as its
-    ASCII digit, and no format character (a zero-width space or joiner cannot split a token)."""
+    """The name as the rule reads it: NFKC (a full-width letter or digit is the ASCII one; a full-width solidus is a separator, not a
+    slash), every decimal digit of any script as its ASCII digit, and nothing that shows nothing: no format character, no combining mark
+    (taken off the letter it sits on before the two are composed), no default-ignorable code point (a zero-width space, a variation
+    selector, a filler cannot split a token)."""
     if name.isascii():
         return name
     out = []
-    for ch in unicodedata.normalize("NFKC", name):
+    for ch in unicodedata.normalize("NFKC", "".join(c for c in name.translate(_SLASH_LIKE) if c.isascii() or not _unseen(c))):
         if ord(ch) < 128:
             out.append(ch)
-        elif unicodedata.category(ch) == "Cf":
-            continue
         elif unicodedata.category(ch) == "Nd":
             out.append(str(unicodedata.decimal(ch)))
-        else:
+        elif not _unseen(ch):
             out.append(ch)
     return "".join(out)
 
@@ -890,7 +907,7 @@ def _hex_pairs(text):
     """Whether HEX_PAIRS or more pairs of hex digits follow each other, one separator between two. A separator is any character that is not
     an ASCII letter or a digit (the pairs of `id[aa-bb-...-hh]`, `key=aa:bb:...` and `(aa.bb...)` are found: a neighbour of the run that is
     not a letter or a digit does not hide a pair at its end), and only a letter or a digit glued to a pair makes it no pair. A run does not
-    cross a slash: a path is read one component at a time."""
+    cross a slash: a path is read one component at a time (a full-width solidus is not a slash: fold turns it into a separator)."""
     for part in text.split("/"):
         run = 0
         for piece in _PAIR_SEPARATORS.split(part):
@@ -913,8 +930,9 @@ def shaped(name):
     letters and digits. It is identifier-shaped when it holds both letters and digits, or is 10 or more digits, or is letters only and is
     not one word, one capitalised word, several capitalised words or all capitals, or is 16 or more letters of one case. So are 8 or more
     pairs of hex digits joined by one separator (any character that is not a letter, a digit or a slash: a colon, a dash, a dot, an underscore,
-    a space, a bracket, an equals sign), whatever stands at either end of the run unless it is a letter or a digit glued to a pair, and groups
-    of digits joined by a space or a comma that hold 10 digits or more."""
+    a space, a bracket, an equals sign; a letter or a digit glued to a pair at an end of the run makes that pair no pair), and groups of
+    digits joined by a space or a comma that hold 10 digits or more. The rule is a shape: a longer or different separator, a different
+    grouping and other scripts are not covered (see the manifests)."""
     text = fold(name)
     for m in _IDRUN.finditer(text):
         token = m.group(0)
@@ -1032,16 +1050,26 @@ class Sealed(dict):
     """A row that has been through the backstop: it is not read again (its evidence name would not pass without the claim made for it)."""
 
 
+_FOLDS_TO_SLASH = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}      # NFKC turns these into a slash: not a path separator here
+_UNSEEN = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
+                     "\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+
+
 def _read_as(text):
-    """The string as the check reads it: NFKC, decimal digits of any script as ASCII digits, no format character."""
+    """The string as the check reads it: NFKC (a full-width solidus is a separator, not a slash), decimal digits of any script as ASCII
+    digits, nothing that shows nothing (no format character, no combining mark, no default-ignorable code point; a mark is taken off the
+    character it sits on before the two are composed into one)."""
     if text.isascii():
         return text
+    seen = lambda ch: unicodedata.category(ch) in ("Cf", "Mn", "Mc", "Me") or _UNSEEN.match(ch) is not None     # noqa: E731
     kept = []
-    for ch in unicodedata.normalize("NFKC", text):
-        category = unicodedata.category(ch)
-        if category == "Cf":
-            continue
-        kept.append(str(unicodedata.decimal(ch)) if category == "Nd" and ord(ch) > 127 else ch)
+    for ch in unicodedata.normalize("NFKC", "".join(c for c in text.translate(_FOLDS_TO_SLASH) if c.isascii() or not seen(c))):
+        if ch.isascii():
+            kept.append(ch)
+        elif unicodedata.category(ch) == "Nd":
+            kept.append(str(unicodedata.decimal(ch)))
+        elif not seen(ch):
+            kept.append(ch)
     return "".join(kept)
 
 
@@ -1281,22 +1309,26 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters, stopped, 
         stack.extend((d, False) for d in reversed(subdirs))
 
 
-# The longest a match of each pattern can be (with a little to spare); url and identifier_candidate have no bound.
+# The longest a match of each pattern can be (with a little to spare). A match of url and identifier_candidate has no bound, but the text
+# before the part that runs on has one (HEADS: the label, the white space and the first characters of the value, with a little to spare).
 SPANS = {"onion": 72, "email": 400, "bitcoin": 88, "monero": 104, "ethereum": 56, "tox": 88}
+HEADS = {"url": 24, "identifier_candidate": 130}
+# What a match of these kinds must hold (the same literal, compiled the same way): a note without it is not matched for the kind, which costs a
+# search for the literal instead of a pass of the pattern.
+GATES = {"onion": re.compile(r"\.onion", re.I), "email": re.compile(r"@"), "ethereum": re.compile(r"0x")}
 CHUNK = 1 << 18
 
 
 def matches(pattern, text, kind):
     """The matches of `pattern` in `text`, exactly the ones pattern.finditer(text) finds and in the same order, with the clock looked at
     between pieces of the text (finditer looks at nothing until a match comes: a megabyte of "a.a.a." has none and takes seconds). Yields
-    None, once, when the clock ran out. A pattern with a longest match is run piece by piece: a piece is searched with enough text after
-    it that no match starting in it is cut, and the next piece starts where the last match ended or at the end of the piece."""
-    span = SPANS.get(kind)
-    if span is None:
-        if out_of_time():
-            yield None
-            return
-        yield from pattern.finditer(text)
+    None, once, when the clock ran out. The text is run piece by piece: a piece is searched with enough text after it that no match
+    starting in it is cut (a pattern with no longest match, url and identifier_candidate, is searched with the text its head needs, and a
+    match that reaches the end of what was searched is matched again from its start with all the text), and the next piece starts where
+    the last match ended or at the end of the piece."""
+    span = SPANS.get(kind) or HEADS[kind]
+    open_ended = kind in HEADS
+    if kind in GATES and not GATES[kind].search(text):
         return
     pos, size = 0, len(text)
     while pos < size:
@@ -1304,9 +1336,15 @@ def matches(pattern, text, kind):
             yield None
             return
         edge = min(size, pos + CHUNK)
+        reach = min(size, edge + span)
         last = pos
-        for m in pattern.finditer(text, pos, min(size, edge + span)):
+        for m in pattern.finditer(text, pos, reach):
             if m.start() >= edge:
+                break
+            if open_ended and m.end() >= reach and reach < size:
+                m = pattern.match(text, m.start()) or m
+                last = m.end()
+                yield m
                 break
             yield m
             last = m.end()
@@ -1317,6 +1355,8 @@ def first_values(text):
     """The values of a note the second pass keeps for withholding names: the same ones in the same order, at most NAME_VALUES_CAP."""
     values = []
     for kind, pattern, group in KINDS:
+        if not NAMEABLE[kind]:
+            continue
         for m in matches(pattern, text, kind):
             if m is None:
                 return values
@@ -1324,6 +1364,20 @@ def first_values(text):
             if len(values) >= NAME_VALUES_CAP:
                 return values
     return values
+
+
+def can_name(text, names):
+    """Whether a value of the note could be inside one of `names` (lower-case path components): a value is 8 characters or more and is
+    inside a name, so its first 8 characters are a window of that name, and they are in the note. False means no value of the note is in
+    any of the names and the note need not be matched. True is also the answer when there are many windows to look for."""
+    windows = set()
+    for name in names:
+        key = name.casefold()
+        windows.update(key[i:i + 8] for i in range(len(key) - 7))
+        if len(windows) > MAX_WINDOWS:
+            return True
+    key = text.casefold()
+    return any(window in key for window in windows)
 
 
 def values_pass(top, exclude_top, max_size):
@@ -1343,7 +1397,7 @@ def values_pass(top, exclude_top, max_size):
             decoded = decode_note(read_note(path, max_size))
         except Unreadable:
             continue
-        if decoded.get("binary"):
+        if decoded.get("binary") or not can_name(decoded["text"], [name for _, name in names]):
             continue
         lows = {v.lower() for v in first_values(decoded["text"]) if len(v) >= 8}
         for where, low in names:
@@ -1554,7 +1608,7 @@ def main():
                     occurrences.add(occ)
                     values.add(finding_id, {"note_id": note_id, "file": path, "offset": offset, "kind": kind,
                                             "encoding": decoded["name"], "validation": validation}, value)
-                    if len(note_values) < NAME_VALUES_CAP:
+                    if NAMEABLE[kind] and len(note_values) < NAME_VALUES_CAP:
                         note_values.append(value)
 
             lowered = text.lower()
