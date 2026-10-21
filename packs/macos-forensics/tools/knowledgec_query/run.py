@@ -2691,6 +2691,13 @@ def run_query(args):
             st["interrupted"] = stop.signum
             st["stopped"] = "signal"
     finally:
+        # Close what was opened before the private copy goes: Python 3.13 and later warn (ResourceWarning) about a connection left to the garbage collector.
+        for opened in (st["shaper"] and st["shaper"].handles, st["connection"]):
+            try:
+                if opened is not None:
+                    opened.close()
+            except sqlite3.Error:
+                pass
         if st["stage"]:
             shutil.rmtree(st["stage"], ignore_errors=True)
             if os.environ.get("JOB_ID") and os.environ.get("OUT"):
