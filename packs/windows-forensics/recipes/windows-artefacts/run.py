@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -185,37 +186,53 @@ def install_signal_handlers():
 # ---- classifying a file -------------------------------------------------------------------------------------------------------
 
 def head_of(path, n=16):
+    """The first bytes of a regular file. A pipe, a socket or a device is never read (it is opened without waiting, and only to be refused)."""
     try:
-        with open(path, "rb") as fh:
-            return fh.read(n)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return b""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return b""
+        return os.read(fd, n)
+    except OSError:
+        return b""
+    finally:
+        os.close(fd)
+
+
+USN_NAMES = ("$j", "$usnjrnl$j", "usnjrnl_j", "$usnjrnl_$j")
+BROWSER_NAMES = ("history", "places.sqlite")
+
+
+def in_recycle_bin(path):
+    parts = [p.lower() for p in Path(path).parts]
+    return any(p.startswith("$recycle.bin") or p == "recycler" for p in parts[:-1])
 
 
 def classify(path):
-    """The family a file belongs to, by its name and its first bytes, or None."""
-    name = os.path.basename(path)
-    low = name.lower()
-    head = head_of(path)
-    parts = [p.lower() for p in Path(path).parts]
-    if low in HIVE_NAMES and head[:4] == REGF_MAGIC:
-        return "registry-hives"
-    if low.endswith(".pf") and (head[:4] in SCCA_MAGICS or head[4:8] == b"SCCA"):
-        return "prefetch"
-    if low.endswith(".evtx") and head[:8] == EVTX_MAGIC:
-        return "event-logs"
+    """The family a file belongs to, by its name and then, for the families whose name is not enough, its first bytes; or None.
+    The bytes of a file whose name is none of the names below are not read."""
+    low = os.path.basename(path).lower()
     if low.endswith(".lnk") or low.endswith("destinations-ms"):
         return "shortcuts-jumplists"
-    if low in ESE_NAMES and head[4:8] == ESE_MAGIC_AT_4:
-        return "esedb"
     if low == "$mft":
         return "mft"
-    if low in ("$j", "$usnjrnl$j", "usnjrnl_j", "$usnjrnl_$j") and head:
-        return "usn-journal"
-    if low.startswith("$i") and any(p.startswith("$recycle.bin") or p == "recycler" for p in parts[:-1]) and len(head) >= 8:
-        return "recycle-bin"
-    if low in ("history", "places.sqlite") and head[:16] == SQLITE_MAGIC:
-        return "browser-history"
+    if low in HIVE_NAMES:
+        return "registry-hives" if head_of(path)[:4] == REGF_MAGIC else None
+    if low.endswith(".pf"):
+        head = head_of(path)
+        return "prefetch" if (head[:4] in SCCA_MAGICS or head[4:8] == b"SCCA") else None
+    if low.endswith(".evtx"):
+        return "event-logs" if head_of(path)[:8] == EVTX_MAGIC else None
+    if low in ESE_NAMES:
+        return "esedb" if head_of(path)[4:8] == ESE_MAGIC_AT_4 else None
+    if low in USN_NAMES:
+        return "usn-journal" if head_of(path) else None
+    if low.startswith("$i") and in_recycle_bin(path):
+        return "recycle-bin" if len(head_of(path)) >= 8 else None
+    if low in BROWSER_NAMES:
+        return "browser-history" if head_of(path)[:16] == SQLITE_MAGIC else None
     return None
 
 
@@ -241,7 +258,10 @@ def walk(paths, deadline):
                     cut = True
                     break
                 full = os.path.join(root, name)
-                if os.path.islink(full):
+                try:
+                    if not stat.S_ISREG(os.lstat(full).st_mode):
+                        continue      # a link is not followed; a pipe, a socket or a device is not read
+                except OSError:
                     continue
                 family = classify(full)
                 if family:
@@ -646,7 +666,9 @@ def main_run(paths, shown, out):
     receipt["limits_hit"] = limits
     if cut:
         receipt["errors"].append("the walk of the target was cut short: files may exist that were not seen")
-    if not statuses:
+    if not statuses and cut:
+        receipt["status"], receipt["status_basis"] = "failed", "the walk of the target was cut short before it found an artefact of a family this recipe reads, so nothing is established"
+    elif not statuses:
         receipt["status"], receipt["status_basis"] = "failed", "the target held no artefact of a family this recipe reads"
     elif bad or cut or limits:
         receipt["status"] = "partial"
