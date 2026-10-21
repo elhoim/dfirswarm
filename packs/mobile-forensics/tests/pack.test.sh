@@ -169,10 +169,11 @@ def varint(value):
             return bytes(out)
 
 def job(tool, args, name):
-    """The tool as a job runs it: JOB_ID and OUT set, OUT inside the working directory."""
+    """The tool as a job runs it: JOB_ID and OUT set, OUT inside the working directory, and SECRET_OUTPUT=1 as the job
+    service sets it for a job run as secret output (a values file is refused without it)."""
     out = os.path.join(work, name)
     os.makedirs(out, exist_ok=True)
-    env = dict(os.environ, JOB_ID="j-" + name, OUT=out)
+    env = dict(os.environ, JOB_ID="j-" + name, OUT=out, SECRET_OUTPUT="1")
     proc = subprocess.run([sys.executable, os.path.join(pack, "tools", tool, "run.py")], input=json.dumps(args),
                           text=True, capture_output=True, check=True, env=env, cwd=work)
     return json.loads(proc.stdout), out
@@ -190,9 +191,11 @@ assert values(out, "protobuf-values.jsonl")[0]["value"] == text.decode()
 assert text.decode() not in json.dumps(result)
 
 result, out = job("sqlite_freespace", {"db": os.path.join(work, "free.db"), "contains": "recover-", "write_values": True}, "fs")
-found = values(out, "sqlite-freespace-values.jsonl")
+rows = values(out, "sqlite-freespace-values.jsonl")
+# Every fragment is a row (the expression only marks them: match 1 matched, 0 did not, 2 was not decided).
+assert result["fragment_count"] == len(rows) and result["fragments"][0]["offset_verified"] is True
+found = [item for item in rows if item["match"] == 1]
 assert any(len(item["value"]) > 1000 for item in found), result
-assert result["fragment_count"] == len(found) and result["fragments"][0]["offset_verified"] is True
 assert all("text" not in item for item in result["fragments"])
 
 # Not in a job: the values are refused, and nothing is written.
