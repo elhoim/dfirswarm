@@ -871,9 +871,9 @@ WELL_KNOWN = frozenset((
 ) | frozenset(name.lower() for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException))
 
 
-# The characters whose NFKC form holds a slash (a full-width solidus, the "a/c" and "c/o" signs) read as a separator that is not a slash: a
-# path is split at the real slashes only, and a folded one would cut a run of pairs into pieces of one.
-_SLASH_LIKE = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}
+# The characters whose NFKC form holds a slash (a full-width solidus, the "a/c", "a/s", "c/o" and "c/u" signs) each read as one backslash, a
+# separator that is not a slash: a path is split at the real slashes only, and a folded one would cut a run of pairs into pieces of one.
+_SLASH_LIKE = dict.fromkeys((0x2100, 0x2101, 0x2105, 0x2106, 0xFF0F), "\\")
 # Characters that show nothing and are not format characters: a combining grapheme joiner, variation selectors, Mongolian free variation
 # selectors, hangul and khmer fillers, a braille blank, tag and musical controls, the other default-ignorable code points.
 _INVISIBLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
@@ -1050,7 +1050,7 @@ class Sealed(dict):
     """A row that has been through the backstop: it is not read again (its evidence name would not pass without the claim made for it)."""
 
 
-_FOLDS_TO_SLASH = {0x2100: "a\\c", 0x2101: "a\\s", 0x2105: "c\\o", 0x2106: "c\\u", 0xFF0F: "\\"}      # NFKC turns these into a slash: not a path separator here
+_FOLDS_TO_SLASH = dict.fromkeys((0x2100, 0x2101, 0x2105, 0x2106, 0xFF0F), "\\")      # NFKC turns these into a slash: not a path separator here
 _UNSEEN = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
                      "\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
 
@@ -1684,6 +1684,8 @@ def main():
     basis = ("; ".join(reasons) if reasons else
              "every directory was listed and every file whose name matched was read or is listed as not read with its reason; "
              "the time limit was not reached")
+    if status == "complete" and matched is None:
+        basis += "; the first pass stopped by its share of the time limit (see first_pass): only the order of names that print alike is affected"
     print(json.dumps(release({
         "root": shown(root),
         "parser": PARSER,

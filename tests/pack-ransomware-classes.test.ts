@@ -1,8 +1,8 @@
 /**
  * ransomware-response: what a name is read as before it is judged, and what the first pass costs.
  *
- * - a full-width solidus (and the signs a/c, a/s, c/o, c/u) is NFKC's `/`, which ends a run of pairs: both rules read it as a separator that
- *   is not a slash, so pairs joined by it are withheld like any other;
+ * - a full-width solidus (and the signs a/c, a/s, c/o, c/u) is NFKC's `/`, which ends a run of pairs: both rules read each of the five as one
+ *   separator that is not a slash (not the two or three characters NFKC would give), so pairs joined by it are withheld like any other;
  * - a character that shows nothing but is not a format character (a combining grapheme joiner, a variation selector, a filler, a braille
  *   blank, a combining mark) cannot split a token either;
  * - the scan matches a note for the values its path holds only when the note holds a piece of such a name, matches the URL and identifier
@@ -33,6 +33,7 @@ rnd = random.Random(int(sys.argv[3]))
 HEX = "0123456789abcdef"
 def pairs(k, sep): return sep.join("".join(rnd.choice(HEX) for _ in range(2)) for _ in range(k))
 wrap = [lambda t: t, lambda t: "id[" + t + "]", lambda t: "key=" + t, lambda t: "(" + t + ")"]
+SEPS = ["\uff0f", "\u2100", "\u2101", "\u2105", "\u2106"]
 slashy = [c for c in map(chr, range(0x80, 0x110000)) if not 0xD800 <= ord(c) < 0xE000 and "/" in unicodedata.normalize("NFKC", c)]
 out = {}
 for n, p in (("encrypted_survey", sys.argv[1]), ("ransom_note_scan", sys.argv[2])):
@@ -40,8 +41,9 @@ for n, p in (("encrypted_survey", sys.argv[1]), ("ransom_note_scan", sys.argv[2]
     total = first = second = in_path = 0
     for w in wrap:
         for k in (8, 9, 16):
-            for _ in range(40):
-                name = w(pairs(k, "／"))
+          for sep in SEPS:
+            for _ in range(10):
+                name = w(pairs(k, sep))
                 total += 1
                 if name in m.shown("/x/" + name + "/README.txt", count=False):
                     first += 1
@@ -54,13 +56,13 @@ for n, p in (("encrypted_survey", sys.argv[1]), ("ransom_note_scan", sys.argv[2]
 print(json.dumps(out))
 `;
 
-test("pairs of hex digits joined by a full-width solidus are withheld by both rules, and no character folds to a slash (480 cases per tool, count only)", async () => {
+test("pairs of hex digits joined by a full-width solidus or by one of the signs a/c, a/s, c/o, c/u are withheld by both rules, and no character folds to a slash (600 cases per tool, count only)", async () => {
   const run = await runPySnippet(SLASH, [SURVEY, NOTES, String(randomInt(1, 1e9))], null);
   assert.equal(run.code, 0, run.stderr);
   const out = JSON.parse(run.stdout) as Record<string, [number, number, number, number, number, string[]]>;
   for (const [name, [total, first, second, inPath, slashy, held]] of Object.entries(out)) {
-    assert.equal(total, 480, name);
-    assert.equal(first, 0, `${name}: the first rule printed a run of pairs joined by U+FF0F`);
+    assert.equal(total, 600, name);
+    assert.equal(first, 0, `${name}: the first rule printed a run of pairs joined by U+FF0F or one of the four signs`);
     assert.equal(second, 0, `${name}: the second check missed it`);
     assert.equal(inPath, 0, `${name}: the second check missed it in a path`);
     assert.ok(slashy >= 5, `${name}: the characters whose NFKC form holds a slash were not found (${slashy})`);

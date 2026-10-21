@@ -132,8 +132,10 @@ test("ransom_note_scan: when the first pass cannot finish, every name of 8 chara
     await mkdir(out);
     const run = await runPatched(NOTES, "m.values_pass = lambda *a, **k: None", JSON.stringify({ root: "work/ev", limit: 100 }), cwd, out);
     assert.equal(run.code, 0, run.stderr + run.stdout);
-    const answer = JSON.parse(run.stdout) as { notes: { bytes: number }[]; first_pass: string };
+    const answer = JSON.parse(run.stdout) as { notes: { bytes: number }[]; first_pass: string; status: string; status_basis: string };
     assert.match(answer.first_pass, /^stopped by its share of the time limit/);
+    assert.equal(answer.status, "complete");
+    assert.match(answer.status_basis, /first pass stopped by its share/, "a caller that reads status_basis alone sees it");
     const names = answer.notes.map((n) => (bySize.get(n.bytes) as { name: string }).name);
     assert.equal(names.length, 42);
     assert.ok(!sameOrder(names, rawSorted(names)), "the names come in raw order although the values were not known");
