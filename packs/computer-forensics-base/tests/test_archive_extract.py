@@ -980,6 +980,15 @@ class Extract(Case):
         self.assertIn("%d" % (64 * 1024 * 1024), r.json["error"])
         self.assertIn("archive-members recipe", r.json["error"])
 
+    def test_a_zip_directory_whose_size_says_more_than_its_count_is_not_loaded_for_a_few_members(self):
+        n = 60000
+        cd = b"".join(struct.pack("<IHHHHHHIIIHHHHHII", 0x02014b50, 20, 20, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0) + b"a%07d" % i for i in range(n))
+        eocd = struct.pack("<IHHHHIIH", 0x06054b50, 0, 0, 1, 1, len(cd), 0, 0)      # the count says one entry; the directory holds sixty thousand
+        self.write("inputs/lying.zip", cd + eocd)
+        r = self.extract("inputs/lying.zip", "work/out", max_members=5)
+        self.assertEqual(r.code, 1, r.stdout[:300])
+        self.assertIn("whatever the end record's count says", r.json["error"])
+
     def test_a_7z_that_writes_far_more_than_its_size_allows_is_stopped_by_the_ratio_and_not_written_whole(self):
         # the archive file is 72 bytes; its listing says one member of 20 MiB and the program writes 20 MiB of zeros
         bindir = self.fake_7z("head -c 20971520 /dev/zero")

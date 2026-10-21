@@ -1392,7 +1392,13 @@ def run_zip(eng, path, from_index, max_members):
     if cd_bytes is not None and cd_bytes > ZIP_DIRECTORY_MAX:
         raise ArchiveError("the central directory is %d bytes, more than the %d this tool reads into memory (every entry is held, about 500 bytes each): "
                            "nothing was extracted; list it with the archive-members recipe, or split the archive" % (cd_bytes, ZIP_DIRECTORY_MAX), members_declared=declared)
-    if declared is not None and declared > max(from_index + max_members, 1) * ZIP_DIRECTORY_FACTOR:
+    wanted = max(from_index + max_members, 1) * ZIP_DIRECTORY_FACTOR
+    if cd_bytes is not None and cd_bytes > (1 << 20) and cd_bytes // 46 > wanted:
+        # the count in the end record is the archive's claim and zipfile reads the directory by its size: an entry is at least 46 bytes
+        raise ArchiveError("the central directory is %d bytes, room for more than %d entries (%d times the max_members of %d, and from_index %d), whatever the end record's count says: "
+                           "the whole directory is loaded to extract any of it, so it is not loaded for that few; nothing was extracted. Raise max_members to at least %d"
+                           % (cd_bytes, wanted, ZIP_DIRECTORY_FACTOR, max_members, from_index, -(-(cd_bytes // 46) // ZIP_DIRECTORY_FACTOR)), members_declared=declared)
+    if declared is not None and declared > wanted:
         raise ArchiveError("the central directory declares %d members, more than %d times the max_members of %d (and from_index %d): the whole directory is loaded to extract any of it, "
                            "so it is not loaded for that few; nothing was extracted. Raise max_members to at least %d to extract from this archive"
                            % (declared, ZIP_DIRECTORY_FACTOR, max_members, from_index, -(-declared // ZIP_DIRECTORY_FACTOR)), members_declared=declared)
