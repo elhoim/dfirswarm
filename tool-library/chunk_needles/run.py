@@ -260,10 +260,10 @@ class SecretValues:
             return
         # ensure_ascii: a source label that is not UTF-8 (a path's bytes arrive as lone surrogates) is written as an escape, never an encoding error.
         line = json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=True) + "\n"
-        if self.written >= VALUES_ROWS_MAX or self.bytes + len(line) > VALUES_BYTES_MAX:
+        if self.stopped_at is not None or self.written >= VALUES_ROWS_MAX or self.bytes + len(line) > VALUES_BYTES_MAX:
             if self.stopped_at is None:
                 self.stopped_at = locator.get("offset")
-            return
+            return      # from the first occurrence that did not fit on, none is written: the file is a prefix
         self._fh.write(line)
         self.written += 1
         self.bytes += len(line)

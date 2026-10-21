@@ -190,7 +190,8 @@ class CheckInputs(Case):
             self.write("inputs.json", raw)
             r = self.check()
             self.assertEqual((r.code, r.stderr, r.json["status"]), (1, "", "FAIL"), name)
-            self.assertIn("not JSON this tool can read", r.json["error"], name)
+            # Python 3.13 parses a deeply nested array (then it is not a manifest); before it, the parser gives up: either way, an answer
+            self.assertTrue("not JSON this tool can read" in r.json["error"] or "has no files list" in r.json["error"], (name, r.json["error"]))
 
     def test_arguments_nested_past_the_parser_are_read_as_no_arguments(self):
         self.manifest([])

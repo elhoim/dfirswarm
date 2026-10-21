@@ -133,6 +133,7 @@ class DiskVolumes(Case):
     def test_a_clean_table_is_read_as_before(self):
         clean = MMLS_FORGED.replace("%s\n", "")
         bin_dir = self.stubs(clean, fsstat_ok=True)
+        stand_in(bin_dir, "mactime", "echo 'Date,Size,Type,Mode,UID,GID,Meta,File Name'\n")
         stand_in(bin_dir, "fls", "case \"$1\" in -m) echo '0|/a|12|r/rrw-r--r--|0|0|9|0|0|0|0';; *) echo 'r/r 12:\ta';; esac\n")
         r = self.run_recipe(self.write("disk.img", b"\0" * 65536), self.path("out"), bin_dir)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
