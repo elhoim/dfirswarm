@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.6.7",
+  "version": "1.7.0",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -42,11 +42,15 @@
   "checksums": {
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
-      "README.md": "ce60d5b86cef9f318bb26f4bfd7726e3b8bbbf4ac33b3ef6702c04b3ab586167",
+      "README.md": "355225b70c699b2d16687f29369fe709faa7450e9eb565ab58700af18bd2bac4",
+      "tools/lnk_jumplist/manifest.json": "c28011fc3d5caf578742fff37bdeab3743eca4c11a97026d1c73109c65d73ed0",
+      "tools/lnk_jumplist/run.py": "72c16f0c6b37a2b61ed8e418b75c478ef6e5ce82c41d4b0a754d9ce5849527a3",
       "tools/sigma_hunt/manifest.json": "d23500c6b7e056167baf96ceb10e98439d929d171512b17057f6c0f580c258c3",
       "tools/sigma_hunt/run.py": "aa12bd70af698e8d436066106bb8273dcf8c1f4cc5176bff458711c88a139243",
       "tools/lnk_parse/manifest.json": "b371a21727a5566a531938432aa5072be850529c60296223acb267d2760e9ab4",
       "tools/lnk_parse/run.py": "4b5500c574afbb9ba03a36d88aede481e38a5d83c9de8f32f064b52ce1c6f12c",
+      "tools/registry_recover/manifest.json": "21c7f3197ad080a75d676de8aee6be092f5b1401896d5fd31fb29660299d360e",
+      "tools/registry_recover/run.py": "654cf5dd7e7a76bd370a5fc3d654193e6f26f168a54e314375e0e244b6ccaf8c",
       "tools/regkv/manifest.json": "078b7d4eaeced6272044bae93d06d4cf5fb193d7744cf1720fd5d47c11cc462b",
       "tools/regkv/run.py": "a139c0fb19305039fbc1e9fec8675dd814f675e5c00248d97b0d813538818440",
       "tools/prefetch_mam/manifest.json": "6de7a1f2cd31f8ffb3a074c0199b2185f625ae30176f6c53c972bd88845f3f15",
@@ -86,8 +90,10 @@
       "goals/data-left-the-building.md": "34c94782b1a636d54eac5d6d2397a482059374909b7f93ee96433f9c3668b68e",
       "goals/hidden-data.md": "14ee963bede22cf69b96033e483fad57ead72abd20e04ae7ccc1153de265fb78",
       "goals/intrusion-triage.md": "ef8e8936a146915f13d2330a59ad16d8ae9789999860dc7653e6e28d01248c1e",
-      "skills/artifacts/jumplists.md": "93296ac9caa90dcb6fa4b0e81b747ba2a743b2b294ef8574f4c5b2280ee6dd67",
-      "skills/artifacts/links.md": "91f51ad3ec8c1146eab02d5ff00e275c138e26742c8fbddf254711ed2d023552",
+      "recipes/windows-artefacts/recipe.json": "cbb729f7249966b271255dfe770a2a63324ef56abd86ad868d4d5bd2850eae05",
+      "recipes/windows-artefacts/run.py": "1edd80e3e748d7348e5627ea8e62b10c95024291e4a5cad08775c63751eee109",
+      "skills/artifacts/jumplists.md": "6d4b98d856a3edb22f4e6d115d6bcf50aec2c80a084a61c441933ffa1a07cd3d",
+      "skills/artifacts/links.md": "1697507045f1f05366a3e2afb750b7a308a821c8a06f177ba985658b65338f05",
       "skills/artifacts/shell.md": "d3ec6dd4e58a79c837f5342cb7113c763cd2d32346b928b744224ef47c41d61f",
       "skills/artifacts/shellbags.md": "5500bc4982ddbe8858a906d01d81cfb914d7541207841f026832edd7a6b082dd",
       "skills/memory/hibernation-pagefile.md": "1bbabef0c76dd471e96ae4a93f5d3c296ef5091cb0cd93ea4c5b161878ec6bd8",
@@ -130,7 +136,7 @@
       "skills/registry/clock.md": "0f1fd5b98be12fd2a1c14d5020949c718c8ce1de219eee5c1e3f5f2c18cd38e9",
       "skills/registry/devices-dates.md": "dc85266bf365daa1d72998e3c4dfe6f01711d13f85222bab0647c7086b5a607e",
       "skills/registry/devices.md": "3fac50c5992ab664ca93c047460627df3f93e2ad44b63daa6e2742c2dc7e2c90",
-      "skills/registry/overview.md": "b8b8b2a7eee6ad66d0f306b74b5d6920feb6072c3fcadbee1404d247b46539f5",
+      "skills/registry/overview.md": "26d2e5f3e3d266eb690582e03a85153c4c2a536340992d1e27a0ce68ade9b48d",
       "skills/registry/readers.md": "e14691f8164ec67a26c30970c5d524411259eeca409f7126be573edc28180ea8",
       "skills/registry/system-profile.md": "11da6ac71cbf5a91ab562c5504e591d94d1a048f4a8513451f584df877a79468",
       "skills/windows/router.md": "874eb0c29bada978b799c263125e6b161206618d1d94f60ff81030d94f8e819e",
@@ -153,11 +159,13 @@
     "extract_stream",
     "indx_carve",
     "jumplist",
+    "lnk_jumplist",
     "lnk_parse",
     "mam_scan",
     "mft_records",
     "prefetch_mam",
     "recyclebin_i",
+    "registry_recover",
     "regkv",
     "shellbags",
     "sigma_hunt",
@@ -166,5 +174,8 @@
     "vss_stores",
     "yara_scan"
   ],
-  "skills": 53
+  "skills": 53,
+  "recipes": [
+    "windows-forensics/windows-artefacts"
+  ]
 }

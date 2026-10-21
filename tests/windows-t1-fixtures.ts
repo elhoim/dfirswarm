@@ -121,9 +121,9 @@ export function hvleEntry(e: LogEntry): Buffer {
   return entry;
 }
 
-export function hvleLog(hive: Buffer, entries: LogEntry[], o: { primary: number; secondary?: number; zeroPad?: number } = {}): Buffer {
-  const first = entries[0]?.sequence ?? o.primary;
-  return Buffer.concat([logHeader(hive, { primary: first, secondary: first, ...o }), ...entries.map(hvleEntry), Buffer.alloc(o.zeroPad ?? 0)]);
+export function hvleLog(hive: Buffer, entries: LogEntry[], o: { primary?: number; secondary?: number; zeroPad?: number } = {}): Buffer {
+  const first = entries[0]?.sequence ?? o.primary ?? 0;
+  return Buffer.concat([logHeader(hive, { primary: o.primary ?? first, secondary: o.secondary ?? first }), ...entries.map(hvleEntry), Buffer.alloc(o.zeroPad ?? 0)]);
 }
 
 /** An old-format log: the base block copy, "DIRT" and the dirty vector padded to a sector, then the dirty 512-byte sectors in order. */
