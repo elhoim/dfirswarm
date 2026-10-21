@@ -402,7 +402,7 @@ test("hostile files end in JSON, never a traceback, and the original is not chan
   });
 });
 
-test("a second run with the same arguments, in the same job, neither fails nor replaces the first run's files", async () => {
+test("a second run with the same arguments, in the same job, neither fails nor replaces the first run's files, and does not make them twice", async () => {
   await withCwd(async (cwd) => {
     const s: Setup = { hive: withSequences(G[0], 11, 10), logs: { log1: hvleLog(G[1], [{ sequence: 10, hiveBinsDataSize: BINS, pages: differingPages(G[0], G[1]) }], { primary: 10 }) } };
     const args = await put(cwd, s);
@@ -414,9 +414,10 @@ test("a second run with the same arguments, in the same job, neither fails nor r
     assert.equal(second.replayed, true);
     assert.equal(second.status, first.status);
     for (const [f, digest] of before) assert.equal(sha(await readFile(f)), digest, `${f} is as the first run left it`);
-    const now = await everyFileUnder(join(cwd, "out"));
-    assert.ok(now.length > before.size, "the second run's files have names of their own");
-    assert.notEqual(second.recovered_copy, first.recovered_copy);
+    // The same arguments give the same bytes: the copy and the records the first run left are the ones the second names (a file is
+    // never replaced, and none is made twice).
+    assert.deepEqual((await everyFileUnder(join(cwd, "out"))).sort(), [...before.keys()].sort());
+    assert.equal(second.recovered_copy, first.recovered_copy);
   });
 });
 
