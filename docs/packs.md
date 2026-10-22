@@ -805,10 +805,12 @@ import each other), and holds to this:
   command job is code the harness does not read, and can set `SECRET_OUTPUT=1`
   for itself.
   A tool an agent forges (`make_tool`) has no declaration: the agent's flag
-  decides. Today `sqlite_query` and `recovery_key_scan` declare
-  `{ "when_args": ["write_values"] }` and check the variable; a tool that writes
-  values and does not yet is held by the agent's flag and the skill's line,
-  until it adds the same key and the same check.
+  decides. Tools that write values declare
+  `{ "when_args": ["write_values"] }` and check the variable (`sqlite_query`,
+  `recovery_key_scan`, `ioc_scan` and `chunk_needles` among them); a tool every
+  use of which leaves values in its output declares `"required"` (`feature_scan`);
+  a tool that writes values and does not yet is held by the agent's flag and
+  the skill's line, until it adds the same key and the same check.
 - *The tests assert absence:* no group of the value, no run of its digits, no
   64-hex string and no masked shape in the answer or in any file it names, with
   the value planted in every encoding the tool reads.
