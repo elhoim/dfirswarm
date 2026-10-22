@@ -180,8 +180,9 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 
 // The text of each block as the network pack carries it: a copy here is a copy of that text, and a change to either side shows
 // as a change of this hash, to be made in every copy (the withholding block is in the network, base, virtualization and
-// reverse-engineering packs and the tool library; the tests of each hold their copies equal).
-const NETWORK_PROCESS_SHA = "072a9f28f521a9bc039e717811ef0a2b4e9118169fca908bfd4467969cefddac";
+// reverse-engineering packs and the tool library; the tests of each hold their copies equal). The process block is the one
+// with the poll() guard in kill_tree, the seen set in the walk and the libproc route on macOS.
+const NETWORK_PROCESS_SHA = "d6dc512281472e451aa994429aab766d808c330114650ecad2a72aeeada8a944";
 const NETWORK_WITHHOLDING_SHA = "55adb95b4f37b7db293b04e77281316735ab82ea609762d6bd46fc8ad2d1eee1";
 
 test("the tool and the recipes that start programs carry one process block, the network pack's text, and nothing in the pack starts a program in a session or a group of its own", async () => {
