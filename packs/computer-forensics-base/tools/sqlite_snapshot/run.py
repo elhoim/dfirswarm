@@ -44,7 +44,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-TOOL = {"name": "sqlite_snapshot", "version": 1}
+TOOL = {"name": "sqlite_snapshot", "version": 2}
 CHUNK = 1 << 20
 MAX_BYTES_DEFAULT = 8 * 1024 ** 3
 MAX_BYTES_CEILING = 1024 ** 4
@@ -565,7 +565,7 @@ def main():
     total = 0
     for suffix in SUFFIXES:
         p = real + suffix
-        if os.path.isfile(p):
+        if os.path.isfile(p) and not os.path.islink(p):      # a link beside the database is listed and not followed, as the entry says
             try:
                 sz = os.path.getsize(p)
             except OSError as exc:
@@ -769,6 +769,8 @@ def main():
         "the main file with the WAL's committed frames applied in the copy (frames after the last commit and the rollback journal are not applied)" if receipt["wal_applied"]
         else "the main file only, as copied; the WAL, where there is one, is not in it")
     receipt["status"] = "partial" if receipt["problems"] else "complete"
+    receipt["status_basis"] = ("every file of the set was copied and hashed, and the WAL was read and applied in the copy" if receipt["status"] == "complete" else
+                               "a file of the set was not copied whole, or the WAL or journal could not be read or applied (see problems)")
     receipt["seconds"] = round(time.monotonic() - started, 2)
     write_receipt()
     say(dict(receipt), 0)

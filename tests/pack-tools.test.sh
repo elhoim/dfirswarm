@@ -446,7 +446,8 @@ Units are in 512-byte sectors
 002:  000:000   0000002048   0000206847   0000204800   NTFS / exFAT (0x07)
 003:  000:001   0000206848   0062912511   0062705664   NTFS / exFAT (0x07)
 """
-sector, slots = il.parse_mmls(sample)
+sector, slots, skipped = il.parse_mmls(sample)
+assert skipped == [], skipped
 assert sector == 512, sector
 allocated = [s for s in slots if s["allocated"]]
 assert [s["start_sector"] for s in allocated] == [2048, 206848], allocated
