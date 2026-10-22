@@ -48,7 +48,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-TOOL = {"name": "timeline_super", "version": 4}
+TOOL = {"name": "timeline_super", "version": 5}
 DEFAULT_TIMEOUT = 1800
 TIMEOUT_MAX = 3300                # the manifest's own limit is 3600: the rest is for the version calls and the counting
 TOOL_SECONDS = 3500               # the whole call, counting included, ends before the manifest's limit
@@ -672,6 +672,9 @@ def main():
     else:
         result["status"] = "failed"
         result["error"] = result["problems"][0] if result["problems"] else "no timeline was produced"
+    result["status_basis"] = {"complete": "the programs exited 0, wrote their files and every output line parsed",
+                              "partial": "a program did not exit 0 or an output line did not parse, and what was written is kept (see problems)",
+                              "failed": "no timeline was produced"}[result["status"]]
     result["coverage_note"] = ("complete here means the programs exited 0, wrote their files and every output line parsed. It does not say every "
                                "parser read every source: read the storage file's processing report (Plaso's pinfo) before a negative rests on it. "
                                "A timestamp in this timeline is what a parser read, in UTC; it is a pointer to an artefact, which the artefact's own "
