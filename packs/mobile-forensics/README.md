@@ -36,7 +36,12 @@ opens a `Manifest.db`'s `-wal` and `-journal` in a working copy, with the file.
   `Manifest.db` is listed when it opens as SQLite (with `payload_encrypted` set),
   and when it does not the answer says the listing is not available and what the
   file was. Key material (the key bag, the manifest key) is a presence and a
-  length, never a value. Times are converted from the epoch you name (`unix` by
+  length, never a value. `contains` and `domain` filter the path and domain as the
+  answer prints them, so a withheld component cannot be guessed through a filter.
+  A name that holds 42 or more digits with at most three characters that are not
+  letters or digits between two digits (any separator, none, full-width digits, a key
+  split across path components) is a placeholder, as is a path over 8,192
+  characters, which is not judged. Times are converted from the epoch you name (`unix` by
   default, or `apple`), with the raw seconds beside them: the tool does not guess,
   and `epoch.consistency` counts the times that fall after the backup's own date or
   before 2007 under the epoch applied (the wrong epoch is a 31-year shift). The
@@ -51,17 +56,46 @@ opens a `Manifest.db`'s `-wal` and `-journal` in a working copy, with the file.
   seals. It reads UTF-8 and UTF-16 text (the byte order the header declares) and
   says so. A `-wal` or a `-journal` beside the file is listed and not read, so what
   only the WAL holds is absent, and the status is partial while one holds bytes.
-  `contains` only narrows the values file (it needs `write_values`): the answer
-  lists every fragment and does not say which matched.
+  `contains` only marks the rows of the values file (it needs `write_values`):
+  the file holds a row for every fragment, each with `match` 1, 0 or 2 (not decided
+  in time), so its size and digest do not depend on the expression; the answer
+  lists every fragment and does not say which matched. It is accepted only as an
+  expression of bounded cost (no `*`, `+` or `{m,}`, no nested repeat, no
+  lookaround, no back reference, at most 256 steps), which keeps the time it takes
+  small per character (at most about 0.06 s of CPU per 32,768 characters, for an
+  expression that repeats one class of characters 250 times), but not small for a
+  large free space: 1.4 s against 0.16 s for 1.3 MB of digits against letters, and
+  the job's duration can say that much of the hidden text is of a class the
+  expression matches, up to about 7 s. The answer does not say it: the expression
+  has a work budget in sizes the answer shows (a character of a fragment times the
+  expression's cost), a fragment past it is marked `match` 2 and the status is
+  partial, the same for any text of those sizes, and the clock of `max_seconds`
+  does not run while the expression does. A job that asks for `write_values` is run
+  as secret output.
 - `protobuf_peek` reads the wire structure of a protobuf message without its
   schema: field numbers, wire types, absolute offsets and field paths, numbers
-  raw with their zigzag reading. It does not say what a field means. A group makes
-  a message `unsupported`, a structural error names its offset, and a bounded
-  window is read, not a whole file. Only a top-level varint is printed, and only for
-  a window that is a message (it parses whole and meets a stated rule, so that a
-  window aimed at a string or a token is not read back as numbers): the text of a
+  raw with their zigzag reading. It does not say what a field means. A group or a
+  structural error makes the window `not_accepted` (one status, no count, in the
+  same words for every such window; what the parser found is in the sealed values
+  file), and a bounded window is read, not a whole file. Only a top-level varint is printed, and only for
+  a window that is a message (it parses whole, is not printable text and meets a
+  stated rule, which is stricter for a window aimed with `offset` or `length`, so
+  that a window aimed at a string or a token is not read back as numbers): the text of a
   string, the bytes of a bytes field, a number under a length-delimited field and a
-  fixed-width value go to the job's sealed values file on request.
+  fixed-width value go to the job's sealed values file on request. The shown-window
+  rates it states hold at any `max_fields`: an aimed window that the field budget
+  stopped is not shown. The size of its values file follows how JSON writes the text
+  of a string field (a quote, a backslash or a control character adds bytes; nothing
+  for a token of letters and digits), and the time of a parse follows the fields it
+  read, even for a window it does not show.
+
+**What a requesting agent can see.** The answer, and the job's file list with each
+file's size and digest. The sealed values file lies under `store/` of the sandbox,
+which an agent's VM mounts read-only: an agent that opens it reads every row, the
+values and `match` included. The measures of these tools protect what is shown
+without anyone opening the file (the answer, its status and counts, the size and
+digest); they do not stop an agent that deliberately opens the sealed file, and the
+tools do not decide whether it may: that is the sandbox's mounts.
 
 **Five recipes**, each saying what it prepares (`purpose` in its `recipe.json`).
 Two inventories: `ios-filesystem` turns a full-file-system tar into a structural

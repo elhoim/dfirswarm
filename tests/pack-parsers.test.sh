@@ -32,10 +32,11 @@ def tool(pack_tool, args, env=None, cwd=None):
 
 
 def as_job(pack_tool, args, name):
-    """A tool that withholds what it reads, run as a job: its values file is read back. Returns (answer, values)."""
+    """A tool that withholds what it reads, run as a job the harness runs as secret output (SECRET_OUTPUT=1, which the manifest declares
+    for write_values): its values file is read back. Returns (answer, values)."""
     out = os.path.join(WORK, name)
     os.makedirs(out, exist_ok=True)
-    answer = tool(pack_tool, dict(args, write_values=True), dict(os.environ, JOB_ID="j-" + name, OUT=out))
+    answer = tool(pack_tool, dict(args, write_values=True), dict(os.environ, JOB_ID="j-" + name, OUT=out, SECRET_OUTPUT="1"))
     path = os.path.join(out, [f for f in os.listdir(out) if f.endswith("-values.jsonl")][0]) \
         if any(f.endswith("-values.jsonl") for f in os.listdir(out)) else None
     return answer, ([json.loads(line) for line in open(path, encoding="utf-8")] if path else [])
