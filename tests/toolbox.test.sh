@@ -205,7 +205,11 @@ pass "required capabilities: met by a program that does the work; a failed probe
 # printed a syntax error and left "supply a program right after the start
 # with , which tests it".
 want='supply a program right after the start with `swarm.sh tool-supply <id> add PATH --provides <capability>`, which tests it against a known answer'
-[[ "$err" == *"$want"* ]] || fail "the WARN does not name the tool-supply command whole: $err"
+# On the host there is no job service to test a supplied program in: tool-supply says untested and exits 4, and the
+# WARN says so rather than promise a test.
+host_want='a host run has no job service, so `swarm.sh tool-supply <id> add PATH --provides <capability>` seals a program and records it untested (exit 4)'
+[[ "$err" == *"$host_want"* && "$err" == *"install a program that does it on this host and start again"* ]] || fail "the host WARN does not say what tool-supply does in a host run: $err"
+[[ "$err" == *"$want"* || "$err" == *"in a worker job"* ]] && fail "the host WARN promises a test in a worker job that a host run has not: $err"
 printf '{"image": "x", "programs": []}' > "$TMP/image-none.json"
 set +e
 bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires qr-decode --required --image "$TMP/image-none.json" >/dev/null 2>"$TMP/cap.err"; rc=$?
@@ -213,7 +217,8 @@ set -e
 [[ "$rc" -eq 3 ]] || fail "an unmet capability with --required in an image exits 3, got $rc: $(cat "$TMP/cap.err")"
 grep -qF "BLOCKER: --toolbox-required and the case requires what the image cannot do" "$TMP/cap.err" || fail "no capability BLOCKER: $(cat "$TMP/cap.err")"
 grep -qF "$want" "$TMP/cap.err" || fail "the BLOCKER does not name the tool-supply command whole: $(cat "$TMP/cap.err")"
+grep -qF 'a run without a job service seals it and records it untested, exit 4' "$TMP/cap.err" || fail "the image BLOCKER does not say what happens with no job service: $(cat "$TMP/cap.err")"
 for f in "$err" "$(cat "$TMP/cap.err")"; do
   [[ "$f" == *"with , which"* || "$f" == *"syntax error"* || "$f" == *"command not found"* || "$f" == *"No such file"* ]] && fail "the message ran its own example: $f"
 done
-pass "the unmet-capability WARN and BLOCKER print the tool-supply command as written"
+pass "the unmet-capability WARN and BLOCKER print the tool-supply command as written, and say a host run cannot test it"

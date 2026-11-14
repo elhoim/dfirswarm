@@ -458,7 +458,7 @@ test("section 8: every one of the fourteen measures gives its figure, read from 
   assert.equal(row(2).figure, 1067, "32,000 files in 30 s");
   assert.deepEqual(row(2).items, ["j000003", "j000004"]);
   assert.match(row(2).value, /the slowest 600 files\/s \(j000004\)/);
-  assert.equal(row(3).figure, 300000);
+  assert.deepEqual([row(3).figure, row(3).unit], [300000, "bytes"]);
   assert.match(row(3).value, /300000 bytes \(inbox, over the 262144-byte bound: kept whole, not sent\)/);
   assert.equal(row(4).figure, 2);
   assert.equal(row(5).figure, 2, "60 s before a1's second request and 60 s before a2's");
@@ -483,6 +483,20 @@ test("section 8: every one of the fourteen measures gives its figure, read from 
   assert.match(text, /Section 8 \(the improvement plan's measures for the verification runs\):/);
   for (const [n, name] of SECTION8_MEASURES.entries()) assert.match(text, new RegExp(`^${n + 1}\\.\\s+${name.replace(/[()]/g, "\\$&")}\\s+\\S`, "m"), name);
   for (const v of ["192.0.2.9", "evil-dropper", "found-it-host", "bob"]) assert.ok(!text.includes(v) && !JSON.stringify(m.section8).includes(v), `no value is printed (${v})`);
+});
+
+test("section 8: the largest answer is in bytes when the hub cut one, in characters when only a seat's row sizes it", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "metrics-s8-chars-")), "s8chars");
+  write(S, "traces/events.jsonl", lines([
+    { ts: T("10:00:00"), agent: "a1", tool: "job_run", args: { tool: "x" }, result: { ok: true, job: "j000001", answer_chars: 1200 } },
+    { ts: T("10:01:00"), agent: "a1", tool: "job_status", args: { job_id: "j000001" }, result: { ok: true, answer_chars: 5400 } },
+  ]));
+  const m = await measureRun(S);
+  const r3 = m.section8.find((x) => x.n === 3)!;
+  assert.deepEqual([r3.measured, r3.figure, r3.unit], [true, 5400, "characters"]);
+  assert.match(r3.value, /the largest answer a seat's row sizes: 5400 characters \(job_status\)/);
+  const none = await measureRun(join(mkdtempSync(join(tmpdir(), "metrics-s8-none3-")), "x"));
+  assert.equal(none.section8.find((x) => x.n === 3)!.unit, "bytes or characters");
 });
 
 test("section 8: a run with none of the registers says why for every row, never a zero", async () => {

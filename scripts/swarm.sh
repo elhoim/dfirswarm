@@ -14,11 +14,14 @@ set -euo pipefail
 
 # The launcher runs from a frozen copy of itself. Bash reads a script as it goes: a start or a stop, which run for
 # minutes, read on from the checkout as it was being edited (a start that had worked ended "line 12500: syntax error",
-# exit 2). So `start` and `stop` copy this file first and exec the copy (the same process: its pid, its signals and
-# its status are the launcher's), and a VM run's frozen host copy (freeze_harness) takes these same bytes for
-# scripts/swarm.sh: the launcher and the hub run one file. The block is one command, read whole before it runs. A copy
-# is named for its launcher's pid and kept while it runs; the next start or stop removes those whose launcher ended.
-if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop ) ]]; then
+# exit 2). So `start`, `stop` and `resume` (a start of a run that ended) copy this file first and exec the copy (the
+# same process: its pid, its signals and its status are the launcher's), and a VM run's frozen host copy
+# (freeze_harness) takes these same bytes for scripts/swarm.sh: the launcher and the hub run one file. The block is one
+# command, read whole before it runs. A copy is named for its launcher's pid and kept while it runs, and no longer: a
+# watcher started here removes it within a second of the launcher's end, whichever way it ends (the kickoff's own
+# exit traps are its own), and holds nothing of the launcher's input or output. A copy whose watcher did not outlive
+# it (a hangup kills nothing here, but a kill can) is removed by the next start, stop or resume.
+if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop || "${1:-}" == resume ) ]]; then
   for _launcher_old in "${TMPDIR:-/tmp}"/dfirswarm-launcher.*; do
     [[ -d "$_launcher_old" ]] || continue
     _launcher_pid="${_launcher_old##*/dfirswarm-launcher.}"; _launcher_pid="${_launcher_pid%%.*}"
@@ -26,6 +29,7 @@ if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop )
   done
   _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.$$.XXXXXX" 2>/dev/null)" || _launcher_dir=""
   if [[ -n "$_launcher_dir" ]] && cp "${BASH_SOURCE[0]}" "$_launcher_dir/swarm.sh" 2>/dev/null; then
+    ( trap '' HUP; while kill -0 "$$" 2>/dev/null; do sleep 1; done; rm -rf "${_launcher_dir:?}" ) </dev/null >/dev/null 2>&1 &
     SWARM_LAUNCHER_COPY="$_launcher_dir/swarm.sh" SWARM_LAUNCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
       exec bash "$_launcher_dir/swarm.sh" "$@"
   fi
@@ -101,8 +105,19 @@ VM_HOST_WAY_ON="Or run the agents unisolated with --isolation host: each is then
 # the trace. Fed by the daemon's output (`> >(log_stamper FILE)`), it appends to FILE, ends when the daemon closes its
 # output, and ignores the terminal's hangup and interrupt as the detached daemon does, so it never takes the daemon's
 # output away from it.
+# It lives as long as the daemon, so it holds nothing of the launcher's but the pipe it reads: a process substitution
+# is a fork of the shell that made it, with the launcher's stdout and stderr (and any copy bash keeps of them above 2).
+# Measured: a stamper that kept them held the launcher's output open for the whole run, so a command substitution of
+# `swarm.sh start`, a pipe into tee, ssh and the console's start job (status set when the output closes) waited for
+# the run to end. Its stdout and stderr go to /dev/null and every other descriptor is closed before it reads.
 log_stamper() { # <log file>
   trap '' HUP INT QUIT TERM
+  exec >/dev/null 2>&1
+  local fd
+  for fd in /dev/fd/*; do
+    fd="${fd##*/}"
+    if [[ "$fd" =~ ^[0-9]+$ ]] && ((fd > 2)); then eval "exec $fd>&-" || true; fi
+  done
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
@@ -3142,7 +3157,9 @@ finish_contract() { # <sandbox>
 }
 
 # A process's start time as ps gives it: with its pid, it names that process and never a later one given the same pid.
-proc_started() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# In UTC and the C locale: ps writes it in the reader's time zone and language, so a start whose shell had another TZ
+# read a live launcher's time as another time and counted it as ended.
+proc_started() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
 # Whether <pid> is still the launcher that began at <started>.
 launcher_alive() { # <pid> <started>
   [[ -n "${1:-}" && -n "${2:-}" ]] && kill -0 "$1" 2>/dev/null && [[ "$(proc_started "$1")" == "$2" ]]
@@ -3150,17 +3167,25 @@ launcher_alive() { # <pid> <started>
 
 # A start's claim on this host, written before it asks whether it fits and kept up to date until its registry record
 # names its launcher: three starts launched together each count the ones before them, though none has a record or a
-# hub yet. <launcher pid>.json in a directory of the temporary area named for the runs directory (a refused start
-# leaves nothing under runs/); a claim whose launcher has ended is nothing, and is removed by whoever reads it.
-kickoffs_dir() { printf '%s/dfirswarm-kickoffs/%s\n' "${TMPDIR:-/tmp}" "$(printf '%s' "$RUNS_DIR" | cksum | cut -d' ' -f1)"; }
+# hub yet. <launcher pid>.json in a directory of the harness's home (beside its hubs; a refused start leaves nothing
+# under runs/) named for the runs directory as the file system has it, its links and its spelling resolved: two starts
+# on one runs directory meet there whatever their TMPDIR, TZ or way of naming it. A claim whose launcher has ended is
+# nothing, and is removed by whoever reads it.
+kickoffs_dir() {
+  printf '%s/kickoffs/%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}" "$(resolve_path_nocreate "$RUNS_DIR" | cksum | cut -d' ' -f1)"
+}
 kickoff_claim() { # <seats> <seat vCPUs> <seat MiB> <workers> <worker vCPUs> <worker MiB>
-  local dir
+  local dir claim try
   dir="$(kickoffs_dir)"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  claim="$(jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson n "${1:-0}" --argjson c "${2:-0}" --argjson m "${3:-0}" --argjson w "${4:-0}" --argjson wc "${5:-0}" --argjson wm "${6:-0}" \
-    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}' \
-    > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null || true
+    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}')" || return 0
+  # Twice: another start's sweep may take an old empty directory away between the mkdir and the write.
+  for try in 1 2; do
+    mkdir -p "$dir" 2>/dev/null || return 0
+    printf '%s\n' "$claim" > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null && return 0
+  done
+  return 0
 }
 
 # The memory and vCPUs the other microVM runs going on this host may ask for, as arguments of `vm.ts capacity`:
@@ -3198,6 +3223,16 @@ other_runs_load() { # <this run's id, or empty>
       rm -f "$f" 2>/dev/null || true
     fi
   done
+  # The claims left for other runs directories by launchers that ended (a start refused after it claimed) go too, and
+  # a directory of them empty for an hour: nothing else would read them.
+  local area
+  area="$(dirname "$(kickoffs_dir)")"
+  for f in "$area"/*/*.json; do
+    [[ -f "$f" ]] || continue
+    kpid="${f##*/}"; kpid="${kpid%.json}"
+    if [[ "$kpid" =~ ^[0-9]+$ ]] && ! kill -0 "$kpid" 2>/dev/null; then rm -f "$f" 2>/dev/null || true; fi
+  done
+  if [[ -d "$area" ]]; then find "$area" -mindepth 1 -maxdepth 1 -type d -empty -mmin +60 -exec rmdir {} + 2>/dev/null || true; fi
   OTHER_RUNS_ARGS=""
   [[ "$runs" -gt 0 ]] && OTHER_RUNS_ARGS="--others-memory $mem --others-cpus $cpus --others-runs $runs"
   OTHER_RUNS_KICKING="$kicking"
@@ -3865,7 +3900,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   local seal_herdr=1
   # The derived catalogue's ceiling of generations a run (--derived-limit;
   # SWARM_DERIVED_LIMIT the default, 50 without either): recorded with the
@@ -4753,21 +4788,8 @@ STRIP
     local _pd
     while read -r _pd; do
       [[ -n "$_pd" ]] || continue
-      "$ROOT/scripts/pack.sh" verify "$(basename "$_pd")" >/dev/null || {
+      installed_pack_check "$_pd" || {
         echo "BLOCKER: pack $(basename "$_pd") does not verify; install it again." >&2; exit 1; }
-      # An installed pack older than the one this checkout ships runs as it
-      # was installed: its tools and skills are the old ones, fixes and all.
-      local _id _have _ship _shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
-      _id="$(basename "$_pd")"
-      if [[ -f "$_shipped/$_id/pack.json" ]]; then
-        _have="$(jq -r '.version // empty' "$_pd/pack.json" 2>/dev/null)"
-        _ship="$(jq -r '.version // empty' "$_shipped/$_id/pack.json" 2>/dev/null)"
-        if [[ -n "$_have" && -n "$_ship" ]] && python3 -c 'import sys
-t = lambda v: tuple(int(x) for x in v.split("."))
-sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/null; then
-          echo "WARN: pack $_id is installed at $_have and this checkout ships $_ship; the run uses $_have. Update it with: scripts/pack.sh install $_shipped/$_id" >&2
-        fi
-      fi
     done <<< "$pack_dirs"
   fi
   PACK_SECRETS_ENV='{}'
@@ -6444,6 +6466,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # The record names this launcher now (kickoff.pid): its claim has said all it had to.
+  [[ "$isolation" == "microvm" ]] && rm -f "$(kickoffs_dir)/$$.json" 2>/dev/null
+  true
   # What the run was started with, for swarm.sh resume: outside the run,
   # 0600, in a directory denied to the panes where the guard can deny it (a
   # VM mounts none of runs/). The notify command is never in it: it is kept
@@ -8421,8 +8446,9 @@ vm_ref_for_profile() { # <profile>
 # The job images of a run: each pack's own profile (images/recipe.py
 # profile-for), and the one holding every pack as the default. An image this
 # host does not hold is pulled; one that cannot be had is left out, and its
-# packs' jobs run in the default, said. Sets job_images_json (profile -> ref)
-# and pack_profiles_json (pack id -> profile).
+# packs' jobs run in the default, said. Sets job_images_json (profile -> ref),
+# pack_profiles_json (pack id -> profile) and job_image_digests_json (profile ->
+# the digest this host holds under that reference, as it was read here).
 plan_job_images() { # <pack dirs, one per line> <default job image>
   local dirs="$1" default_ref="$2" d id profile ref digest default_profile
   local images='{}' packs='{}'
@@ -8445,7 +8471,8 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
   # Each image on this host, or pulled now, before the clock starts; a
   # kickoff that starts no agent (--no-start, a check) looks for none, as it
   # does not for the agents' own image.
-  local have='{}' p
+  local have='{}' p seen_digests='{}'
+  job_image_digests_json='{}'
   if [[ "${start_agents:-1}" -ne 1 || "${CHECK_ONLY:-0}" -eq 1 ]]; then
     job_images_json="$images"
     pack_profiles_json="$packs"
@@ -8460,6 +8487,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
     if [[ -n "$digest" || "${CHECK_ONLY:-0}" -eq 1 ]]; then
       have="$(jq -c --arg p "$p" --arg r "$ref" '. + {($p): $r}' <<<"$have")"
+      [[ -n "$digest" ]] && seen_digests="$(jq -c --arg p "$p" --arg d "$digest" '. + {($p): $d}' <<<"$seen_digests")"
     elif [[ "$p" == "$default_profile" ]]; then
       echo "BLOCKER: the job image $ref, which holds every pack of the run, is not on this host and could not be pulled; build it (images/README.md) or pass --image." >&2
       return 1
@@ -8468,6 +8496,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
   done
   job_images_json="$have"
+  job_image_digests_json="$seen_digests"
   pack_profiles_json="$(jq -c --argjson have "$have" --arg dflt "$default_profile" 'with_entries(.value = (if $have[.value] then .value else $dflt end))' <<<"$packs")"
 }
 
@@ -8519,7 +8548,7 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
 cmd_image_for() {
   local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason jobs=1 brain_base=1 jobs_json='[]'
   # plan_job_images looks for no image when nothing is started.
-  local start_agents=0 job_images_json='{}' pack_profiles_json='{}'
+  local start_agents=0 job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
@@ -9627,32 +9656,35 @@ launch_vm_agents() {
 }
 
 # What each job image can do (scripts/image-capabilities.ts). The cache keeps each image's last result by its
-# reference, so the next run's contract can say it before a seat reads it.
+# digest (plan_job_images reads each one's), so the next run of the same image can say it in its contract before a seat
+# reads it, and an image rebuilt under the same name is not shown an earlier one's.
 image_capabilities_cache() { printf '%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}/image-capabilities"; }
 
 # Before the contract is rendered: job-capabilities.json as pending, with an earlier run's result for an image of the
-# same reference, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
+# same digest, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
 seed_job_capabilities() { # <sandbox> <job images JSON>
-  local sandbox="$1" images="${2:-}"
+  local sandbox="$1" images="${2:-}" digests="${job_image_digests_json:-}"
   [[ -n "$images" ]] || images='{}'
+  [[ -n "$digests" ]] || digests='{}'
   [[ -z "${resume_of:-}" ]] || return 0
   [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off && "${isolation:-}" == microvm && "${jobs:-1}" -eq 1 ]] || return 0
   [[ "$(jq 'length' <<<"$images" 2>/dev/null || echo 0)" -gt 0 ]] || return 0
   rm -f "$sandbox/job-capabilities.json"
-  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
 }
 
 # As soon as the hub's job service is up, before the seats' VMs are made: one known-answer probe job an image, in the
 # background, run from the run's frozen copy. The seats get the result on the board (as early as a job can give it,
 # often before their first inbox) and in job-capabilities.json. SWARM_IMAGE_CAPABILITIES=off skips it.
 start_image_capabilities() { # <sandbox> <hub dir> <run record JSON>
-  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles
+  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles digests="${job_image_digests_json:-}"
+  [[ -n "$digests" ]] || digests='{}'
   [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off ]] || return 0
   images="$(jq -c '.isolation.jobs.images // {}' <<<"$record" 2>/dev/null || echo '{}')"
   cap_profiles="$(jq -r 'keys | join(",")' <<<"$images" 2>/dev/null || true)"
   [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]] || return 0
   ( node --experimental-strip-types --no-warnings "$(run_script "$hub_dir" scripts/image-capabilities.ts)" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" \
-      --images "$images" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
+      --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
   echo "Capabilities: each job image ($cap_profiles) is being tested now with known-answer probes; the seats are told on the board (job-capabilities.json), and SWARM.md says it"
 }
 
@@ -10704,16 +10736,76 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
   esac
 }
 
+# An installed pack as a run is given it, at the kickoff and by pack-add: its files must match its own checksums
+# (scripts/pack.sh verify, whose problems go to stderr), and one older than the pack this checkout ships is said, since
+# the run takes it as it was installed: its tools and skills are the old ones, fixes and all. 1 when it does not verify.
+installed_pack_check() { # <installed pack dir>
+  local pd="$1" id have ship shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
+  id="$(basename "$pd")"
+  "$ROOT/scripts/pack.sh" verify "$id" >/dev/null || return 1
+  [[ -f "$shipped/$id/pack.json" ]] || return 0
+  have="$(jq -r '.version // empty' "$pd/pack.json" 2>/dev/null)"
+  ship="$(jq -r '.version // empty' "$shipped/$id/pack.json" 2>/dev/null)"
+  if [[ -n "$have" && -n "$ship" ]] && python3 -c 'import sys
+t = lambda v: tuple(int(x) for x in v.split("."))
+sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$have" "$ship" 2>/dev/null; then
+    echo "WARN: pack $id is installed at $have and this checkout ships $ship; the run uses $have. Update it with: scripts/pack.sh install $shipped/$id" >&2
+  fi
+  return 0
+}
+
+# How a seat runs a tool pack-add brought, said true to the run it was brought into. With tool forging on, the
+# extension reads tools/ at the end of each turn and registers what is new as a tool of the seat's own; without it, the
+# seat's tool list is the one its start named. A run with a job service runs any tool in tools/ as job_run(tool:), and
+# picks a tool's image by its pack's profile, which a pack added after the kickoff does not have: such a tool runs in
+# the run's default job image unless the seat names a profile, so the post names the run's image that holds the pack,
+# if one does. A run with neither has its tools' scripts, run from bash.
+pack_add_how() { # <run record JSON> <pack> <installed pack dir>
+  local rec="$1" pack="$2" pd="$3" progs="" profiles="{}"
+  progs="$(jq -r '[.binaries[]? | (.package // .name)] | reduce .[] as $x ([]; if index([$x]) then . else . + [$x] end)
+    | (.[:4] | join(", ")) + (if length > 4 then ", …" else "" end)' "$pd/requires/host.json" 2>/dev/null || true)"
+  [[ -f "$ROOT/images/profiles.json" ]] && profiles="$(jq -c '.profiles // {}' "$ROOT/images/profiles.json" 2>/dev/null || echo '{}')"
+  jq -r --arg pack "$pack" --arg progs "$progs" --argjson profiles "$profiles" '
+    (.tool_forging == true) as $forge
+    | (.isolation.mode == "microvm" and ((.isolation.jobs | type) == "object")) as $jobs
+    | (.isolation.jobs.images // {}) as $img
+    | (.isolation.jobs.image // "") as $dref
+    | ([$img | to_entries[] | select(.value == $dref) | .key] | first // null) as $dprof
+    | ([$profiles | to_entries[] | select($img[.key] != null)
+        | {key, packs: (.value | if type == "array" then . else (.packs // []) end)}
+        | select(.packs | index($pack) != null) | {key, n: (.packs | length)}] | sort_by(.n) | first.key // null) as $hold
+    | (if $progs == "" then "" else " (\($progs))" end) as $p
+    | (if ($img | length) == 0 then
+         " A job runs in the run'"'"'s one worker image, made for the packs the run started with: a tool that runs one of \($pack)'"'"'s programs\($p) may not find it there, and the job says which program is missing."
+       elif $hold == null then
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end) unless you name a profile, and no job image of this run holds \($pack): a tool that runs one of its programs\($p) may not find it, and the job says which program is missing (SWARM.md'"'"'s Job images lists the profiles)."
+       elif $hold == $dprof then
+         " A tool of it runs in the run'"'"'s default job image (profile \($dprof)), which holds \($pack)."
+       else
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end), made for the packs the run started with, unless you name a profile: a tool that runs one of \($pack)'"'"'s programs\($p) needs job_run(tool: <name>, profile: \"\($hold)\", args: {...}), the run'"'"'s job image that holds \($pack)."
+       end) as $where
+    | if $forge and $jobs then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn (tools(name: <name>) gives one whole); a direct call runs one in your own VM, which has few forensic programs, and job_run(tool: <name>, args: {...}) runs one as a job.\($where)"
+      elif $forge then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn and a call runs one where you are, as a forged tool runs; tools(name: <name>) gives one whole."
+      elif $jobs then
+        "They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}); its parameters are in tools/<name>/manifest.json.\($where)"
+      else
+        "They are not in your tool list (it was fixed at the start), and this run has no job service: a tool is the script tools/<name>/<entry>, run by the runtime its manifest names (tools/<name>/manifest.json, with its parameters), which takes its arguments as one JSON object on stdin; run it with bash."
+      end' <<<"$rec"
+}
+
 # A pack brought into a running run (E7): the memory pack, for a dump the catalogue finds inside an image after the
 # kickoff (the kickoff adds it only for a dump at the top of the inputs; hub-supervise.sh calls this when the job
 # service says a catalogue lists one), or another pack the operator names. The run's images, its seats' tool lists and
 # their skill index are fixed at its start, so the pack comes in by what a running run can take: its tools into
-# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>), in the run's default job
-# image), its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its
-# packs, with when, by whom and why this one was added), the trace, and a post to every seat naming both. Under the
-# kickoff's rule: only a run that has packs, never a pack the operator excluded (--no-pack), never one this host has
-# not installed, never one that declares secrets (a job does not carry them). Exit 0 when the pack is in the run
-# (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
+# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>); pack_add_how says where),
+# its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its packs,
+# with when, by whom and why this one was added), the trace (the operator's line, or the harness's pack_added), and a
+# post to every seat naming both. Under the kickoff's rule: only a run that has packs, never a pack the operator
+# excluded (--no-pack), never one this host has not installed or whose files no longer match its checksums (an older
+# install is said, as the kickoff says it), never one that declares secrets (a job does not carry them). Exit 0 when the
+# pack is in the run (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
 #   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
 cmd_pack_add() {
   local id="${1:-}" pack="${2:-}" why="" by=operator
@@ -10763,6 +10855,14 @@ cmd_pack_add() {
     fi
     dirs+=("$d")
   done <<<"$resolved"
+  # Each pack it brings is held as the kickoff holds every pack, before anything is copied: its files match its own
+  # checksums (one changed since it was installed is not copied into a live run), and an older install is said.
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    installed_pack_check "$d" || {
+      echo "BLOCKER: $pack was not added to $id: pack $(basename "$d") does not verify against its own checksums (a file of it changed since it was installed). Install it again: scripts/pack.sh install packs/$(basename "$d")" >&2
+      exit 3
+    }
+  done
   local entries=() added=() names=() said=()
   for d in "${dirs[@]}"; do
     pid="$(jq -r '.id' "$d/pack.json")"
@@ -10798,12 +10898,22 @@ cmd_pack_add() {
   fi
   registry_merge "$id" "$(jq -c --argjson add "$(printf '%s\n' "${entries[@]}" | jq -s .)" '{packs: ((.packs // []) + $add)}' <<<"$rec")" \
     || { echo "BLOCKER: the run's record could not take $pack; its tools and notes are in the run, and the seats were not told." >&2; exit 1; }
-  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is in the run's record and its post.
+  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is on the run's
+  # record and the trace as the harness's line, with the hub's own token when the run has a hub.
   if [[ "$by" == operator ]]; then
     operator_audit pack-add "$id" "$pack" ${why:+--why "$why"} || true
     operator_trace "$sandbox" pack-add "$id" "$pack"
+  elif [[ -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null; then
+    local hub_now="" token="${SWARM_TRACE_TOKEN:-}" line
+    if [[ -z "$token" ]] && hub_now="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+      token="$(jq -r '.tokens.system // empty' "$hub_now/hub-input.json" 2>/dev/null || true)"
+    fi
+    line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg pack "$pack" --arg why "$why" \
+      --argjson added "$(printf '%s\n' "${entries[@]}" | jq -s -c 'map({id, version, tools: .added.tools})')" \
+      '{ts: $ts, agent: "system", tool: "pack_added", args: {pack: $pack, by: "catalogue", why: (if $why == "" then null else $why end)}, result: {ok: true, added: $added}}')"
+    SWARM_TRACE_TOKEN="$token" trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
   fi
-  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}), which runs it in the run's default job image; tools(name: <name>) gives its manifest. The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read. Read the note for the dump's kind (a process dump, a crash dump, a memory image) before you parse one yourself."
+  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). $(pack_add_how "$rec" "$pack" "$(grep -m1 "/$pack\$" <<<"$resolved")") The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read.$([[ "$pack" == memory-forensics ]] && printf ' Read the note for the dump'"'"'s kind (a process dump, a crash dump, a memory image) before you parse one yourself.')"
   node --experimental-strip-types --no-warnings -e '
     const [protocol, S, key, body] = process.argv.slice(1);
     import(protocol).then((P) => P.systemPost(S, { tag: "result", to: "all", key, body })).catch(() => process.exit(1));
@@ -12913,12 +13023,14 @@ EOF
     pack-add) cat <<'EOF'
   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
                                                   bring a pack into a running run: its tools into tools/ (the seats
-                                                  run them with job_run(tool: <name>), in the run's default job image),
-                                                  its notes as files under notes/<pack>/, the run's record and a post
-                                                  to every seat. The run's images, tool lists and skill index stay as
-                                                  they were started. Only a run that has packs; never a pack its
-                                                  kickoff excluded (--no-pack), one this host has not installed, or one
-                                                  that declares secrets: those exit 3, said. The harness runs it itself
+                                                  run them with job_run(tool: <name>), in the run's default job image
+                                                  unless they name a profile; with tool forging on they also join the
+                                                  seats' tool lists), its notes as files under notes/<pack>/, the run's
+                                                  record, the trace and a post to every seat. The run's images and
+                                                  skill index stay as they were started. Only a run that has packs;
+                                                  never a pack its kickoff excluded (--no-pack), one this host has not
+                                                  installed or that does not verify against its checksums, or one that
+                                                  declares secrets: those exit 3, said. The harness runs it itself
                                                   (--by catalogue) for memory-forensics when a catalogue lists a dump
                                                   inside an image, which the kickoff could not see.
 EOF

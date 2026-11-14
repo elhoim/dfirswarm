@@ -72,10 +72,16 @@ pass "the check on the harness's inputs_check line says the harness writes it, a
 eval "$(sed -n '/^image_capabilities_cache()/p; /^seed_job_capabilities()/,/^}/p' "$ROOT/scripts/swarm.sh")"
 export DFIRSWARM_HOME="$TMP/home"
 mkdir -p "$DFIRSWARM_HOME/image-capabilities"
-printf '%s\n' '{"image": "dfirswarm-disk:dev-arm64", "profile": "disk", "at": "2026-11-01T10:00:00Z", "capabilities": [{"id": "disasm-x86-64", "what": "disassemble x86-64 code", "ok": false, "said": "objdump here disassembles only elf64-littleaarch64; no r2, no capstone"}]}' \
-  > "$DFIRSWARM_HOME/image-capabilities/dfirswarm-disk_dev-arm64.json"
+# The cache is kept by the image's digest, as the kickoff read it on this host (plan_job_images): a tag names whatever
+# was last built under it.
+DISK_DIGEST="sha256:$(printf 'd%.0s' $(seq 1 64))"
+printf '%s\n' '{"image": "dfirswarm-disk:dev-arm64", "digest": "'"$DISK_DIGEST"'", "profile": "disk", "at": "2026-11-01T10:00:00Z", "capabilities": [{"id": "disasm-x86-64", "what": "disassemble x86-64 code", "ok": false, "said": "objdump here disassembles only elf64-littleaarch64; no r2, no capstone"}]}' \
+  > "$DFIRSWARM_HOME/image-capabilities/sha256_$(printf 'd%.0s' $(seq 1 64)).json"
 rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
-isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64", "re": "dfirswarm-re:dev-arm64"}'
+job_image_digests_json='{"disk": "sha256:'"$(printf 'e%.0s' $(seq 1 64))"'"}' isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64", "re": "dfirswarm-re:dev-arm64"}'
+jq -e '.pending == true and (.images | keys) == []' "$TMP/sb/job-capabilities.json" >/dev/null || fail "an image rebuilt under the same tag was seeded with an earlier image's result: $(cat "$TMP/sb/job-capabilities.json")"
+rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
+job_image_digests_json='{"disk": "'"$DISK_DIGEST"'"}' isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64", "re": "dfirswarm-re:dev-arm64"}'
 jq -e '.pending == true and (.images | keys) == ["disk"] and .cached.disk.image == "dfirswarm-disk:dev-arm64"' "$TMP/sb/job-capabilities.json" >/dev/null || fail "the seed: $(cat "$TMP/sb/job-capabilities.json")"
 ISOLATION_FOR_CONTRACT=microvm render_contract "$TMP/sb" s1 1 1 10 "$TMP/goal.md" s100
 out="$(cat "$TMP/sb/SWARM.md")"

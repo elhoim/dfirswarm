@@ -269,14 +269,21 @@ if [[ "${#warn[@]}" -gt 0 ]]; then
   echo "WARN: toolbox: missing ${warn[*]} (install commands in toolbox.json)" >&2
 fi
 if [[ "${#cap_unmet[@]}" -gt 0 ]]; then
+  # The way out, true to the run: a program supplied with --provides is tested against a known answer only in a
+  # worker job, which a microVM run's job service runs; a host run has none, and tool-supply seals the program,
+  # records it untested and exits 4.
   where="this host"
-  [[ -n "$image_file" ]] && where="the image"
+  way='install a program that does it on this host and start again, or start a microVM run whose image has it: a host run has no job service, so `swarm.sh tool-supply <id> add PATH --provides <capability>` seals a program and records it untested (exit 4), and nothing tests it before the seats rely on it'
+  if [[ -n "$image_file" ]]; then
+    where="the image"
+    way='supply a program right after the start with `swarm.sh tool-supply <id> add PATH --provides <capability>`, which tests it against a known answer in a worker job before the seats rely on it (they run it with job_run programs; a run without a job service seals it and records it untested, exit 4), or use an image that has it'
+  fi
   if [[ "$required" -eq 1 ]]; then
-    echo "BLOCKER: --toolbox-required and the case requires what $where cannot do: ${cap_unmet[*]}. The questions that need it would close not determinable; supply a program right after the start with \`swarm.sh tool-supply <id> add PATH --provides <capability>\`, which tests it against a known answer in a worker job before the seats rely on it (they run it with job_run programs) or use an image that has it." >&2
+    echo "BLOCKER: --toolbox-required and the case requires what $where cannot do: ${cap_unmet[*]}. The questions that need it would close not determinable; $way." >&2
     exit 3
   fi
   for u in "${cap_unmet[@]}"; do
-    echo "WARN: the case requires ${u%% *} and $where cannot do it ${u#* }. The questions that need it may close not determinable; supply a program right after the start with \`swarm.sh tool-supply <id> add PATH --provides <capability>\`, which tests it against a known answer in a worker job before the seats rely on it (they run it with job_run programs), use an image that has it, or stop now." >&2
+    echo "WARN: the case requires ${u%% *} and $where cannot do it ${u#* }. The questions that need it may close not determinable; $way; or stop now." >&2
   done
 fi
 echo "toolbox: $(( ${#present[@]} )) present, ${#missing[@]} missing$( [[ "${#cap_rows[@]}" -gt 0 ]] && echo ", $(( ${#cap_rows[@]} - ${#cap_unmet[@]} ))/${#cap_rows[@]} required capabilities met") -> $sandbox/toolbox.json"

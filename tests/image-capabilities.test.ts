@@ -85,7 +85,7 @@ test("OCR is a known-answer test: a rendered line read back whole passes, a wron
   stub(bin, "tesseract", `test -s "$1" || exit 3; echo "${OCR_LINE}"`);
   const good = runProbe(probeScript("iVBORw0KGgo="), bin).find((c) => c.id === "ocr")!;
   if (hasPillow) assert.deepEqual([good.ok, good.by], [true, "tesseract"]);
-  else assert.equal(good.said, "tesseract is there; no Pillow here renders the known line it is tested on, so it was not tested");
+  else assert.deepEqual([good.ok, good.untested, good.said], [false, true, "tesseract is there, and no Pillow here renders the known line it is tested on: whether it reads text was not tested"]);
   stub(bin, "tesseract", 'echo "kn0wn answ3r 42l7"');
   const bad = runProbe(probeScript("iVBORw0KGgo="), bin).find((c) => c.id === "ocr")!;
   assert.equal(bad.ok, false, "a tesseract that only starts is not an OCR engine");
@@ -93,6 +93,32 @@ test("OCR is a known-answer test: a rendered line read back whole passes, a wron
   const script = probeScript("iVBORw0KGgo=");
   assert.doesNotMatch(script, /tesseract --version/);
   assert.match(script, /tesseract ocr\.png stdout --psm 7/);
+});
+
+test("an OCR engine with no Pillow to render its test line is said NOT TESTED, never absent: not under DOES NOT, nor 'not there'", () => {
+  // The probe's line, as an image without Pillow prints it, whatever this host has.
+  const caps = readProbe(
+    "cap image-read no no Pillow and no ImageMagick that reads a PNG\n" +
+      "cap ocr untested tesseract is there, and no Pillow here renders the known line it is tested on: whether it reads text was not tested\n" +
+      "cap brotli ok python3 brotli\n",
+  );
+  const ocr = caps.find((c) => c.id === "ocr")!;
+  assert.deepEqual([ocr.ok, ocr.untested, ocr.by], [false, true, undefined]);
+  const post = capabilitiesPost({ base: caps });
+  assert.match(post, /- base: WORKS: inflate brotli \(python3 brotli\)\. DOES NOT: read a PNG's pixels: no Pillow and no ImageMagick that reads a PNG\. NOT TESTED \(not known either way\): read text from a picture: tesseract is there/);
+  assert.doesNotMatch(post, /DOES NOT:[^.]*read text from a picture/);
+  assert.match(post, /One NOT TESTED is not known either way: it is not missing/);
+  // The script says untested for that case, and no for an image with no engine.
+  const script = probeScript("iVBORw0KGgo=");
+  assert.match(script, /say ocr untested "tesseract is there, and no Pillow here renders/);
+  assert.match(script, /say ocr no "no OCR engine/);
+  // Where Pillow is not on this host, the real probe says the same.
+  if (!hasPillow) {
+    const bin = mkdtempSync(join(tmpdir(), "imgcap-bin-"));
+    stub(bin, "tesseract", `echo "${OCR_LINE}"`);
+    const real = runProbe(script, bin).find((c) => c.id === "ocr")!;
+    assert.deepEqual([real.ok, real.untested], [false, true]);
+  }
 });
 
 test("a real tesseract reads the probe's rendered line, where this host has one and Pillow", (t) => {
@@ -130,14 +156,24 @@ test("the seed puts an earlier run's result for the same image into SWARM.md bef
   const sb = mkdtempSync(join(tmpdir(), "imgcap-sb-"));
   const cache = mkdtempSync(join(tmpdir(), "imgcap-cache-"));
   const images = { disk: "dfirswarm-disk:dev-arm64", re: "dfirswarm-re:dev-arm64" };
-  await cacheCapabilities(cache, images, { disk: [{ id: "disasm-x86-64", what: "disassemble x86-64 code", ok: false, said: "objdump here disassembles only elf64-littleaarch64; no r2, no capstone" }], re: { error: "the probe job j000003 did not finish (cancelled)" } });
-  assert.equal(cacheName("dfirswarm-disk:dev-arm64"), "dfirswarm-disk_dev-arm64.json");
-  const cached = JSON.parse(readFileSync(join(cache, "dfirswarm-disk_dev-arm64.json"), "utf8")) as { image: string; capabilities: Capability[] };
-  assert.equal(cached.image, "dfirswarm-disk:dev-arm64");
-  assert.throws(() => readFileSync(join(cache, "dfirswarm-re_dev-arm64.json")), "an image not tested whole is not cached");
-  const seed = await seedCapabilities(sb, images, cache);
+  const D1 = `sha256:${"1".repeat(64)}`;
+  const D2 = `sha256:${"2".repeat(64)}`;
+  const digests = { disk: D1, re: `sha256:${"3".repeat(64)}` };
+  await cacheCapabilities(cache, images, { disk: [{ id: "disasm-x86-64", what: "disassemble x86-64 code", ok: false, said: "objdump here disassembles only elf64-littleaarch64; no r2, no capstone" }], re: { error: "the probe job j000003 did not finish (cancelled)" } }, digests);
+  assert.equal(cacheName(D1), `sha256_${"1".repeat(64)}.json`);
+  const cached = JSON.parse(readFileSync(join(cache, cacheName(D1)), "utf8")) as { image: string; digest: string; capabilities: Capability[] };
+  assert.deepEqual([cached.image, cached.digest], ["dfirswarm-disk:dev-arm64", D1]);
+  assert.throws(() => readFileSync(join(cache, cacheName(digests.re))), "an image not tested whole is not cached");
+  assert.throws(() => readFileSync(join(cache, "dfirswarm-disk_dev-arm64.json")), "the cache is not kept by the image's tag");
+  // The image rebuilt under the same tag is another digest: the earlier run's result is not said to be its.
+  const rebuilt = await seedCapabilities(sb, images, cache, { disk: D2 });
+  assert.deepEqual(Object.keys(rebuilt.images as object), [], "a rebuilt image was shown an earlier image's result");
+  const unknown = await seedCapabilities(sb, images, cache, {});
+  assert.deepEqual(Object.keys(unknown.images as object), [], "an image whose digest is not known was shown a result");
+  const seed = await seedCapabilities(sb, images, cache, digests);
   assert.equal(seed.pending, true);
   assert.deepEqual(Object.keys(seed.images as object), ["disk"]);
+  assert.equal((seed.cached as Record<string, { digest: string }>).disk.digest, D1);
   const goal = join(sb, "goal.md");
   writeFileSync(goal, "## Goal\n\nx\n\n## Definition of done\n\nd\n");
   const render = () => {
@@ -158,4 +194,37 @@ test("the seed puts an earlier run's result for the same image into SWARM.md bef
   md = render();
   assert.match(md, /- disk: WORKS: read text from a picture \(tesseract\)\. DOES NOT: none of the tested\./);
   assert.doesNotMatch(md, /earlier run|not in yet/);
+  // An untested capability reaches the contract as not known, never as absent.
+  writeFileSync(join(sb, "job-capabilities.json"), JSON.stringify({ at: "2026-11-14T00:00:00Z", images: { disk: [{ id: "ocr", what: "read text from a picture", ok: false, untested: true, said: "tesseract is there, and no Pillow here renders the known line it is tested on: whether it reads text was not tested" }] } }));
+  md = render();
+  assert.match(md, /- disk: WORKS: none of the tested\. DOES NOT: none of the tested\. NOT TESTED \(not known either way\): read text from a picture: tesseract is there/);
+});
+
+test("the kickoff reads each job image's digest where it looks for the image, and hands the digests to the seed and the probe", () => {
+  // plan_job_images as the kickoff runs it, with vm.ts's image-digest answered here: each image a digest of its own.
+  const sh = join(ROOT, "scripts", "swarm.sh");
+  const out = execFileSync(
+    "bash",
+    [
+      "-c",
+      `set -euo pipefail
+eval "$(sed -n '/^vm_arch()/,/^}/p; /^vm_ref_for_profile()/,/^}/p; /^plan_job_images()/,/^}/p' "$1")"
+vm_cli() { [ "$1 $2" = "image-digest --image" ] || return 1; printf '{"digest": "sha256:%064d"}\\n' "$(printf '%s' "$3" | cksum | cut -d' ' -f1)"; }
+ROOT="$2"; start_agents=1; CHECK_ONLY=0; SWARM_IMAGES_LOCK=/nonexistent
+plan_job_images "$2/packs/computer-forensics-base" "dfirswarm-core:dev-test"
+printf '%s\\n%s\\n' "$job_images_json" "$job_image_digests_json"`,
+      "_",
+      sh,
+      ROOT,
+    ],
+    { encoding: "utf8", cwd: tmpdir() },
+  );
+  const [images, digests] = out.trim().split("\n").map((l) => JSON.parse(l) as Record<string, string>);
+  assert.ok(Object.keys(images!).length > 0, out);
+  assert.deepEqual(Object.keys(digests!).sort(), Object.keys(images!).sort(), `every image the run has has its digest: ${out}`);
+  for (const d of Object.values(digests!)) assert.match(d, /^sha256:[0-9a-f]{64}$/);
+  if (Object.keys(images!).length > 1) assert.equal(new Set(Object.values(digests!)).size, new Set(Object.values(images!)).size, `each image its own digest: ${out}`);
+  const body = readFileSync(sh, "utf8");
+  assert.match(body, /image-capabilities\.ts" "\$sandbox" --seed --images "\$images" --digests "\$digests"/);
+  assert.match(body, /--images "\$images" --digests "\$digests" --cache "\$\(image_capabilities_cache\)" > >\(log_stamper/);
 });

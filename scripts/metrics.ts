@@ -1510,9 +1510,10 @@ function section8Of(c: Context, x: Section8Input): Section8Row[] {
     );
   }
 
-  // 3. The largest hub answer: one the hub cut at its bound (answer_too_large, in bytes), else the largest a seat's row sizes (answer_chars).
+  // 3. The largest hub answer: one the hub cut at its bound (answer_too_large, in bytes), else the largest a seat's row
+  // sizes (answer_chars, in characters). Each figure in its own unit: a character of UTF-8 text is one to four bytes.
   {
-    const unit = "bytes";
+    const unit = "bytes or characters";
     let cut: { bytes: number; fn: string; max: number } | null = null;
     let sized: { chars: number; tool: string } | null = null;
     for (const e of x.events) {
@@ -1526,9 +1527,9 @@ function section8Of(c: Context, x: Section8Input): Section8Row[] {
       !x.traced
         ? no(3, unit, TRACE_FILE, TRACE)
         : cut
-          ? yes(3, cut.bytes, unit, TRACE_FILE, `${cut.bytes} bytes (${cut.fn}, over the ${cut.max}-byte bound: kept whole, not sent); ${f.hub.answers_too_large} answer(s) over the bound`)
+          ? yes(3, cut.bytes, "bytes", TRACE_FILE, `${cut.bytes} bytes (${cut.fn}, over the ${cut.max}-byte bound: kept whole, not sent); ${f.hub.answers_too_large} answer(s) over the bound`)
           : sized
-            ? yes(3, sized.chars, unit, TRACE_FILE, `no answer went over the hub's bound (no answer_too_large row); the largest answer a seat's row sizes: ${sized.chars} characters (${sized.tool})`)
+            ? yes(3, sized.chars, "characters", TRACE_FILE, `no answer went over the hub's bound (no answer_too_large row); the largest answer a seat's row sizes: ${sized.chars} characters (${sized.tool})`)
             : no(3, unit, TRACE_FILE, "no answer_too_large row and no row that gives an answer's size (answer_chars: a job_run, job_status or tools call, or a run from before them)"),
     );
   }

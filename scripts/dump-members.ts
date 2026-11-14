@@ -18,7 +18,7 @@
  * dump, unless the operator excluded it, and says each dump with its size in
  * SWARM.md (kickoffDumpsNote).
  */
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -122,10 +122,26 @@ export function dumpsPost(generation: string, over: string, found: { total: numb
 /** The tools of a pack that read a dump by its structure (a minidump's streams, a memory image's profile). */
 export const DUMP_READERS = ["minidump_map", "mem_profile"] as const;
 
-/** The dump readers the given pack directories carry, by name, once each. */
-export function dumpReaders(packDirs: string[]): string[] {
+/**
+ * The dump readers the given pack directories carry, by name, once each; and, given the run's directory, those of its
+ * own tools/ that a pack seeded there (swarm.sh pack-add brings a pack into a running run that way, outside the pack
+ * directories the run started with). A seeded tool's manifest names its pack; a tool a seat forged under a reader's
+ * name names none, and is not one.
+ */
+export function dumpReaders(packDirs: string[], runDir?: string): string[] {
   const out: string[] = [];
   for (const pack of packDirs) for (const t of DUMP_READERS) if (existsSync(join(pack, "tools", t, "manifest.json")) && !out.includes(t)) out.push(t);
+  if (runDir) {
+    for (const t of DUMP_READERS) {
+      if (out.includes(t)) continue;
+      try {
+        const m = JSON.parse(readFileSync(join(runDir, "tools", t, "manifest.json"), "utf8")) as { pack?: unknown };
+        if (typeof m.pack === "string" && m.pack) out.push(t);
+      } catch {
+        // not there, or not a manifest: not a reader of this run
+      }
+    }
+  }
   return out;
 }
 

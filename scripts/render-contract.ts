@@ -297,17 +297,20 @@ function toolboxSection(sandbox: string): string {
     const req = get(tb, "requires", []) as Obj[];
     if (Array.isArray(req) && req.length) {
       const rows = ["The case requires these done; checked at kickoff where you run:", "", "| Capability | Met by | Use |", "| --- | --- | --- |"];
+      // The kickoff's check, as it found it: the contract is rendered once, before any program can be supplied
+      // (swarm.sh tool-supply takes a run that exists), so what a supply changes reaches the seats on the board.
       for (const r of req) {
-        // A program the operator supplied (scripts/supply-probe.ts) meets a capability once its known-answer test
-        // passed, and is named as supplied; one that failed or was not tested is said beside the capability. The
-        // program this file replaced knew no supply: a row without `supplied` reads as it did.
-        const by = (get(r, "by", []) as unknown[]).map((b) => `\`${pyStr(b)}\`${pyStr(b).startsWith("import:") ? " (supplied by the operator; its known-answer test passed in a worker job)" : ""}`).join(", ");
+        const by = (get(r, "by", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ");
         const failed = (get(r, "present_but_failed_probe", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ");
-        const sup = get(r, "supplied") as Obj | undefined;
-        const supWords = sup && typeof sup === "object" && get(r, "met") !== true ? (get(sup, "ok") === false ? `; supplied \`import:${pyStr(get(sup, "import"))}\` FAILED its known-answer test` : get(sup, "ok") === null ? `; supplied \`import:${pyStr(get(sup, "import"))}\` is NOT tested (${pyStr(get(sup, "untested", ""))}): its silence says nothing` : "") : "";
-        rows.push(`| ${pyStr(r.capability)} | ${get(r, "met") === true ? by : `not met${failed ? ` (${failed} is there and failed a test input)` : ` (none of ${(get(r, "wanted", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ")})`}${supWords}`} | ${pyStr(get(r, "use", ""))} |`);
+        rows.push(`| ${pyStr(r.capability)} | ${get(r, "met") === true ? by : `not met${failed ? ` (${failed} is there and failed a test input)` : ` (none of ${(get(r, "wanted", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ")})`}`} | ${pyStr(get(r, "use", ""))} |`);
       }
-      if (req.some((r) => get(r, "met") !== true)) rows.push("", "A capability not met is not a reason to stop at not determinable: a program the operator supplies runs in a job (`job_run` with `programs`), and asking for one is an acquisition ask.");
+      if (req.some((r) => get(r, "met") !== true)) {
+        rows.push(
+          "",
+          "A capability not met is not a reason to stop at not determinable: a program the operator supplies runs in a job (`job_run` with `programs`), and asking for one is an acquisition ask. " +
+            "This table is the kickoff's and is not updated: a program supplied after the start is said on the board (SUPPLIED PROGRAM TESTED, or NOT TESTED), with whether its known-answer test passed, and in `supplied-capabilities.json`.",
+        );
+      }
       section += `${rows.join("\n")}\n\n`;
     }
   }
@@ -608,7 +611,8 @@ function capabilitiesSection(sandbox: string): string {
       `${lines.length ? "This run's own result" : "The result"} is posted to everyone on the board as JOB IMAGE CAPABILITIES within ` +
         "minutes of the start, and written to `job-capabilities.json`" +
         (lines.length ? ", which then replaces the lines above." : "; it is not in yet.") +
-        " A capability that does not work in any image is not there: ask the operator for a program, or use a pack tool that does not need it.",
+        " A capability that does not work in any image is not there: ask the operator for a program, or use a pack tool that does not need it." +
+        " One NOT TESTED is not known either way: try it in a job before you say it is not there.",
       "",
     );
   }
