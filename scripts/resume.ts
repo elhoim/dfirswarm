@@ -193,7 +193,7 @@ export async function prepareResume(sandbox: string, o: { run: string; by: strin
       moved.push(`${n} (a kept disk) -> ${snaps.slice(snaps.lastIndexOf("/") + 1)}/earlier-${k}/${n}`);
     }
   }
-  await P.withTableLock(sandbox, async (held) => {
+  await P.withBudgetLock(sandbox, async (held) => {
     await held.assertOwned();
     await P.writeBudget(sandbox, next);
   });

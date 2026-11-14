@@ -654,16 +654,18 @@ export function withheldPaths(index: SensitiveIndex): Array<{ job: string; rel: 
  * cited (docs/adr/0016): a `job:<id>/<path>` by the file's own digest, so a
  * later job's byte-identical copy resolves to the job that wrote it first; a
  * bare `sha256:<hex>`; a `member:<gen>#<n>` through its generation. Built
- * once from the store: every job's status, and a map from each output
- * digest to the earliest job that wrote it (a cancelled producer wins over
- * a later copy, so its partial status is not lost).
+ * once from the store: every job's status, and a map from each digest a
+ * cancelled or stopped job wrote to the earliest such job (a partial
+ * producer wins over a later copy, so its partial status is not lost). Only
+ * a partial producer is told apart: a job's file whose bytes no partial job
+ * wrote is that job's, and a digest no partial job wrote is null.
  */
 export async function producerIndex(sandbox: string): Promise<{ producerOf: (ref: string) => { job: string; status: string } | null }> {
   const S = resolve(sandbox);
   const dir = join(S, "store", "jobs");
   const status = new Map<string, string>();
-  const fileDigest = new Map<string, string>(); // job/path (relative to out/) -> sha256
-  const digestJob = new Map<string, string>(); // sha256 -> job that wrote it
+  const fileDigest = new Map<string, string>(); // job/path (relative to out/) -> sha256, for bytes a partial job wrote
+  const digestJob = new Map<string, string>(); // sha256 -> the partial job that wrote it first
   const partial: string[] = [];
   const ids = (await readdir(dir).catch(() => [] as string[])).filter((n) => /^[a-z0-9-]{1,64}$/.test(n)).sort();
   for (const id of ids) {
@@ -671,15 +673,27 @@ export async function producerIndex(sandbox: string): Promise<{ producerOf: (ref
     if (j?.status) status.set(id, j.status);
     if (j?.status && (j.status === "cancelled" || j.status === "stopped")) partial.push(id);
   }
-  // A partial producer's digests first, so a later copy of the same bytes resolves to it.
-  const order = [...partial, ...ids.filter((id) => !partial.includes(id))];
-  for (const id of order) {
+  // Only a partial producer is told apart: its readers (partialOutputCites) ask whether a citation's bytes are a
+  // cancelled or stopped job's. Its files are read first; another job's manifest is read only when there is a partial
+  // job, and only its files that hold a partial job's bytes are kept (Plan 2, A15: every manifest of a store of 200,000
+  // objects held whole, at each reading of the finish, was most of a hub's heap). A citation of any other job's output
+  // is that job.
+  for (const id of partial) {
     const m = await readJson<{ files?: Array<{ path?: string; sha256?: string }> }>(join(dir, id, "manifest.json"));
     for (const f of m?.files ?? []) {
       const sha = String(f.sha256 ?? "");
       if (/^[0-9a-f]{64}$/.test(sha)) {
         fileDigest.set(`${id}/${String(f.path ?? "")}`, sha);
         if (!digestJob.has(sha)) digestJob.set(sha, id);
+      }
+    }
+  }
+  if (digestJob.size) {
+    for (const id of ids.filter((x) => !partial.includes(x))) {
+      const m = await readJson<{ files?: Array<{ path?: string; sha256?: string }> }>(join(dir, id, "manifest.json"));
+      for (const f of m?.files ?? []) {
+        const sha = String(f.sha256 ?? "");
+        if (digestJob.has(sha)) fileDigest.set(`${id}/${String(f.path ?? "")}`, sha);
       }
     }
   }

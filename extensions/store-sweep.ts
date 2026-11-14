@@ -1193,6 +1193,40 @@ const sweepFiles = new Map<string, SweepFile>();
 const sweepLoads = new Map<string, Promise<SweepFile>>();
 const emptySweepFile = (): SweepFile => ({ cached: false, dev: 0, ino: 0, size: 0, mtimeMs: 0, parsedTo: 0, lines: [], head: "genesis", legacy: new Map() });
 
+/** The bytes of each held line's written form, and of the file of hits read back into it (hydrateHits): measured once per line. */
+const heldLineBytes = new WeakMap<object, number>();
+const hydratedBytes = new WeakMap<object, number>();
+
+/**
+ * What this process holds of the store sweeps (the hub's health line names
+ * it, Plan 2 G2): the runs whose sweeps it keeps, their lines, the bytes of
+ * the lines as written, and the rows and bytes of the lists of hits read
+ * back from their files.
+ */
+export function sweepsHeld(): { runs: number; lines: number; bytes: number; hit_rows: number; hit_bytes: number } {
+  let lines = 0;
+  let bytes = 0;
+  let hitRows = 0;
+  let hitBytes = 0;
+  for (const f of sweepFiles.values()) {
+    for (const l of f.lines) {
+      lines += 1;
+      let b = heldLineBytes.get(l);
+      if (b === undefined) {
+        b = Buffer.byteLength(JSON.stringify(writtenForms.get(l) ?? l));
+        heldLineBytes.set(l, b);
+      }
+      bytes += b;
+      const h = hydratedBytes.get(l);
+      if (h !== undefined) {
+        hitBytes += h;
+        hitRows += listsOf(l).reduce((n, [, xs]) => n + xs.length, 0);
+      }
+    }
+  }
+  return { runs: sweepFiles.size, lines, bytes, hit_rows: hitRows, hit_bytes: hitBytes };
+}
+
 /** The lines between two offsets of the file, each parsed as it completes; a torn line is the chain check's to name. */
 async function parseSweepRange(file: string, start: number, end: number, into: SweepFile): Promise<void> {
   if (end <= start) return;
@@ -1232,9 +1266,38 @@ async function parseSweepRange(file: string, start: number, end: number, into: S
   if (parts.length) take(Buffer.concat(parts), lineAt, false);
 }
 
-/** Lines as written, held as this process holds them: what each found whole again where its line names a file of hits (hydrateHits). */
-async function hydrateLines(sandboxRoot: string, lines: AnySweepLine[]): Promise<void> {
-  for (let i = 0; i < lines.length; i++) lines[i] = await hydrateHits(sandboxRoot, lines[i]!);
+/**
+ * Lines as written, held as this process holds them (Plan 2, A3): the
+ * latest line of each coverage record's sweep, which is what every reader
+ * of a record's sweep takes (sweepOf, the gate, the next pass), with what it
+ * found whole again where its line names a file of hits (hydrateHits); a
+ * line a later one of the same record replaced is held as written, its few
+ * and its summary, and let go of if it was held whole. A record's passes
+ * and its reading again under new rules each wrote a line with the union so
+ * far, and each was read back whole: a record's hits were in the heap as
+ * many times as it had lines. A reverse sweep's lines are each a pass of
+ * their own, and are held whole.
+ */
+async function settleHeld(sandboxRoot: string, lines: AnySweepLine[]): Promise<void> {
+  const latest = new Map<string, number>();
+  lines.forEach((l, i) => {
+    if (l.v === 1) latest.set((l as SweepRecord).target, i);
+  });
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    const current = l.v !== 1 || latest.get((l as SweepRecord).target) === i;
+    const written = (writtenForms.get(l) as AnySweepLine | undefined) ?? l;
+    const named = Boolean((written as { hits_all?: HitsSummary }).hits_all?.file);
+    if (current) {
+      if (!writtenForms.has(l) || heldAsWritten.has(l)) lines[i] = await hydrateHits(sandboxRoot, written);
+    } else if (!named) {
+      if (!writtenForms.has(l)) writtenForms.set(l, l);
+    } else if (lines[i] !== written || !heldAsWritten.has(written)) {
+      writtenForms.set(written, written);
+      heldAsWritten.add(written);
+      lines[i] = written;
+    }
+  }
 }
 
 /** The sweeps file, read once and kept while it does not change under this process. */
@@ -1261,7 +1324,7 @@ function loadSweepFile(sandboxRoot: string): Promise<SweepFile> {
           // a torn line is the chain check's to name
         }
       }
-      await hydrateLines(sandboxRoot, out.lines);
+      await settleHeld(sandboxRoot, out.lines);
       return out;
     }
     const had = sweepFiles.get(key);
@@ -1271,9 +1334,9 @@ function loadSweepFile(sandboxRoot: string): Promise<SweepFile> {
       // Grown: the lines after the last one read, when the first of them continues the chain's head.
       const tail = emptySweepFile();
       await parseSweepRange(file, had.parsedTo, st.size, tail);
-      await hydrateLines(sandboxRoot, tail.lines);
       if (tail.lines.length && tail.lines[0]!.prev === had.head) {
         had.lines.push(...tail.lines);
+        await settleHeld(sandboxRoot, had.lines);
         for (const [h, at] of tail.legacy) had.legacy.set(h, at);
         Object.assign(had, { head: tail.head, size: st.size, mtimeMs: st.mtimeMs, parsedTo: tail.parsedTo, v1: undefined, v2: undefined });
         return had;
@@ -1281,7 +1344,7 @@ function loadSweepFile(sandboxRoot: string): Promise<SweepFile> {
     }
     const fresh = emptySweepFile();
     await parseSweepRange(file, 0, st.size, fresh);
-    await hydrateLines(sandboxRoot, fresh.lines);
+    await settleHeld(sandboxRoot, fresh.lines);
     Object.assign(fresh, { cached: true, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
     sweepFiles.set(key, fresh);
     return fresh;
@@ -1330,6 +1393,8 @@ async function appendSweepLines<T extends AnySweepLine>(sandboxRoot: string, mak
     const st = await stat(file).catch(() => null);
     if (state.cached && sweepFiles.get(resolve(sandboxRoot)) === state && st && st.ino === state.ino && state.parsedTo === state.size && st.size === state.size + Buffer.byteLength(body)) {
       state.lines.push(...out);
+      // The lines these replace for their records are let go of (settleHeld): nothing is read here, the new ones are held whole.
+      await settleHeld(sandboxRoot, state.lines);
       Object.assign(state, { head: prev, size: st.size, mtimeMs: st.mtimeMs, parsedTo: st.size, v1: undefined, v2: undefined });
     } else sweepFiles.delete(resolve(sandboxRoot));
     return out;
@@ -1510,6 +1575,18 @@ type Unchained<L> = Omit<L, "prev" | "hash">;
 const writtenForms = new WeakMap<object, object>();
 /** Lines held whose file of hits is missing or not the one the line names: their lists are the line's few and a row that says so. */
 const hitsUnreadable = new WeakSet<object>();
+/**
+ * How many rows of one line's lists a process reads back into its heap at
+ * most (SWARM_SWEEP_HITS_HELD): 500,000, about 90 MB. Past it the line is
+ * held as written, with a row that names its file and holds the gate.
+ */
+export function sweepHitsHeldMax(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_SWEEP_HITS_HELD);
+  return Number.isInteger(n) && n > 0 ? n : 500_000;
+}
+
+/** Lines held as written though they name a file of hits: replaced by a later line of the same record (settleHeld). */
+const heldAsWritten = new WeakSet<object>();
 
 function listsOf(line: object): Array<[HitListName, SweepHit[]]> {
   const l = line as Record<string, unknown>;
@@ -1518,7 +1595,7 @@ function listsOf(line: object): Array<[HitListName, SweepHit[]]> {
 
 /** Whether a line this process holds has what its sweep found whole: false when the file of hits its line names could not be read as named (its lists are then the line's few, and a row naming the file). */
 export function hitsReadWhole(line: object): boolean {
-  return !hitsUnreadable.has(line);
+  return !hitsUnreadable.has(line) && !heldAsWritten.has(line);
 }
 
 /** A hit made short for a line's few: eight of its other names, four of its makers with eight reads each. */
@@ -1662,21 +1739,42 @@ export async function hydrateHits<L extends object>(root: string, written: L): P
   const got: Record<HitListName, SweepHit[]> = { hits: [], named_hits: [], echoes: [] };
   const name = SWEEP_SIDE_FILE.exec(all.file.path);
   let whole = Boolean(name && name[1] === "hits" && name[2] === all.file.sha256);
+  let fileBytes = 0;
+  // Past what a process holds of one line's lists the file is not read: the line's few and a row naming the file, which
+  // holds the gate as a hit does. So many hits are each a hit nobody has examined, and the gate would hold for them anyway.
+  const overHeld = whole && all.file.rows > sweepHitsHeldMax();
+  if (overHeld) whole = false;
   if (whole) {
     try {
       const hash = createHash("sha256");
       let rows = 0;
+      let read = 0;
       let rest = Buffer.alloc(0);
+      // A list's terms are few and its encodings fewer: each row shares one string and one array of them, not a copy of its own.
+      const terms = new Map<string, string>();
+      const encodings = new Map<string, SweepHit["encodings"]>();
       const take = (b: Buffer) => {
         if (!b.length) return;
         const { list, ...h } = JSON.parse(b.toString("utf8")) as SweepHit & { list: HitListName };
         if (!HIT_LISTS.includes(list)) throw new Error(`a row of no list (${String(list)})`);
+        if (typeof h.term === "string") {
+          const t = terms.get(h.term);
+          if (t === undefined) terms.set(h.term, h.term);
+          else h.term = t;
+        }
+        if (Array.isArray(h.encodings)) {
+          const k = h.encodings.join(",");
+          const e = encodings.get(k);
+          if (e === undefined) encodings.set(k, h.encodings);
+          else h.encodings = e;
+        }
         got[list].push(h);
         rows += 1;
       };
       for await (const raw of createReadStream(join(root, all.file.path), { highWaterMark: 1024 * 1024 })) {
         const chunk = raw as Buffer;
         hash.update(chunk);
+        read += chunk.length;
         const buf = rest.length ? Buffer.concat([rest, chunk]) : chunk;
         let from = 0;
         for (let nl = buf.indexOf(0x0a, from); nl >= 0; nl = buf.indexOf(0x0a, from)) {
@@ -1687,20 +1785,25 @@ export async function hydrateHits<L extends object>(root: string, written: L): P
       }
       take(rest);
       whole = rows === all.file.rows && hash.digest("hex") === all.file.sha256;
+      fileBytes = read;
     } catch {
       whole = false;
     }
   }
   let held: L;
-  if (whole) held = { ...written, ...Object.fromEntries(listsOf(written).map(([k]) => [k, got[k]])) };
+  if (whole) {
+    held = { ...written, ...Object.fromEntries(listsOf(written).map(([k]) => [k, got[k]])) };
+    hydratedBytes.set(held, fileBytes);
+  }
   else {
     const records = (written as { records?: Array<{ seq: number }> }).records;
     const terms = (written as { terms?: string[] }).terms ?? [];
     const lists = listsOf(written).map(([k, xs]): [HitListName, SweepHit[]] => {
       const missing = (all.counts?.[k] ?? 0) - xs.length;
       if (missing <= 0) return [k, xs];
+      const what = `${missing} of the line's ${all.counts[k]} ${k === "hits" ? "hit(s)" : k === "named_hits" ? "named hit(s)" : "echo(es)"} not read`;
       const row: SweepHit & { bears_on?: number[] } = {
-        ref: `${all.file.path} (missing, or not the list its line names: ${missing} of the line's ${all.counts[k]} ${k === "hits" ? "hit(s)" : k === "named_hits" ? "named hit(s)" : "echo(es)"} not read)`,
+        ref: overHeld ? `${all.file.path} (${all.file.rows} rows, past the ${sweepHitsHeldMax()} a process holds of one line, SWARM_SWEEP_HITS_HELD: ${what}; the file holds each)` : `${all.file.path} (missing, or not the list its line names: ${what})`,
         term: terms[0] ?? "",
         count: 0,
         first_offset: 0,

@@ -75,8 +75,8 @@
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import v8 from "node:v8";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -96,8 +96,9 @@ import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
 import { commandNames, freshCoverage, libraryHint, shortHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
 import { boundRpcAnswer } from "../extensions/reply-bound.ts";
+import { sweepsHeld } from "../extensions/store-sweep.ts";
 import { jobsListing, storeFind } from "./store-find.ts";
-import { loopMonitor, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
+import { diskSpeed, healthEveryMs, loopMonitor, memoryPressure, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
 import { sensitiveIndex } from "./output-hygiene.ts";
 import { ACCESS_RULES, apiPageHit, classifyTraceRow, type AccessHit } from "./sensitive-access.ts";
 
@@ -1423,32 +1424,12 @@ export class Hub {
     this.memoryTimer.unref();
     // Each minute, what the hub and the host look like, on the trace (hub-health.ts); and one heap snapshot while it can still be written.
     const loop = loopMonitor();
+    let sampling = false;
     this.healthTimer = setInterval(() => {
-      const h = sampleHealth(loop.read(), { transfers: this.transfers.size, seats_linked: [...this.status.values()].filter((a) => a.connected).length, queued_prompts: [...this.queued.values()].reduce((n, q) => n + q.length, 0), jobs: this.jobService?.jobs.size ?? 0 });
-      void this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
-      if (snapshotDue(h, this.snapshotTaken)) {
-        this.snapshotTaken = true;
-        try {
-          const file = v8.writeHeapSnapshot(join(this.cfg.dir, `Heap.at-${Math.round(snapshotAt() * 100)}pct.${process.pid}.heapsnapshot`));
-          void this.event("hub_heap_snapshot", {}, { ok: true, file, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb }).catch(() => undefined);
-          this.log(`memory: heap snapshot written at ${h.heap_used_mb} of ${h.heap_limit_mb} MB: ${file}`);
-        } catch (err) {
-          void this.event("hub_heap_snapshot", {}, { ok: false, reason: (err as Error).message }).catch(() => undefined);
-        }
-      }
-      // Past the recycle line, at a quiet moment, a supervised hub ends so that its keeper starts it again with --resume.
-      const busyJobs = [...(this.jobService?.jobs.values() ?? [])].filter((j) => j.state === "running" || j.state === "fenced" || j.state === "finished").length;
-      const calls = [...this.inFlight.values()].reduce((a, n) => a + n, 0);
-      const recycle = recycleDue(h, { supervised: process.env.SWARM_HUB_SUPERVISED === "1", callsInFlight: calls, jobsBusy: busyJobs });
-      if (recycle.due && !this.recycling) {
-        this.recycling = true;
-        this.log(`memory: ending for a restart by the keeper: ${recycle.why}`);
-        void this.event("hub_recycled", {}, { ok: true, why: recycle.why, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb })
-          .catch(() => undefined)
-          .then(() => this.flushRefusals().catch(() => undefined))
-          .then(() => process.exit(75));
-      }
-    }, 60_000);
+      if (sampling) return;
+      sampling = true;
+      void this.healthTick(loop).finally(() => (sampling = false));
+    }, healthEveryMs());
     this.healthTimer.unref();
     // A Unix socket path the kernel takes is 103 bytes and its NUL (104 on
     // macOS): past it `listen` fails with a bare EINVAL, which said nothing
@@ -2081,11 +2062,9 @@ export class Hub {
           try {
             const fn = String(msg.fn ?? "");
             const raw = await this.callOnce(agent, fn, args, controller.signal, msg.rid);
-            // The wall behind every bounded source (extensions/reply-bound.ts): an answer past it is kept whole and named, never sent.
-            const { answer: result, cut } = await boundRpcAnswer(fn, raw, async (text) => {
-              const kept = await P.keepToolOutput(this.cfg.sandbox, P.toolOutputRel("harness", `answer-${fn}`, "text"), text);
-              return kept.write_error ? { write_error: kept.write_error } : { path: kept.path, bytes: kept.bytes, sha256: kept.sha256 };
-            });
+            // The wall behind every bounded source (extensions/reply-bound.ts): an answer past it is cut to the bound, and the
+            // whole kept among the seat's own kept outputs, which its VM reads (tool-output/<seat>/), and named.
+            const { answer: result, cut } = await boundRpcAnswer(fn, raw, (text) => keepAnswer(this.cfg.sandbox, agent, fn, text));
             if (cut) void this.refused(agent, "answer_too_large", `${cut.fn}: ${cut.bytes} bytes over ${cut.max}${cut.kept ? `, kept at ${cut.kept}` : ""}`);
             this.replyRpc(agent, socket, id, result);
           } finally {
@@ -2670,6 +2649,70 @@ export class Hub {
 
   statusSnapshot(): Record<string, AgentState> {
     return Object.fromEntries(this.status);
+  }
+
+  /**
+   * The sizes of what the hub holds (Plan 2, G2): each large structure's
+   * count and, where it holds bytes, its bytes. A health line that counted
+   * only transfers and jobs could not say which structure filled a heap.
+   */
+  holdsNow(): Record<string, number> {
+    let transferBytes = 0;
+    for (const t of this.transfers.values()) transferBytes += t.data?.length ?? t.got;
+    let promptBytes = 0;
+    let prompts = 0;
+    for (const q of this.queued.values()) {
+      prompts += q.length;
+      for (const p of q) promptBytes += Buffer.byteLength(String((p as { text?: unknown }).text ?? ""));
+    }
+    const sweeps = sweepsHeld();
+    const kept = P.appendOnlyHeldSize();
+    return {
+      seats_linked: [...this.status.values()].filter((a) => a.connected).length,
+      calls_in_flight: [...this.inFlight.values()].reduce((a, n) => a + n, 0),
+      call_args_bytes: [...this.held.values()].reduce((a, n) => a + n, 0),
+      transfers: this.transfers.size,
+      transfers_bytes: transferBytes,
+      replies_kept: this.replies.size,
+      queued_prompts: prompts,
+      queued_prompts_bytes: promptBytes,
+      sweeps_lines: sweeps.lines,
+      sweeps_bytes: sweeps.bytes,
+      sweeps_hit_rows: sweeps.hit_rows,
+      sweeps_hit_bytes: sweeps.hit_bytes,
+      ledger_kept_bytes: kept.bytes,
+      jobs: this.jobService?.jobs.size ?? 0,
+    };
+  }
+
+  /** One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at a quiet moment. */
+  async healthTick(loop: { read(): { p50: number; p99: number; max: number } }): Promise<void> {
+    const [pressure, disk] = await Promise.all([memoryPressure().catch(() => undefined), diskSpeed(this.cfg.dir).catch(() => undefined)]);
+    const h = sampleHealth(loop.read(), this.holdsNow(), { pressure, disk });
+    await this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
+    if (snapshotDue(h, this.snapshotTaken)) {
+      this.snapshotTaken = true;
+      try {
+        const file = v8.writeHeapSnapshot(join(this.cfg.dir, `Heap.at-${Math.round(snapshotAt() * 100)}pct.${process.pid}.heapsnapshot`));
+        const bytes = statSync(file).size;
+        await this.event("hub_heap_snapshot", {}, { ok: true, file, bytes, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb }).catch(() => undefined);
+        this.log(`memory: heap snapshot written at ${h.heap_used_mb} of ${h.heap_limit_mb} MB: ${file} (${bytes} bytes)`);
+      } catch (err) {
+        await this.event("hub_heap_snapshot", {}, { ok: false, reason: (err as Error).message }).catch(() => undefined);
+      }
+    }
+    // Past the recycle line, at a quiet moment, a supervised hub ends so that its keeper starts it again with --resume.
+    const busyJobs = [...(this.jobService?.jobs.values() ?? [])].filter((j) => j.state === "running" || j.state === "fenced" || j.state === "finished").length;
+    const calls = [...this.inFlight.values()].reduce((a, n) => a + n, 0);
+    const recycle = recycleDue(h, { supervised: process.env.SWARM_HUB_SUPERVISED === "1", callsInFlight: calls, jobsBusy: busyJobs });
+    if (recycle.due && !this.recycling) {
+      this.recycling = true;
+      this.log(`memory: ending for a restart by the keeper: ${recycle.why}`);
+      void this.event("hub_recycled", {}, { ok: true, why: recycle.why, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb })
+        .catch(() => undefined)
+        .then(() => this.flushRefusals().catch(() => undefined))
+        .then(() => process.exit(75));
+    }
   }
 
   /** Said once each time the heap passes three quarters of its limit, and again after it has gone back under two thirds. */
@@ -3420,7 +3463,68 @@ export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number 
   return Number.isInteger(n) && n > 0 ? n : 14400;
 }
 
+/**
+ * An answer too large to send, kept whole for the seat it was for, under its
+ * own kept outputs (tool-output/<seat>/), which its VM mounts: a name with a
+ * random part, created only if nothing is there (a seat that put a link in
+ * its directory does not have the hub write through it).
+ */
+export async function keepAnswer(sandbox: string, agent: string, fn: string, text: string): Promise<{ path: string; bytes: number; sha256: string } | { write_error: string }> {
+  const rel = P.toolOutputRel(agent, `answer-${fn}`, "text");
+  const bytes = Buffer.from(text, "utf8");
+  try {
+    await mkdir(dirname(join(sandbox, rel)), { recursive: true });
+    await writeFile(join(sandbox, rel), bytes, { flag: "wx", mode: 0o644 });
+    return { path: rel, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } catch (err) {
+    return { write_error: (err as Error).message };
+  }
+}
+
+/**
+ * Each line the hub writes to its log (traces/vm-hub.log takes its stdout and
+ * stderr: its own lines, Node's warnings, an error's stack) begins with when,
+ * in UTC, as idle-nudge's do under SWARM_LOG_TS (Plan 2, 0.13): the log of the
+ * runs s17fdfe and s5d814f could not be laid beside the trace. A chunk that
+ * ends mid-line leaves the next chunk to go on with it, unstamped. What the
+ * runtime writes past these streams (the text of a fatal out-of-memory) is
+ * not stamped. Returns a function that puts the stream back.
+ */
+export function stampLines(stream: { write: (...a: never[]) => boolean }, now: () => string = () => new Date().toISOString()): () => void {
+  const write = stream.write;
+  let atStart = true;
+  const stamped = function (this: unknown, chunk: unknown, ...rest: unknown[]): boolean {
+    const text = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? Buffer.from(chunk).toString(typeof rest[0] === "string" ? (rest[0] as BufferEncoding) : "utf8") : String(chunk);
+    let out = "";
+    for (let i = 0; i < text.length; ) {
+      if (atStart) {
+        out += `${now()} `;
+        atStart = false;
+      }
+      const nl = text.indexOf("\n", i);
+      if (nl < 0) {
+        out += text.slice(i);
+        break;
+      }
+      out += text.slice(i, nl + 1);
+      i = nl + 1;
+      atStart = true;
+    }
+    const tail = rest.filter((x) => typeof x === "function");
+    return (write as (...a: unknown[]) => boolean).call(stream, out, "utf8", ...tail);
+  };
+  stream.write = stamped as unknown as typeof stream.write;
+  return () => {
+    stream.write = write;
+  };
+}
+
 async function main(): Promise<void> {
+  // SWARM_LOG_TS=0 leaves the lines as they are.
+  if (process.env.SWARM_LOG_TS !== "0") {
+    stampLines(process.stdout);
+    stampLines(process.stderr);
+  }
   const args = process.argv.slice(2);
   const opt = (name: string) => {
     const i = args.indexOf(name);

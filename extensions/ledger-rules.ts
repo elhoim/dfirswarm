@@ -53,7 +53,7 @@ function boundedHits<T>(items: readonly T[], words: (x: T) => string, holder: st
   return said.join("; ");
 }
 import type { LedgerAlternative, LedgerEdge, LedgerEntry, LedgerKind, LedgerLocator, LedgerMethod, LedgerQualify, LedgerRel, SwarmContext } from "./protocol-core.ts";
-import { ANSWER_ONLY_REL_KINDS, DELTA_REL_KINDS, LEDGER_ACT_MAX_CHARS, LEDGER_ALTERNATIVE_STATUS, LEDGER_ANSWER_ID, LEDGER_ANSWER_RESULTS, LEDGER_ATTESTATIONS, LEDGER_BASIS, LEDGER_BECAUSE_MAX_CHARS, LEDGER_CLOCK_MAX_CHARS, LEDGER_COMPLETION, LEDGER_CONFIDENCE, LEDGER_DIR, LEDGER_DISPUTES, LEDGER_ENTRIES, LEDGER_EVIDENCE_MAX_CHARS, LEDGER_HYPOTHESIS_STATUS, LEDGER_INDICATES_MAX_CHARS, LEDGER_KINDS, LEDGER_LIMITATION_REASONS, LEDGER_LOCATOR_MAX_CHARS, LEDGER_MAX_ALTERNATIVES, LEDGER_MAX_ANSWERS, LEDGER_MAX_CITATIONS, LEDGER_MAX_ENTRIES, LEDGER_MAX_LOCATORS, LEDGER_MAX_QUALIFIES, LEDGER_MAX_REFS, LEDGER_MAX_REL, LEDGER_MD, LEDGER_PRECISION, LEDGER_REASONING_MAX_CHARS, LEDGER_REF_MAX_CHARS, LEDGER_REL_KINDS, LEDGER_SECTION_SPECIAL, LEDGER_SOURCE_CLASSES, LEDGER_SOURCE_MAX_CHARS, LEDGER_SUBJECT_MAX_CHARS, LEDGER_SUBJECT_TYPES, LEDGER_VALUE_MAX_CHARS, LEDGER_VERSION, LEDGER_WHY_MAX_CHARS, REGISTER_LOCK, canonicalValue, ledgerContent, ledgerHash, sha256Hex, traceHarnessEntry, withNamedLock, withTableLock } from "./protocol-core.ts";
+import { ANSWER_ONLY_REL_KINDS, DELTA_REL_KINDS, LEDGER_ACT_MAX_CHARS, LEDGER_ALTERNATIVE_STATUS, LEDGER_ANSWER_ID, LEDGER_ANSWER_RESULTS, LEDGER_ATTESTATIONS, LEDGER_BASIS, LEDGER_BECAUSE_MAX_CHARS, LEDGER_CLOCK_MAX_CHARS, LEDGER_COMPLETION, LEDGER_CONFIDENCE, LEDGER_DIR, LEDGER_DISPUTES, LEDGER_ENTRIES, LEDGER_EVIDENCE_MAX_CHARS, LEDGER_HYPOTHESIS_STATUS, LEDGER_INDICATES_MAX_CHARS, LEDGER_KINDS, LEDGER_LIMITATION_REASONS, LEDGER_LOCATOR_MAX_CHARS, LEDGER_MAX_ALTERNATIVES, LEDGER_MAX_ANSWERS, LEDGER_MAX_CITATIONS, LEDGER_MAX_ENTRIES, LEDGER_MAX_LOCATORS, LEDGER_MAX_QUALIFIES, LEDGER_MAX_REFS, LEDGER_MAX_REL, LEDGER_MD, LEDGER_PRECISION, LEDGER_REASONING_MAX_CHARS, LEDGER_REF_MAX_CHARS, LEDGER_REL_KINDS, LEDGER_SECTION_SPECIAL, LEDGER_SOURCE_CLASSES, LEDGER_SOURCE_MAX_CHARS, LEDGER_SUBJECT_MAX_CHARS, LEDGER_SUBJECT_TYPES, LEDGER_VALUE_MAX_CHARS, LEDGER_VERSION, LEDGER_WHY_MAX_CHARS, REGISTER_LOCK, canonicalValue, ledgerContent, ledgerHash, readAppendOnlyText, sha256Hex, traceHarnessEntry, withLedgerLock, withNamedLock, withTableLock } from "./protocol-core.ts";
 
 export type LedgerInput = {
   kind: string;
@@ -1021,7 +1021,7 @@ export function normalizeTs(raw: string | undefined): { ok: true; ts?: string; r
  * lines as written.
  */
 export async function readLedger(sandboxRoot: string, opts: { raw?: boolean } = {}): Promise<LedgerEntry[]> {
-  const text = await readFile(join(sandboxRoot, LEDGER_ENTRIES), "utf8").catch(() => "");
+  const text = await readAppendOnlyText(join(sandboxRoot, LEDGER_ENTRIES));
   const out: LedgerEntry[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -2481,7 +2481,7 @@ export function attestationHash(a: LedgerAttestation, prev: string): string {
 }
 
 export async function readAttestations(sandboxRoot: string): Promise<LedgerAttestation[]> {
-  const text = await readFile(join(sandboxRoot, LEDGER_ATTESTATIONS), "utf8").catch(() => "");
+  const text = await readAppendOnlyText(join(sandboxRoot, LEDGER_ATTESTATIONS));
   const out: LedgerAttestation[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -2630,7 +2630,8 @@ function renderOnceLetGo(held: object): void {
  */
 async function withTableLockRendered<T>(sandboxRoot: string, fn: (held: Parameters<Parameters<typeof withTableLock>[1]>[0]) => Promise<T>): Promise<T> {
   let mine: object | null = null;
-  const result = await withTableLock(sandboxRoot, (held) => {
+  // The ledger's own lock (protocol-core.ts withLedgerLock): a record waits for records, not for the board or the budget.
+  const result = await withLedgerLock(sandboxRoot, (held) => {
     // This call's own handle on the lock: what it marks is its own.
     const own = { ...held };
     mine = own;
@@ -3085,7 +3086,7 @@ export function disputeHash(d: LedgerDispute, prev: string): string {
 }
 
 export async function readDisputes(sandboxRoot: string): Promise<LedgerDispute[]> {
-  const text = await readFile(join(sandboxRoot, LEDGER_DISPUTES), "utf8").catch(() => "");
+  const text = await readAppendOnlyText(join(sandboxRoot, LEDGER_DISPUTES));
   const out: LedgerDispute[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
