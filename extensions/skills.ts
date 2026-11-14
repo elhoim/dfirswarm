@@ -724,6 +724,8 @@ export type CardNote = {
   examples: Map<string, Array<Record<string, unknown>>>;
   /** Words of its id, title and when line: what a lead about its subject shares with it. */
   about: Set<string>;
+  /** Words of its whole text (title, when line, body, card): what tells a word common to a tool's notes from one of its own. */
+  words: Set<string>;
 };
 export type CardIndex = { notes: CardNote[]; byTool: Map<string, CardNote[]>; byProgram: Map<string, CardNote[]> };
 
@@ -748,6 +750,7 @@ export async function cardIndex(packs: readonly PackIndex[]): Promise<CardIndex>
         hand: Boolean(file.card),
         examples: cardExamples(card, file.tools),
         about: new Set(cardWords(`${entry.id.replace(/[/_-]/g, " ")} ${file.title} ${file.when}`)),
+        words: new Set(cardWords(`${file.title} ${file.when} ${file.body} ${card}`)),
       });
     }
   }
@@ -781,10 +784,14 @@ const same = (a: unknown, b: unknown): boolean => {
 /** How a call and a note's card agree: the pairs it gives as the card writes them, its words in the card's forms, and the lead's in the note's subject. */
 type Agreement = { pairs: string[]; words: string[]; lead: string[] };
 
-function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<string>, leadWords: Set<string>): Agreement | null {
+/** A value the card itself writes as one to give ("try \"hidden\" and \"backup\" separately"): a call that gives it is not another kind. */
+const cardNamesValue = (card: string, v: unknown): boolean => kindValue(v) && new RegExp(`"${escapeRe(v)}"`, "i").test(card);
+
+function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<string>, leadWords: Set<string>, common: (w: string) => boolean): Agreement | null {
   const forms = call.tool ? (note.examples.get(name) ?? []) : [];
-  // A form the call contradicts (it gives another value of a kind the form names) is not the call's; a note whose every form is contradicted is not either.
-  const kept = forms.filter((f) => !Object.entries(f).some(([k, v]) => kindValue(v) && call.args[k] !== undefined && !same(call.args[k], v)));
+  // A form the call contradicts (it gives another value of a kind the form names, and one the card does not name) is not
+  // the call's; a note whose every form is contradicted is not either.
+  const kept = forms.filter((f) => !Object.entries(f).some(([k, v]) => kindValue(v) && call.args[k] !== undefined && !same(call.args[k], v) && !cardNamesValue(note.card, call.args[k])));
   if (forms.length && !kept.length) return null;
   const pairs = new Set<string>();
   const words = new Set<string>();
@@ -799,7 +806,9 @@ function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<
       const formWords = cardWords(stringsOf(v).join(" "));
       const given = new Set(cardWords(stringsOf(call.args[k]).join(" ")));
       const shared = formWords.filter((w) => given.has(w));
-      for (const w of shared) agreed.add(w);
+      // Only a word of the form's own: a hive's name, Microsoft, CurrentVersion, ControlSet00n are in the keys of many
+      // notes of the tool and tell none of them apart.
+      for (const w of shared) if (!common(w)) agreed.add(w);
       if (!shared.length && formWords.length && given.size && typeof v === "string" && /^<[^<>\s]+>$/.test(v)) other = true;
     }
     if (!other) for (const w of agreed) words.add(w);
@@ -810,18 +819,38 @@ function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<
 }
 
 /**
+ * The words common to the notes that name a tool: a word more than a quarter of them hold (and at least three) in their
+ * title, when line, body or card is a path segment or a term of the tool's whole domain (a hive's name, Microsoft,
+ * Windows, CurrentVersion, ControlSet00n, Control, Software for regkv), not of one note's form.
+ */
+export function commonWords(notes: readonly CardNote[]): (w: string) => boolean {
+  const known = commonCache.get(notes);
+  if (known) return known;
+  const bound = Math.max(2, notes.length / 4);
+  const df = new Map<string, number>();
+  for (const n of notes) for (const w of n.words ?? []) df.set(w, (df.get(w) ?? 0) + 1);
+  const common = (w: string) => (df.get(w) ?? 0) > bound;
+  commonCache.set(notes, common);
+  return common;
+}
+/** A tool's notes are one array of the card index for the run: their common words are counted once. */
+const commonCache = new WeakMap<readonly CardNote[], (w: string) => boolean>();
+
+/**
  * The note a call matches, among the notes that name its tool (or the program its command runs): the call gives a value
- * a note's card writes for that tool (3 a pair), a word of its arguments that the card's forms hold (2 a word), or works
- * a lead whose words the note's subject holds (1 a word). What most of the notes share tells none apart: a pair or a word
- * counts only when at most half of them have it. The note matches with 2 or more, strictly more than any other. `fit` is
- * every note the call does not contradict (a provider another than the one a note's every form names).
+ * a note's card writes for that tool (3 a pair), a word of its arguments that the card's forms hold and that is the
+ * form's own, not common to the tool's notes (commonWords; 2 a word), or works a lead whose words the note's subject
+ * holds (1 a word). What most of the notes share tells none apart: a pair or a word counts only when at most half of them
+ * have it. The note matches with 2 or more, strictly more than any other. `fit` is every note the call does not
+ * contradict (a provider another than the one a note's every form names, and its card does not name).
  */
 export function matchCard(call: CardCall, name: string, notes: readonly CardNote[], leadText = ""): { best: CardNote | null; score: number; by: "args" | "lead" | null; fit: CardNote[] } {
   const callWords = new Set(cardWords(call.tool ? stringsOf(call.args).join(" ") : call.text));
   const leadWords = new Set(cardWords(leadText));
+  const common = commonWords(notes);
   const rows: Array<{ note: CardNote; a: Agreement }> = [];
   for (const note of notes) {
-    const a = agreement(note, call, name, callWords, leadWords);
+    const a = agreement(note, call, name, callWords, leadWords, common);
     if (a) rows.push({ note, a });
   }
   const fit = rows.map((r) => r.note);
@@ -853,8 +882,9 @@ export type CardChoice =
 /**
  * The card a call brings, by what the seat has seen (`ever`: `note:<key>`, `tool:<name>`) and holds. The note the call
  * matches (matchCard), if the seat neither holds it nor was shown its card. Else, on the first call of the tool (or of
- * the program): the most specific note's card when at most CARD_TOOL_SPREAD notes name it and the call contradicts none
- * of them; else the rules its notes give of it (toolRules); else, for a tool no note names, its own manifest's. Never
+ * the program): the most specific note's card that names the tool when at most CARD_TOOL_SPREAD notes name it and the
+ * call contradicts none of them (the tool's own manifest when no card of them names it); else the rules its notes give
+ * of it (toolRules); else, for a tool no note names, its own manifest's. Never
  * the bare list of note ids ("Notes that name regkv: ... and 11 more"), which was 9 of 39 cards of one run and
  * followed by no load. A command's programs are tried in their order. `ever` is not changed here.
  */
@@ -867,9 +897,12 @@ export function chooseCard(index: CardIndex, call: CardCall, ever: ReadonlySet<s
     if (m.best && open(m.best)) return { kind: "note", name, note: m.best, by: m.by ?? "args" };
     if (ever.has(`tool:${name}`)) continue;
     if (all.length && all.length <= CARD_TOOL_SPREAD) {
-      // One of a few notes is the method: the most specific the call does not contradict, unless the seat holds it.
-      const top = m.fit[0];
+      // One of a few notes is the method: the most specific the call does not contradict and whose card names the tool,
+      // unless the seat holds it. A card that does not name the tool (another tool's rules) is not shown for it: where
+      // none does, the tool's own manifest says what it is.
+      const top = m.fit.find((n) => mentionRe(name).test(n.card));
       if (top && open(top)) return { kind: "note", name, note: top, by: "first" };
+      if (!top && call.tool && !all.some((n) => mentionRe(name).test(n.card))) return { kind: "manifest", name };
       continue;
     }
     if (!all.length) return { kind: "manifest", name };
@@ -1760,7 +1793,7 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
    * The hand-off's skills line, at most `max` characters (the header it goes in is 2,000 beside the note): the notes the
    * compaction took out, then the cards of those notes and of the tools the seat ran (shown once in the run, so carried
    * here), the last first, each whole, as many as fit; and, when the prompt lost the index, where it is (never the index
-   * itself, which ran to thousands of characters).
+   * itself, which ran to thousands of characters), first, so that it is the last line a header with less room drops.
    */
   function handoffLine(max: number = HANDOFF_SKILLS_MAX): string {
     const ids = ledger.handoffIds();
@@ -1779,10 +1812,11 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
       for (const [ref, c] of [...cardsHeld.entries()].reverse()) take(ref, c);
     }
     const head = "Rules you worked with (shown once in the run; whole note: skill(id)):";
-    // The account of the notes read, then whole cards while they fit; the index's line last, always.
+    // The index's line first, always (it is short, and a header with less room drops lines from the end), then the
+    // account of the notes read, then whole cards while they fit.
     const render = (account: string): { text: string; rows: number } => {
-      const lines: string[] = [];
-      let room = max - (indexLine ? indexLine.length + 1 : 0);
+      const lines: string[] = indexLine && indexLine.length <= max ? [indexLine] : [];
+      let room = max - (lines.length ? indexLine.length + 1 : 0);
       if (account && account.length <= room) {
         lines.push(account);
         room -= account.length + 1;
@@ -1796,7 +1830,6 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
         used += row.length + 1;
       }
       if (rows.length) lines.push(`${head}\n${rows.join("\n")}`);
-      if (indexLine) lines.push(indexLine);
       return { text: lines.join("\n"), rows: rows.length };
     };
     // The whole account (sizes, done or not) when a card still fits beside it; else the ids, as many as leave room for one.
@@ -2235,7 +2268,8 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
         }
         const key = `lead:${lead || about.slice(0, 80)}`;
         if (cardsEver.has(key)) return undefined;
-        const notes = notesForText(await packIndexes(), about).filter((x) => !ledger.get(x.ref) && !cardsHeld.has(x.ref));
+        // The ledger keys a note by pack:id (SkillLedger.key); its ref is the bare id where one pack carries it.
+        const notes = notesForText(await packIndexes(), about).filter((x) => !ledger.get(SkillLedger.key(x.pack, x.id)) && !cardsHeld.has(x.ref));
         if (!notes.length) return undefined;
         cardsEver.add(key);
         let words = `Notes of this run's packs that fit this lead (each is a page of method: load the one you need with skill(id) before the work, not after): ${notes.map((x) => `${x.ref}${x.when ? ` (${x.when.length > 110 ? `${x.when.slice(0, 109)}\u2026` : x.when})` : ""}`).join("; ")}.`;
@@ -2282,8 +2316,14 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
     const index = await cardsOnce();
     const leadText = (call.lead && leadTexts.get(call.lead)) || lastLead;
     const choice = chooseCard(index, call, cardsEver, (key) => Boolean(ledger.get(key)), leadText);
-    // Asked once a name, whatever the answer: a shell or a read has no rules, and is not looked up at every call.
-    for (const name of call.tool ? [call.tool] : call.programs) if ((call.tool ? index.byTool : index.byProgram).has(name) || call.tool) cardsEver.add(`tool:${name}`);
+    // Asked once a name, whatever the answer: a shell or a read has no rules, and is not looked up at every call. But a
+    // note's card a call matched does not spend the first call of a tool many notes name: the rules they give of it
+    // still come with the first call that matches none of them.
+    for (const name of call.tool ? [call.tool] : call.programs) {
+      const notes = (call.tool ? index.byTool : index.byProgram).get(name);
+      if (choice?.kind === "note" && choice.name === name && choice.by !== "first" && (notes?.length ?? 0) > CARD_TOOL_SPREAD) continue;
+      if (notes || call.tool) cardsEver.add(`tool:${name}`);
+    }
     if (!choice) return null;
     if (choice.kind === "note") {
       const { note, name } = choice;

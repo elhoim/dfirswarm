@@ -73,10 +73,14 @@ So a pack's skills are small files, and an agent loads one when it needs it:
   matches: a value the call gives that the card writes for that tool (a provider, a
   source, a hive), a word of its arguments that the card's argument forms hold, or
   the lead the seat works under (the one the job names, else the last it opened or
-  claimed), counted only where it tells the skills apart. A call that matches none
-  shows, on the tool's first call, the most specific skill's card when at most three
-  skills list the tool, and else the rules those skills' cards give of it (the
-  sentences of their own cards that name it). Each card is shown once in the run for
+  claimed), counted only where it tells the skills apart: a word of the call's
+  arguments counts only when it is a card's own, not one more than a quarter of the
+  skills that list the tool hold (a hive's name, `Microsoft`, `CurrentVersion` for
+  `regkv`). A call that matches none shows, on the tool's first call, the most
+  specific skill's card that names the tool when at most three skills list it (the
+  tool's own manifest when none of their cards names it), and else the rules those
+  skills' cards give of it (the sentences of their own cards that name it), which a
+  card a call matched does not use up. Each card is shown once in the run for
   a seat, a relaunch on the same session included; the hand-off header carries the
   cards of the skills a compaction took out and of the tools the seat ran, whole, as
   many as its 800 characters hold. `tests/pack-cards.test.ts` enumerates a call that

@@ -3494,6 +3494,14 @@ export function usageFromSessionEntries(entries: unknown[]): SessionUsageSlice {
           slice.compaction_usd = Number(((slice.compaction_usd ?? 0) + usage.cost).toFixed(6));
         }
       }
+    } else if (entry.type === "custom" && entry.customType === "self-compact-presummary-usage" && isRecord(entry.data)) {
+      // The summary a seat begins on a copy at the notice line (self-compact.ts PRESUMMARY_USAGE_TYPE), recorded when its
+      // call ends: compaction cost, though no compaction entry carries it.
+      usage = asUsage(entry.data.usage);
+      if (usage) {
+        slice.compaction_tokens = (slice.compaction_tokens ?? 0) + usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+        slice.compaction_usd = Number(((slice.compaction_usd ?? 0) + usage.cost).toFixed(6));
+      }
     }
     if (!usage) continue;
     slice.input += usage.input;

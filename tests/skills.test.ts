@@ -862,6 +862,43 @@ test("a lead opened or claimed names the notes that fit it after the result, onc
   }
 });
 
+test("a note's card a call matched does not spend the first call of a tool many notes name: the general rules come with the first call that matches none (D2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const spec: Record<string, SkillSpec> = {};
+    for (const k of ["alpha", "beta", "gamma", "delta", "epsilon"]) spec[`area/${k}`] = { title: `Note ${k}`, when: `Case ${k}.`, tools: ["many_tool"], card: `many_tool {"kind": "${k}"} reads the ${k} records only. A rule of ${k}: many_tool never says more than it read.`, body: `Body of ${k}.` };
+    const pack = await writePack(root, "p", "1.0.0", spec);
+    const seat = await cardSeat([pack]);
+    assert.match((await seat.result("many_tool", { kind: "beta" }))!, /from the note `area\/beta`/);
+    // The next call names no note's kind: the rules the notes give of the tool, once.
+    assert.match((await seat.result("many_tool", { path: "inputs/x" }))!, /^Before you read this result, the rules of many_tool from the notes that name it/);
+    assert.equal(await seat.result("many_tool", { path: "inputs/y" }), null);
+    // A kind not yet shown still brings its note.
+    assert.match((await seat.result("many_tool", { kind: "delta" }))!, /from the note `area\/delta`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a lead names no note the seat already holds, whatever pack carries it: the ledger is asked by pack:id (D8)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    for (const cards of ["on", "inject"]) {
+      const seat = await cardSeat([base], { cards });
+      // The seat loads the note itself; a lead about its subject then names none (on) and injects none (inject).
+      await seat.tools.get("skill")!.execute("c1", { id: "timeline/partition" }, undefined, undefined, { cwd: seat.sandbox });
+      const out = await seat.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}');
+      assert.equal(out, null, `${cards}: ${out}`);
+      // A seat that does not hold it is told of it.
+      const other = await cardSeat([base], { cards });
+      assert.match((await other.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}'))!, /timeline\/partition/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--skill-cards inject: a claimed lead comes back with the rules of the notes that fit it, which are then not shown again with their tools", async () => {
   const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
   try {
@@ -899,13 +936,22 @@ test("the hand-off header is under 2,000 characters beside the note with the ski
     await seat.handle.promptSection(root, "BASE PROMPT");
     const line = seat.handle.handoffLine();
     assert.ok(line.length <= HANDOFF_SKILLS_MAX, `${line.length}`);
-    assert.match(line, /Your prompt no longer carries this run's skill index: skill\(\) with no id lists it\.$/);
-    assert.match(line, /^Skill bodies a compaction took out of your context: big-pack:area\/note-0, /, "the ids alone when the whole account leaves no room for a card");
+    // The pointer first: it is short, and a header with less room drops lines from the end.
+    const POINTER = "Your prompt no longer carries this run's skill index: skill() with no id lists it.";
+    assert.ok(line.startsWith(`${POINTER}\n`), line);
+    assert.match(line, /\nSkill bodies a compaction took out of your context: big-pack:area\/note-0, /, "the ids alone when the whole account leaves no room for a card");
     assert.match(line, /\nRules you worked with \(shown once in the run; whole note: skill\(id\)\):\n- big-pack:area\/note-4: tool_4/, "the card of the last note the compaction took out first");
-    const facts = { name: "n", doing: "d", claims: ["work/a.md"], unread: { main: 3 }, ledgerTotal: 40, ledgerMine: 9, sentinel: false, spentUsd: 1, capUsd: 6, leads: `Leads: 4 open, 2 yours.\nYours: ${"L-1 (working; a lead about something), ".repeat(30)}\nFinish: not ready (3)`, skills: line };
-    const header = handoffHeader("agent00", 2, facts, true, "threshold");
-    assert.ok(header.length < 2000, `${header.length} characters beside the note`);
-    assert.ok(header.includes(line.split("\n")[0]!));
+    const facts = { name: "n", doing: "d", claims: ["work/a.md"], unread: { main: 3 }, ledgerTotal: 40, ledgerMine: 9, sentinel: false, spentUsd: 1, capUsd: 6, leads: `Leads: 4 open, 2 yours.\nYours: ${"L-1 (working; a lead about something), ".repeat(6)}\nFinish: not ready (3)` };
+    const header = handoffHeader("agent00", 2, facts, true, "threshold", (max) => seat.handle.handoffLine(max));
+    assert.ok(header.length <= 2000, `${header.length} characters beside the note`);
+    assert.ok(header.includes(POINTER) && header.includes("- big-pack:area/note-4: tool_4"), header);
+    // A header with little room left (a cap rule and forged tools) drops the cards and the account, never the pointer (D7).
+    const crowded = handoffHeader("agent00", 2, { ...facts, capHit: "c".repeat(400), forged: "f".repeat(240) }, true, "threshold", (max) => seat.handle.handoffLine(max));
+    assert.ok(crowded.length <= 2000, `${crowded.length}`);
+    assert.ok(crowded.includes(POINTER) && !crowded.includes("- big-pack:area/note-4"), crowded);
+    // The string form is kept by whole lines from its start: the pointer is the last of it dropped.
+    const given = handoffHeader("agent00", 2, { ...facts, capHit: "c".repeat(400), forged: "f".repeat(240), skills: line }, true, "threshold");
+    assert.ok(given.length <= 2000 && given.includes(POINTER) && !given.includes("- big-pack:area/note-4"), given);
     void registerSkills;
   } finally {
     await rm(root, { recursive: true, force: true });
