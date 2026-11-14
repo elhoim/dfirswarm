@@ -6796,6 +6796,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     if [[ -n "$compact_at" ]]; then provider_env+=(--env "SWARM_COMPACT_AT=$compact_at"); fi
     if [[ -n "$compact_prompt" ]]; then provider_env+=(--env "SWARM_COMPACT_PROMPT=$compact_prompt"); fi
     if [[ -n "$compact_model" ]]; then provider_env+=(--env "SWARM_COMPACT_MODEL=$compact_model"); fi
+    if [[ -n "${SWARM_COMPACT_PRESUMMARY:-}" ]]; then provider_env+=(--env "SWARM_COMPACT_PRESUMMARY=$SWARM_COMPACT_PRESUMMARY"); fi
   fi
   if [[ -n "$inbox_page_chars" ]]; then
     provider_env+=(--env "SWARM_INBOX_PAGE_CHARS=$inbox_page_chars")
@@ -9317,6 +9318,8 @@ vm_build_spec() { # <hub dir> <out file>
     [[ -n "$compact_at" ]] && add_env SWARM_COMPACT_AT "$compact_at"
     [[ -n "$compact_prompt" ]] && add_env SWARM_COMPACT_PROMPT "$compact_prompt_vm"
     [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
+    # The operator's switch for the summary begun at the notice line: a VM takes no environment of the host's own.
+    [[ -n "${SWARM_COMPACT_PRESUMMARY:-}" ]] && add_env SWARM_COMPACT_PRESUMMARY "$SWARM_COMPACT_PRESUMMARY"
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
   [[ -n "${skill_release:-}" ]] && add_env SWARM_SKILL_RELEASE "$skill_release"

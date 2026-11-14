@@ -509,6 +509,14 @@ out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pa
 [[ -z "$(jq -r '.env.SWARM_SKILL_RELEASE // empty' "$(sandbox_of "$out")/vm-spec.json")" ]] || fail "a default run set SWARM_SKILL_RELEASE: the seats' own default (compaction) is the one that applies"
 pass "--skill-release is validated, recorded (compaction by default), said at kickoff, and reaches the VMs; with no pack or no hand-off it is said to do nothing"
 
+# --- the summary begun at the notice line (SWARM_COMPACT_PRESUMMARY): the operator's switch reaches the VMs ---------
+out="$(export SWARM_COMPACT_PRESUMMARY=off; start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label presummary-vm)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a VM kickoff with SWARM_COMPACT_PRESUMMARY=off exited $rc: $out"
+[[ "$(jq -r '.env.SWARM_COMPACT_PRESUMMARY // empty' "$(sandbox_of "$out")/vm-spec.json")" == "off" ]] || fail "the VMs' environment does not carry SWARM_COMPACT_PRESUMMARY: $(jq -c '.env' "$(sandbox_of "$out")/vm-spec.json")"
+out="$(unset SWARM_COMPACT_PRESUMMARY; start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label presummary-vm-default)"
+[[ -z "$(jq -r '.env.SWARM_COMPACT_PRESUMMARY // empty' "$(sandbox_of "$out")/vm-spec.json")" ]] || fail "a run with no SWARM_COMPACT_PRESUMMARY set it in the VMs: the seats' own default (on) is the one that applies"
+pass "SWARM_COMPACT_PRESUMMARY reaches the VMs when the operator sets it, and only then"
+
 # --- the packs' tools without their notes (--pack-skills off, the skills experiment's arm) ---
 out="$(start --isolation host --pack keyed-pack --pack-skills off --label pack-skills-off)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--pack-skills off exited $rc: $out"
