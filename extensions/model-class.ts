@@ -14,10 +14,21 @@
  * end, a separator or a digit (so `phi4` and `qwen3` are read, and a word that only begins like a family is not).
  */
 const WEAK_FAMILY =
-  /(?:^|[/:_.-])(?:deepseek|qwen|qwq|glm|chatglm|zai|z-ai|kimi|moonshot|moonshotai|minimax|llama|meta-llama|mistral|mistralai|mixtral|codestral|devstral|magistral|gemma|phi|gpt-oss|nemotron|olmo|hermes|nousresearch|yi|01-ai|internlm|baichuan|ernie|hunyuan|seed-oss|granite|command-r|falcon|smollm)(?=$|[-_.:/\d])/i;
+  /(?:^|[/:_.-])(?:deepseek|qwen|qwq|glm|chatglm|zai|z-ai|kimi|moonshot|moonshotai|minimax|llama|meta-llama|mistral|mistralai|mixtral|ministral|codestral|devstral|magistral|pixtral|gemma|phi|gpt-oss|nemotron|olmo|hermes|nousresearch|yi|01-ai|internlm|baichuan|ernie|hunyuan|seed-oss|granite|command-r|command-a|aya|jamba|dbrx|arctic|starcoder|wizardlm|stablelm|exaone|falcon|smollm)(?=$|[-_.:/\d])/i;
 
-/** Providers that serve local models only: every model they serve is of the weak class. */
-const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "llama.cpp", "cpp", "vllm", "sglang", "localmock", "local"]);
+/**
+ * Closed-weight models, read the same way: a name that holds one is never of the weak class, whatever else it holds (a
+ * suffix such as `-yi` on a Claude model's name read it as weak). Mistral's medium models and Saba are closed though their
+ * family's others are open.
+ */
+const CLOSED_FAMILY = /(?:^|[/:_.-])(?:claude|gemini|grok|gpt-(?!oss)|chatgpt|o\d|nova|sonar|palm|bard|jurassic|j2|(?:mistral|magistral|devstral)-medium|mistral-saba)(?=$|[-_.:/\d])/i;
+
+/**
+ * Providers that serve local models only, every one of whose models is of the weak class: compared without `-`, `_`, `.`
+ * or spaces, so `lm-studio`, `llama.cpp` and `llama_cpp` are the same provider as `lmstudio` and `llamacpp`.
+ */
+const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llamacpp", "llamaserver", "llamafile", "cpp", "vllm", "sglang", "localai", "koboldcpp", "textgenerationwebui", "localmock", "local"]);
+const bareProvider = (p: string) => p.toLowerCase().replace(/[-_.\s]/g, "");
 
 /**
  * Why a model is of the weak class, or null when it is not. `model` is the name a run gives it (`provider/model`, any
@@ -25,8 +36,9 @@ const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", 
  */
 export function weakClassReason(model: string): string | null {
   const m = model.trim();
-  const provider = m.includes("/") ? m.slice(0, m.indexOf("/")).toLowerCase() : "";
-  if (LOCAL_PROVIDERS.has(provider) || LOCAL_PROVIDERS.has(m.toLowerCase())) return "served locally";
+  const provider = m.includes("/") ? m.slice(0, m.indexOf("/")) : "";
+  if (LOCAL_PROVIDERS.has(bareProvider(provider)) || LOCAL_PROVIDERS.has(bareProvider(m))) return "served locally";
+  if (CLOSED_FAMILY.test(m)) return null;
   if (WEAK_FAMILY.test(m)) return "of an open-weight family";
   return null;
 }
