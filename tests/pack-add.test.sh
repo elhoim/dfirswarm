@@ -40,7 +40,10 @@ for t in $mem_tools; do jq -e '.pack == "memory-forensics"' "$sb/tools/$t/manife
 jq -e --arg id "$id" '.runs[] | select(.id == $id) | .packs | map(.id) | index("memory-forensics") != null' "$TMP/runs/registry.json" >/dev/null || fail "the record does not name the pack"
 jq -e --arg id "$id" '.runs[] | select(.id == $id) | .packs[] | select(.id == "memory-forensics") | .added.by == "operator" and .added.why == "a dump found by hand" and (.added.tools | index("minidump_map")) != null and .added.notes == "notes/memory-forensics"' "$TMP/runs/registry.json" >/dev/null || fail "the record's entry: $(jq -c --arg id "$id" '.runs[] | select(.id == $id) | .packs' "$TMP/runs/registry.json")"
 post="$(cat "$sb"/threads/main/*-system.md | grep 'PACK ADDED: memory-forensics')" || fail "no board post"
-grep -q 'run one with job_run(tool: <name>, args: {...})' <<<"$post" && grep -q '`minidump_map`' <<<"$post" && grep -q 'notes/memory-forensics/INDEX.md' <<<"$post" || fail "the post: $post"
+grep -q '`minidump_map`' <<<"$post" && grep -q 'notes/memory-forensics/INDEX.md' <<<"$post" || fail "the post: $post"
+# A host run has no job service and its tool list was fixed at its start: the post says how its tools run here.
+grep -q 'They are not in your tool list (it was fixed at the start), and this run has no job service: a tool is the script tools/<name>/<entry>' <<<"$post" || fail "the host run's post: $post"
+grep -q 'job_run' <<<"$post" && fail "a host run's post sends the seats to job_run, which it has not: $post"
 grep -q '"command":"pack-add"' "$TMP/runs/operator-audit.jsonl" || fail "the operator's act is not on the operator's record"
 out="$(swarm pack-add "$id" memory-forensics)" || fail "a second pack-add failed: $out"
 grep -q 'already among' <<<"$out" || fail "a second pack-add did not say it is there: $out"
@@ -75,6 +78,32 @@ printf '{"name": "minidump_map", "by": "s0000001", "runtime": "python3", "descri
 dp="$(dumps_post "$sb0")"
 grep -q "No tool of this run's packs reads a dump" <<<"$dp" || fail "a forged tool under a reader's name is said to be the pack's: $dp"
 pass "after pack-add the job service's dump post names minidump_map and mem_profile; without it, or with a forged namesake, it names none"
+
+echo "# the post says how a seat runs the tools in this run: tool forging, a job service and its images"
+out="$(kick --pack computer-forensics-base --allow-tool-forging --label pf)" || fail "$out"
+out="$(swarm pack-add "$(id_of pf)" memory-forensics)" || fail "pack-add to a forging run failed: $out"
+post="$(cat "$(sandbox_of pf)"/threads/main/*-system.md | grep 'PACK ADDED: memory-forensics')" || fail "no board post"
+grep -q 'Tool forging is on in this run, so they join your tool list at the end of your next turn' <<<"$post" || fail "a forging run's post: $post"
+grep -q 'not in your tool list' <<<"$post" && fail "a forging run's post says the tools are not in the tool list: $post"
+# A VM run with a job service, as its record says (the kickoff writes isolation.jobs for one): a pack added after the
+# kickoff has no profile of its own there, so its tools run in the default job image unless the seat names one.
+as_vm_run() { # <label> <images JSON>
+  local f="$TMP/runs/registry.json"
+  jq --arg l "$1" --argjson img "$2" '(.runs[] | select(.label == $l) | .isolation) = {mode: "microvm", jobs: {workers: 2, images: $img, image: $img.core, pack_profiles: {"computer-forensics-base": "core"}}}' "$f" > "$f.new" && mv "$f.new" "$f"
+}
+out="$(kick --pack computer-forensics-base --label pv)" || fail "$out"
+as_vm_run pv '{"core": "img:core", "memory": "img:memory", "full": "img:full"}'
+out="$(swarm pack-add "$(id_of pv)" memory-forensics)" || fail "pack-add to a VM run failed: $out"
+post="$(cat "$(sandbox_of pv)"/threads/main/*-system.md | grep 'PACK ADDED: memory-forensics')" || fail "no board post"
+grep -q 'run one with job_run(tool: <name>, args: {...})' <<<"$post" || fail "a VM run's post does not name job_run: $post"
+grep -q "runs in the run's default job image (profile core), made for the packs the run started with, unless you name a profile: a tool that runs one of memory-forensics's programs (MemProcFS, volatility3, " <<<"$post" || fail "the post does not say where a tool of it runs: $post"
+grep -q 'job_run(tool: <name>, profile: "memory", args: {...})' <<<"$post" || fail "the post does not name the image that holds the pack: $post"
+out="$(kick --pack computer-forensics-base --label pw)" || fail "$out"
+as_vm_run pw '{"core": "img:core"}'
+out="$(swarm pack-add "$(id_of pw)" memory-forensics)" || fail "pack-add to a VM run failed: $out"
+post="$(cat "$(sandbox_of pw)"/threads/main/*-system.md | grep 'PACK ADDED: memory-forensics')" || fail "no board post"
+grep -q "unless you name a profile, and no job image of this run holds memory-forensics: a tool that runs one of its programs" <<<"$post" || fail "a run with no image for the pack: $post"
+pass "a forging run's seats are told the tools join their list; a VM run's, that job_run runs them in the default image unless they name the one that holds the pack, or that none does"
 
 echo "# a pack whose files changed since it was installed is not added; an older install than the checkout's is said"
 out="$(kick --pack computer-forensics-base --label pt)" || fail "$out"
@@ -127,6 +156,9 @@ grep -q 'hub-supervise: pack-add memory-forensics (exit 0)' "$sb4/traces/vm-hub.
 jq -e --arg id "$id4" '.runs[] | select(.id == $id) | .packs[] | select(.id == "memory-forensics") | .added.by == "catalogue" and (.added.why | test("^the catalogue g3 of import:ev-1/disk.ad1 lists 1 member named as a process or memory dump$"))' "$TMP/runs/registry.json" >/dev/null \
   || fail "the record: $(jq -c --arg id "$id4" '.runs[] | select(.id == $id) | .packs' "$TMP/runs/registry.json")"
 [[ -f "$sb4/tools/minidump_map/manifest.json" && -f "$sb4/notes/memory-forensics/INDEX.md" ]] || fail "the keeper's add did not seed the run"
+# The harness's act is on the trace as its own line (the collector of a prepared run is stopped: the system spill).
+row="$(cat "$sb4/traces/events.jsonl" "$sb4/traces/system-spill.jsonl" 2>/dev/null | jq -c 'select(.tool == "pack_added")' 2>/dev/null)"
+jq -e 'select(.agent == "system" and .args.pack == "memory-forensics" and .args.by == "catalogue" and (.result.added[0].tools | index("minidump_map")) != null)' <<<"$row" >/dev/null || fail "no trace row of the catalogue's add: $row"
 cat "$sb4"/threads/main/*-system.md | grep -q 'PACK ADDED: memory-forensics .*the catalogue g3 of import:ev-1/disk.ad1 lists 1 member named as a process or memory dump (the harness adds the memory pack on its own' || fail "the seats were not told"
 : > "$HUB/.stop"; { kill "$hubpid"; wait "$hubpid"; } >/dev/null 2>&1 || true
 for _ in $(seq 1 50); do kill -0 "$keeper" 2>/dev/null || break; sleep 0.1; done

@@ -10717,17 +10717,58 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$have" "$ship" 2>/dev/nu
   return 0
 }
 
+# How a seat runs a tool pack-add brought, said true to the run it was brought into. With tool forging on, the
+# extension reads tools/ at the end of each turn and registers what is new as a tool of the seat's own; without it, the
+# seat's tool list is the one its start named. A run with a job service runs any tool in tools/ as job_run(tool:), and
+# picks a tool's image by its pack's profile, which a pack added after the kickoff does not have: such a tool runs in
+# the run's default job image unless the seat names a profile, so the post names the run's image that holds the pack,
+# if one does. A run with neither has its tools' scripts, run from bash.
+pack_add_how() { # <run record JSON> <pack> <installed pack dir>
+  local rec="$1" pack="$2" pd="$3" progs="" profiles="{}"
+  progs="$(jq -r '[.binaries[]? | (.package // .name)] | reduce .[] as $x ([]; if index([$x]) then . else . + [$x] end)
+    | (.[:4] | join(", ")) + (if length > 4 then ", …" else "" end)' "$pd/requires/host.json" 2>/dev/null || true)"
+  [[ -f "$ROOT/images/profiles.json" ]] && profiles="$(jq -c '.profiles // {}' "$ROOT/images/profiles.json" 2>/dev/null || echo '{}')"
+  jq -r --arg pack "$pack" --arg progs "$progs" --argjson profiles "$profiles" '
+    (.tool_forging == true) as $forge
+    | (.isolation.mode == "microvm" and ((.isolation.jobs | type) == "object")) as $jobs
+    | (.isolation.jobs.images // {}) as $img
+    | (.isolation.jobs.image // "") as $dref
+    | ([$img | to_entries[] | select(.value == $dref) | .key] | first // null) as $dprof
+    | ([$profiles | to_entries[] | select($img[.key] != null)
+        | {key, packs: (.value | if type == "array" then . else (.packs // []) end)}
+        | select(.packs | index($pack) != null) | {key, n: (.packs | length)}] | sort_by(.n) | first.key // null) as $hold
+    | (if $progs == "" then "" else " (\($progs))" end) as $p
+    | (if ($img | length) == 0 then
+         " A job runs in the run'"'"'s one worker image, made for the packs the run started with: a tool that runs one of \($pack)'"'"'s programs\($p) may not find it there, and the job says which program is missing."
+       elif $hold == null then
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end) unless you name a profile, and no job image of this run holds \($pack): a tool that runs one of its programs\($p) may not find it, and the job says which program is missing (SWARM.md'"'"'s Job images lists the profiles)."
+       elif $hold == $dprof then
+         " A tool of it runs in the run'"'"'s default job image (profile \($dprof)), which holds \($pack)."
+       else
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end), made for the packs the run started with, unless you name a profile: a tool that runs one of \($pack)'"'"'s programs\($p) needs job_run(tool: <name>, profile: \"\($hold)\", args: {...}), the run'"'"'s job image that holds \($pack)."
+       end) as $where
+    | if $forge and $jobs then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn (tools(name: <name>) gives one whole); a direct call runs one in your own VM, which has few forensic programs, and job_run(tool: <name>, args: {...}) runs one as a job.\($where)"
+      elif $forge then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn and a call runs one where you are, as a forged tool runs; tools(name: <name>) gives one whole."
+      elif $jobs then
+        "They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}); its parameters are in tools/<name>/manifest.json.\($where)"
+      else
+        "They are not in your tool list (it was fixed at the start), and this run has no job service: a tool is the script tools/<name>/<entry>, run by the runtime its manifest names (tools/<name>/manifest.json, with its parameters), which takes its arguments as one JSON object on stdin; run it with bash."
+      end' <<<"$rec"
+}
+
 # A pack brought into a running run (E7): the memory pack, for a dump the catalogue finds inside an image after the
 # kickoff (the kickoff adds it only for a dump at the top of the inputs; hub-supervise.sh calls this when the job
 # service says a catalogue lists one), or another pack the operator names. The run's images, its seats' tool lists and
 # their skill index are fixed at its start, so the pack comes in by what a running run can take: its tools into
-# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>), in the run's default job
-# image), its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its
-# packs, with when, by whom and why this one was added), the trace, and a post to every seat naming both. Under the
-# kickoff's rule: only a run that has packs, never a pack the operator excluded (--no-pack), never one this host has
-# not installed or whose files no longer match its checksums (an older install is said, as the kickoff says it), never
-# one that declares secrets (a job does not carry them). Exit 0 when the pack is in the run (added now or before), 3
-# when a rule keeps it out (said), 2 on a usage error.
+# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>); pack_add_how says where),
+# its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its packs,
+# with when, by whom and why this one was added), the trace (the operator's line, or the harness's pack_added), and a
+# post to every seat naming both. Under the kickoff's rule: only a run that has packs, never a pack the operator
+# excluded (--no-pack), never one this host has not installed or whose files no longer match its checksums (an older
+# install is said, as the kickoff says it), never one that declares secrets (a job does not carry them). Exit 0 when the
+# pack is in the run (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
 #   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
 cmd_pack_add() {
   local id="${1:-}" pack="${2:-}" why="" by=operator
@@ -10820,12 +10861,22 @@ cmd_pack_add() {
   fi
   registry_merge "$id" "$(jq -c --argjson add "$(printf '%s\n' "${entries[@]}" | jq -s .)" '{packs: ((.packs // []) + $add)}' <<<"$rec")" \
     || { echo "BLOCKER: the run's record could not take $pack; its tools and notes are in the run, and the seats were not told." >&2; exit 1; }
-  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is in the run's record and its post.
+  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is on the run's
+  # record and the trace as the harness's line, with the hub's own token when the run has a hub.
   if [[ "$by" == operator ]]; then
     operator_audit pack-add "$id" "$pack" ${why:+--why "$why"} || true
     operator_trace "$sandbox" pack-add "$id" "$pack"
+  elif [[ -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null; then
+    local hub_now="" token="${SWARM_TRACE_TOKEN:-}" line
+    if [[ -z "$token" ]] && hub_now="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+      token="$(jq -r '.tokens.system // empty' "$hub_now/hub-input.json" 2>/dev/null || true)"
+    fi
+    line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg pack "$pack" --arg why "$why" \
+      --argjson added "$(printf '%s\n' "${entries[@]}" | jq -s -c 'map({id, version, tools: .added.tools})')" \
+      '{ts: $ts, agent: "system", tool: "pack_added", args: {pack: $pack, by: "catalogue", why: (if $why == "" then null else $why end)}, result: {ok: true, added: $added}}')"
+    SWARM_TRACE_TOKEN="$token" trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
   fi
-  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}), which runs it in the run's default job image; tools(name: <name>) gives its manifest. The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read. Read the note for the dump's kind (a process dump, a crash dump, a memory image) before you parse one yourself."
+  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). $(pack_add_how "$rec" "$pack" "$(grep -m1 "/$pack\$" <<<"$resolved")") The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read.$([[ "$pack" == memory-forensics ]] && printf ' Read the note for the dump'"'"'s kind (a process dump, a crash dump, a memory image) before you parse one yourself.')"
   node --experimental-strip-types --no-warnings -e '
     const [protocol, S, key, body] = process.argv.slice(1);
     import(protocol).then((P) => P.systemPost(S, { tag: "result", to: "all", key, body })).catch(() => process.exit(1));
@@ -12935,13 +12986,14 @@ EOF
     pack-add) cat <<'EOF'
   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
                                                   bring a pack into a running run: its tools into tools/ (the seats
-                                                  run them with job_run(tool: <name>), in the run's default job image),
-                                                  its notes as files under notes/<pack>/, the run's record and a post
-                                                  to every seat. The run's images, tool lists and skill index stay as
-                                                  they were started. Only a run that has packs; never a pack its
-                                                  kickoff excluded (--no-pack), one this host has not installed or that
-                                                  does not verify against its checksums, or one that declares secrets:
-                                                  those exit 3, said. The harness runs it itself
+                                                  run them with job_run(tool: <name>), in the run's default job image
+                                                  unless they name a profile; with tool forging on they also join the
+                                                  seats' tool lists), its notes as files under notes/<pack>/, the run's
+                                                  record, the trace and a post to every seat. The run's images and
+                                                  skill index stay as they were started. Only a run that has packs;
+                                                  never a pack its kickoff excluded (--no-pack), one this host has not
+                                                  installed or that does not verify against its checksums, or one that
+                                                  declares secrets: those exit 3, said. The harness runs it itself
                                                   (--by catalogue) for memory-forensics when a catalogue lists a dump
                                                   inside an image, which the kickoff could not see.
 EOF
