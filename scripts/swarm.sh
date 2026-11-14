@@ -6036,6 +6036,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         | awk '!seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
     fi
   fi
+  seed_job_capabilities "$sandbox" "$job_images_json"
   JOBS_FOR_CONTRACT="$([[ "$isolation" == "microvm" && "$jobs" -eq 1 ]] && jq -nc --argjson images "$job_images_json" --argjson pp "$pack_profiles_json" --arg dflt "${job_image:-}" --argjson d "$([[ "${derived_catalog:-1}" -eq 1 ]] && echo true || echo false)" --argjson w "$workers" --argjson c "$worker_cpus" --argjson m "$worker_memory" --arg h "$allow_hosts$([[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 && "$local_only" -eq 0 ]] && printf '%s' "${allow_hosts:+,}pypi.org,files.pythonhosted.org")" '{workers: $w, cpus: $c, memoryMib: $m, derived: $d, allowHosts: ($h | split(",") | map(select(length > 0)))} + (if ($images | length) > 0 then {images: $images, packProfiles: $pp, image: $dflt} else {} end)')" \
   CASE_ID_FOR_CONTRACT="$case_id" EXAMINER_FOR_CONTRACT="$examiner" ALLOW_INSTALL_FOR_CONTRACT="$allow_install" INSTALL_HOSTS_FOR_CONTRACT="$install_hosts" \
     HOST_CAPS_FOR_CONTRACT="$host_caps_json" WRITE_GUARD_FOR_CONTRACT="$write_guard_mode" \
@@ -9351,6 +9352,7 @@ launch_vm_agents() {
     fi
   fi
   start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
+  start_image_capabilities "$sandbox" "$hub_dir" "$rec"
   if [[ "${network_mode:-closed}" != "closed" ]] && ! start_net_fetch "$sandbox" "$hub_dir" "$swarm_id"; then
     stop_vm_run "$sandbox" "$swarm_id" 0
     stop_sandbox_daemons "$sandbox" keep-record
@@ -9482,17 +9484,37 @@ launch_vm_agents() {
   else
     echo "Agents:       $n Pi sessions up in their VMs, each linked to the hub"
   fi
-  # What each job image can do, by known-answer probes in a worker of that image (scripts/image-capabilities.ts): one job an
-  # image, in the background; the seats get the result on the board and in job-capabilities.json. SWARM_IMAGE_CAPABILITIES=off skips it.
-  if [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off ]]; then
-    local cap_profiles
-    cap_profiles="$(json_get "$swarm_id" 2>/dev/null | jq -r '(.isolation.jobs.images // {}) | keys | join(",")' 2>/dev/null || true)"
-    if [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]]; then
-      ( node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" >"$sandbox/traces/image-capabilities.log" 2>&1 & ) >/dev/null 2>&1
-      echo "Capabilities: each job image ($cap_profiles) is being tested with known-answer probes; the seats are told on the board (job-capabilities.json)"
-    fi
-  fi
   SWARM_GUARD_MEASURED="microvm"
+}
+
+# What each job image can do (scripts/image-capabilities.ts). The cache keeps each image's last result by its
+# reference, so the next run's contract can say it before a seat reads it.
+image_capabilities_cache() { printf '%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}/image-capabilities"; }
+
+# Before the contract is rendered: job-capabilities.json as pending, with an earlier run's result for an image of the
+# same reference, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
+seed_job_capabilities() { # <sandbox> <job images JSON>
+  local sandbox="$1" images="${2:-}"
+  [[ -n "$images" ]] || images='{}'
+  [[ -z "${resume_of:-}" ]] || return 0
+  [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off && "${isolation:-}" == microvm && "${jobs:-1}" -eq 1 ]] || return 0
+  [[ "$(jq 'length' <<<"$images" 2>/dev/null || echo 0)" -gt 0 ]] || return 0
+  rm -f "$sandbox/job-capabilities.json"
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
+}
+
+# As soon as the hub's job service is up, before the seats' VMs are made: one known-answer probe job an image, in the
+# background, run from the run's frozen copy. The seats get the result on the board (as early as a job can give it,
+# often before their first inbox) and in job-capabilities.json. SWARM_IMAGE_CAPABILITIES=off skips it.
+start_image_capabilities() { # <sandbox> <hub dir> <run record JSON>
+  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles
+  [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off ]] || return 0
+  images="$(jq -c '.isolation.jobs.images // {}' <<<"$record" 2>/dev/null || echo '{}')"
+  cap_profiles="$(jq -r 'keys | join(",")' <<<"$images" 2>/dev/null || true)"
+  [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]] || return 0
+  ( node --experimental-strip-types --no-warnings "$(run_script "$hub_dir" scripts/image-capabilities.ts)" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" \
+      --images "$images" --cache "$(image_capabilities_cache)" >"$sandbox/traces/image-capabilities.log" 2>&1 & ) >/dev/null 2>&1
+  echo "Capabilities: each job image ($cap_profiles) is being tested now with known-answer probes; the seats are told on the board (job-capabilities.json), and SWARM.md says it"
 }
 
 cmd_reap() {

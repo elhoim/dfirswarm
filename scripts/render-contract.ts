@@ -22,6 +22,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { kickoffDumpsNote, type KickoffDump, type MemoryPackDecision } from "./dump-members.ts";
+import { capabilityLines, type ByProfile } from "./image-capabilities.ts";
 
 type Obj = Record<string, unknown>;
 const env = (k: string): string | undefined => process.env[k];
@@ -565,6 +566,55 @@ function hostSection(): string {
   return section;
 }
 
+/**
+ * What each job image can do (job-capabilities.json, scripts/image-capabilities.ts), when the kickoff seeded it: the
+ * result an earlier run of the same image found, said to be that run's, and that this run tests every image again
+ * now and posts the result; or this run's own result when it is already in. Nothing when the run has no such file.
+ */
+function capabilitiesSection(sandbox: string): string {
+  const file = join(sandbox, "job-capabilities.json");
+  if (!(isFile(file) && !isLink(file))) return "";
+  let rec: Obj;
+  try {
+    rec = readJson(file) as Obj;
+  } catch {
+    return "";
+  }
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return "";
+  const images = (get(rec, "images", {}) ?? {}) as ByProfile;
+  const shown = images && typeof images === "object" && !Array.isArray(images) ? images : {};
+  const lines = Object.keys(shown).length ? capabilityLines(shown) : [];
+  const cached = (get(rec, "cached", {}) ?? {}) as Record<string, { image?: string; tested_at?: string }>;
+  const pending = get(rec, "pending") === true;
+  const parts = [
+    "## Job image capabilities",
+    "",
+    "What each job image can do, tested in a worker VM of that image on an input whose answer is known (disassemble " +
+      "x86-64, decode a QR symbol from a PNG, write and decode a clip, read a PNG, read a rendered line of text, inflate " +
+      "brotli, numpy, compile C, a Python crypto library). Your own VM is not a job image and holds less: run the work " +
+      "with `job_run profile=<name>`, or `job_run tool=<name>` for a pack tool, which runs in its own pack's image. " +
+      "Read this, and `job-capabilities.json`, before you probe an image yourself.",
+    "",
+  ];
+  if (lines.length) {
+    if (pending) {
+      const when = Object.entries(cached).map(([p, c]) => `${p} ${pyStr(c.tested_at ?? "?")}`).join(", ");
+      parts.push(`As an earlier run of the same image found it (${when}); this run tests each image again now:`, "");
+    }
+    parts.push(...lines, "");
+  }
+  if (pending) {
+    parts.push(
+      `${lines.length ? "This run's own result" : "The result"} is posted to everyone on the board as JOB IMAGE CAPABILITIES within ` +
+        "minutes of the start, and written to `job-capabilities.json`" +
+        (lines.length ? ", which then replaces the lines above." : "; it is not in yet.") +
+        " A capability that does not work in any image is not there: ask the operator for a program, or use a pack tool that does not need it.",
+      "",
+    );
+  }
+  return `${parts.join("\n")}\n`;
+}
+
 function goalWithChecks(goalFile: string): string {
   let goal = pyStrip(readText(goalFile));
   // A check that greps the trace for the harness's own inputs_check line is met by done, which writes it.
@@ -605,7 +655,7 @@ export function renderContract(argv: string[]): void {
   text = replaceAll(text, "{{CATALOG}}\n\n", catalogSection(sandbox));
   text = replaceAll(text, "{{TOOLBOX}}\n\n", toolboxSection(sandbox));
   text = replaceAll(text, "{{SEEDED_TOOLS}}\n\n", toolsSection(sandbox));
-  text = replaceAll(text, "{{HOST}}\n\n", hostSection());
+  text = replaceAll(text, "{{HOST}}\n\n", hostSection() + capabilitiesSection(sandbox));
   const caseId = pyStrip(env("SWARM_CASE_ID") ?? "");
   const examiner = pyStrip(env("SWARM_EXAMINER") ?? "");
   text = replaceAll(text, "{{CASE}}\n\n", caseId || examiner ? `Case \`${caseId || "—"}\` · examiner ${examiner || "—"}.\n\n` : "");
