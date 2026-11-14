@@ -827,7 +827,7 @@ export async function meantRef(sandboxRoot: string, ref: string): Promise<string
     want = `job:${path[1]}${rest ? `/${rest}` : ""}`;
   } else if (/^inputs\//.test(t)) want = `input:${t.slice("inputs/".length)}`;
   else if (/^import:[a-z0-9-]+\/out\//.test(t)) want = t.replace(/^(import:[a-z0-9-]+)\/out\//, "$1/");
-  const { readManifest, resolveRef, storePaths } = await import("../scripts/evidence-store.ts");
+  const { manifestOf, resolveRef, storePaths } = await import("../scripts/evidence-store.ts");
   if (want && (await resolveRef(sandboxRoot, want).catch(() => null))?.ok) return want === ref ? null : want;
   // The job's own records beside its output (manifest.json, job.json, a scope file), or a directory of its output: the job, whole. A ref names a file or a whole output, and this is the one of the two that was meant.
   const job = /^job:(j\d{6,})\/(.+?)\/*$/.exec(want ?? "");
@@ -835,8 +835,9 @@ export async function meantRef(sandboxRoot: string, ref: string): Promise<string
   const whole = `job:${job[1]}`;
   if (!(await resolveRef(sandboxRoot, whole).catch(() => null))?.ok) return null;
   if (/^(?:manifest\.json|job\.json|scope(?:\.\d+)?\.json)$/.test(job[2]!)) return whole;
-  const found = await readManifest(join(storePaths(sandboxRoot).jobs, job[1]!, "manifest.json")).catch(() => null);
-  return found?.manifest.files.some((f) => f.path.startsWith(`${job[2]}/`)) ? whole : null;
+  // Asked of the manifest's index (a directory's own line), never the manifest whole.
+  const view = await manifestOf(join(storePaths(sandboxRoot).jobs, job[1]!, "manifest.json")).catch(() => null);
+  return view && (await view.dir(job[2]!).catch(() => null)) ? whole : null;
 }
 
 /** The fields each kind takes beside the ones every kind does: what `kindFitting` reads. */
@@ -1288,6 +1289,8 @@ export function searchNegative(kind: string, value: string): boolean {
 }
 
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|bmp|webp|tiff?)$/i;
+/** The most files of one directory read for the images a negative did not look at. */
+const IMAGES_LISTED_MAX = 100_000;
 
 type ImageReads = { offset: number; read: Map<string, Set<string>> };
 const imageReadsCache = new Map<string, ImageReads>();
@@ -1417,7 +1420,7 @@ async function negativeBasis(sandboxRoot: string, agentId: string, input: Ledger
   // The pictures: the sheets beside each cited image, and which of them the recorder was handed.
   if (images.length || given(raw.images_read)) {
     const reads = await imageReads(sandboxRoot);
-    const { readManifest, storePaths } = await import("../scripts/evidence-store.ts");
+    const { manifestOf, storePaths } = await import("../scripts/evidence-store.ts");
     const P = storePaths(sandboxRoot);
     const said = listOf(raw.images_read as string[] | string | undefined).filter((r) => /^job:/.test(r));
     const sawIt = (r: string) => reads.get(r)?.has(agentId) === true;
@@ -1427,8 +1430,10 @@ async function negativeBasis(sandboxRoot: string, agentId: string, input: Ledger
     for (const d of dirs) {
       const m = /^job:([a-z0-9-]+)(?:\/(.*))?$/.exec(d);
       if (!m) continue;
-      const found = await readManifest(join(P.jobs, m[1]!, "manifest.json")).catch(() => null);
-      const under = (found?.manifest.files ?? []).map((f) => f.path).filter((f) => IMAGE_FILE.test(f) && f.slice(0, Math.max(0, f.lastIndexOf("/"))) === (m[2] ?? ""));
+      // The files directly in that directory, from the manifest's index (its lines for that directory alone), never the manifest whole.
+      const view = await manifestOf(join(P.jobs, m[1]!, "manifest.json")).catch(() => null);
+      const listed = view ? await view.children(m[2] ?? "", IMAGES_LISTED_MAX).catch(() => null) : null;
+      const under = (listed?.files ?? []).map((f) => f.path).filter((f) => IMAGE_FILE.test(f));
       for (const f of under) if (sawIt(`job:${m[1]}/${f}`)) seen.add(`job:${m[1]}/${f}`);
       const left = under.filter((f) => !sawIt(`job:${m[1]}/${f}`));
       if (left.length && under.length > 1) unread.push({ job: m[1]!, dir: m[2] ?? "", total: under.length, unread: left.slice(0, 40) });
