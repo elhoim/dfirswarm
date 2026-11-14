@@ -175,3 +175,25 @@ test("a seat holding no lead is told, in its header, to hold one for sustained w
   assert.ok(held.ok);
   assert.doesNotMatch((await L.leadsDigest({ sandboxRoot: S, agentId: "a1" }, { mark: false })).text, /Sustained work/);
 });
+
+test("the summary a seat begins on a copy is counted as compaction where the seats' sessions are read", async () => {
+  const { sessionCalls, PRESUMMARY_USAGE_TYPE } = await import("../scripts/question-cost.ts");
+  const SC = await import("../extensions/self-compact.ts");
+  assert.equal(PRESUMMARY_USAGE_TYPE, SC.PRESUMMARY_USAGE_TYPE, "question-cost reads the entry self-compact writes");
+  const S = await mkdtemp(join(tmpdir(), "qcost-presummary-"));
+  try {
+    await mkdir(join(S, ".pi-sessions", "a0"), { recursive: true });
+    const at = new Date(Date.now()).toISOString();
+    await writeFile(join(S, ".pi-sessions", "a0", "s.jsonl"), [
+      JSON.stringify({ type: "custom", customType: PRESUMMARY_USAGE_TYPE, timestamp: at, data: { version: 1, epoch: 1, usage: { input: 70, output: 30, cacheRead: 0, cacheWrite: 0, cost: { total: 0.5 } } } }),
+      JSON.stringify({ type: "custom", customType: "something-else", timestamp: at, data: { usage: { input: 999, output: 0, cacheRead: 0, cacheWrite: 0 } } }),
+    ].join("\n") + "\n");
+    const calls = await sessionCalls(S);
+    assert.equal(calls.length, 1, "only the pre-summary entry is a call");
+    assert.equal(calls[0].tokens, 100);
+    assert.equal(calls[0].usd, 0.5);
+    assert.equal(calls[0].compaction, true);
+  } finally {
+    await rm(S, { recursive: true, force: true });
+  }
+});
