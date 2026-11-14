@@ -597,14 +597,24 @@ export const SEAL_LARGE_FILES = 2000;
 export const SEAL_LARGE_BYTES = 256 * 1024 * 1024;
 /**
  * The part of the derived catalogue's generations kept for what a user made
- * or kept (derivedRank below 1), whenever it is offered: anything else gets
- * the rest and no more. A fifth was kept before, and on a run whose first
- * committed tree was a prefix of Program Files (E0) four fifths of the
- * ceiling went to a vendor's files before the profile's Temp and Downloads
- * were offered; the plan holds the lane to 30 of 50 for a user's objects
- * (tests/job-stages.test.ts replays such a run on a synthetic tree).
+ * or kept (derivedRank below 1), whenever it is offered: a vendor's and the
+ * system's files (rank 2) get the rest and no more. A fifth was kept before,
+ * and on a run whose first committed tree was a prefix of Program Files (E0)
+ * four fifths of the ceiling went to a vendor's files before the profile's
+ * Temp and Downloads were offered; the plan holds the lane to 30 of 50 for a
+ * user's objects (tests/job-stages.test.ts replays such a run on a
+ * synthetic tree).
+ *
+ * Kept room no user's object waits for is not left idle: it is lent to the
+ * next rank (1: a web root, /root, a folder at the root, what an archive or
+ * a mail's attachments held), all of it but DERIVED_FLOOR, and taken back
+ * the moment a user's object waits (derivedRoom). Without the loan twelve
+ * vendor objects and then 27 under inetpub and /var/www made 20 generations,
+ * 8 of them the web roots', with 30 kept for nobody.
  */
 export const DERIVED_RESERVE = 0.6;
+/** The part of the ceiling kept for a user's objects that is never lent (the fifth that was kept before): a user's objects offered after the lent room is spent still get it. */
+export const DERIVED_FLOOR = 0.2;
 
 const JOB_ID = /^j\d{6}$/;
 export const TIMEOUT_MAX_SECONDS = 4 * 3600;
@@ -3087,13 +3097,18 @@ export class JobService {
       return false;
     }
     this.derivedSaid.delete("derived_deferred:worker_seconds");
-    // Only the part kept for a user's objects is left: a queued recipe over anything else is not run.
+    // Only the part kept for a user's objects is left: a queued recipe over an object with no room for its rank is not run (a
+    // vendor's, or one of the next rank once a user's object waits and takes the loan back, or past the floor).
     if (made >= L.generationsMax - this.derivedReserve()) {
+      const userWaiting = this.derivedUserWaiting();
       for (const id of [...this.queue]) {
         const j = this.jobs.get(id);
         if (!j || j.requester.agent !== DERIVED || j.spec.kind !== "recipe") continue;
         const at = /^job:(j\d{6})\/(.*)$/s.exec(j.spec.target?.ref ?? "");
-        if ((at ? this.rankOf({ job: at[1], path: at[2] }) : 1) >= 1) await this.dropDerived(id, `not run: ${made} of the derived catalogue's ${L.generationsMax} generations are made, and the ${this.derivedReserve()} left are kept for what a user made or kept; catalog_request the object to have it catalogued`);
+        const rank = at ? this.rankOf({ job: at[1], path: at[2] }) : 1;
+        if (derivedRoom(rank, made, L.generationsMax, this.derivedReserve(), { userWaiting })) continue;
+        const lent = rank < 2 ? (userWaiting ? ", and a user's object waits for them" : `, the last ${Math.floor(L.generationsMax * DERIVED_FLOOR)} never lent`) : "";
+        await this.dropDerived(id, `not run: ${made} of the derived catalogue's ${L.generationsMax} generations are made, and the ${L.generationsMax - made} left are kept for what a user made or kept${lent}; catalog_request the object to have it catalogued`);
       }
     }
     return true;
@@ -3104,14 +3119,20 @@ export class JobService {
     return Math.floor(this.limits().generationsMax * DERIVED_RESERVE);
   }
 
+  /** Whether an object a user made or kept (rank below 1) waits to be offered to a pass: the kept part is then not lent. */
+  private derivedUserWaiting(): boolean {
+    return this.derivedPending.some((c) => this.rankOf(c) < 1);
+  }
+
   /**
    * Whether the lane may still spend a generation on an object of this rank:
-   * anything while the unreserved part lasts, then only what a user made or
-   * kept (rank below 1), up to the ceiling. Counted from the generations
-   * made: the lane runs one job at a time to its end, and each start asks.
+   * anything while the unreserved part lasts, then what a user made or kept
+   * (rank below 1) up to the ceiling, and the next rank on loan while no
+   * user's object waits (derivedRoom). Counted from the generations made:
+   * the lane runs one job at a time to its end, and each start asks.
    */
-  private derivedRoomFor(rank: number): boolean {
-    return derivedRoom(rank, this.derivedMade(), this.limits().generationsMax, this.derivedReserve());
+  private derivedRoomFor(rank: number, userWaiting = this.derivedUserWaiting()): boolean {
+    return derivedRoom(rank, this.derivedMade(), this.limits().generationsMax, this.derivedReserve(), { userWaiting });
   }
 
   /** A queued job of the lane, cancelled on the record with why. */
@@ -3143,8 +3164,9 @@ export class JobService {
    * offered now, and the first tree committed in a run is a prefix of Program
    * Files, so on the runs of s17fdfe the 50 were spent (29 vendor files and 20
    * Python .pyd in E0) before the profile's Temp and Downloads were offered.
-   * Once only the kept part is left, a pass takes only what a user made or
-   * kept, whenever it comes; the rest stays offered, said once.
+   * Once only the kept part is left, a pass takes what a user made or kept,
+   * whenever it comes, and, while none waits, the next rank's objects on
+   * loan down to the floor (derivedRoom); the rest stays offered, said once.
    */
   private async maybeDrainDerived(): Promise<void> {
     if (!this.o.derived || this.stopping || !this.derivedPending.length || this.draining) return;
@@ -3213,6 +3235,8 @@ export class JobService {
     const derivedPass = job.requester.agent === DERIVED;
     if (derivedPass && this.derivedProcessed.has(job.id)) return;
     let applied = 0;
+    // Whether a user's object waits, read once for the pass's answers: while one does, the kept part is not lent (derivedRoom).
+    let userWaiting: boolean | undefined;
     const unasked: string[] = [];
     const notRun: Array<{ sha256: string; ref: string; recipe: string }> = [];
     for (const a of answered) {
@@ -3236,7 +3260,8 @@ export class JobService {
       // queued, and its object is named as answered and not catalogued.
       if (derivedPass) {
         const at = /^job:(j\d{6})\/(.*)$/s.exec(t.ref ?? "");
-        if (!this.derivedRoomFor(at ? this.rankOf({ job: at[1], path: at[2] }) : 1)) {
+        userWaiting ??= this.derivedUserWaiting();
+        if (!this.derivedRoomFor(at ? this.rankOf({ job: at[1], path: at[2] }) : 1, userWaiting)) {
           notRun.push({ sha256: t.sha256 ?? "", ref: t.ref ?? "", recipe: a.recipe });
           continue;
         }
@@ -3926,11 +3951,17 @@ export function programLines(ids: readonly string[], importsDir: string): string
  * Whether the derived lane may still spend a generation on an object of this
  * rank (derivedRank), `made` of the ceiling `max` being made and `reserve`
  * of it kept for what a user made or kept: anything while the unreserved
- * part lasts, then only a user's objects (rank below 1), up to the ceiling.
+ * part lasts, then a user's objects (rank below 1) up to the ceiling. The
+ * kept part is lent to the next rank (1) while no user's object waits
+ * (`userWaiting`), all of it but the floor (DERIVED_FLOOR of the ceiling,
+ * or `floor`); a user's object that waits takes the loan back. A vendor's
+ * or the system's objects (rank 2) are never lent any of it.
  */
-export function derivedRoom(rank: number, made: number, max: number, reserve: number): boolean {
+export function derivedRoom(rank: number, made: number, max: number, reserve: number, o: { userWaiting?: boolean; floor?: number } = {}): boolean {
   if (made >= max) return false;
-  return rank < 1 || made < max - reserve;
+  if (rank < 1 || made < max - reserve) return true;
+  const floor = Math.min(reserve, o.floor ?? Math.floor(max * DERIVED_FLOOR));
+  return rank < 2 && !o.userWaiting && made < max - floor;
 }
 
 /**
@@ -3938,18 +3969,21 @@ export function derivedRoom(rank: number, made: number, max: number, reserve: nu
  * user's objects first and a vendor's last (`rank`), the largest first
  * within each, and taken from its head up to the pass's pairs (always one
  * object at least) and DETECT_FILES_MAX objects. Once only the kept part of
- * the ceiling is left (`userOnly`), the first object that is not a user's
- * ends the pass. What is taken is removed from `pending`.
+ * the ceiling is left (`userOnly`), the first object with no room by its
+ * rank (derivedRoom) ends the pass: a user's object that waits keeps the
+ * kept part to the user's objects, and none lends it to the next rank. What
+ * is taken is removed from `pending`.
  */
-export function derivedPass<C extends { bytes: number; recipes: readonly string[] }>(pending: C[], rank: (c: C) => number, o: { made: number; max: number; reserve: number; pairsPerPass: number }): { take: C[]; userOnly: boolean } {
+export function derivedPass<C extends { bytes: number; recipes: readonly string[] }>(pending: C[], rank: (c: C) => number, o: { made: number; max: number; reserve: number; pairsPerPass: number; floor?: number }): { take: C[]; userOnly: boolean } {
   const ranks = new Map(pending.map((c) => [c, rank(c)]));
   pending.sort((a, b) => ranks.get(a)! - ranks.get(b)! || b.bytes - a.bytes);
-  const userOnly = !derivedRoom(1, o.made, o.max, o.reserve);
+  const userOnly = o.made >= o.max - o.reserve;
+  const userWaiting = pending.some((c) => ranks.get(c)! < 1);
   const take: C[] = [];
   let pairs = 0;
   while (pending.length && (pairs === 0 || pairs + pending[0].recipes.length <= o.pairsPerPass) && take.length < DETECT_FILES_MAX) {
-    // Sorted by rank: the first that is not a user's ends the pass when only the kept part is left.
-    if (userOnly && ranks.get(pending[0])! >= 1) break;
+    // Sorted by rank: the first with no room for its rank ends the pass once only the kept part is left.
+    if (userOnly && !derivedRoom(ranks.get(pending[0])!, o.made, o.max, o.reserve, { userWaiting, ...(o.floor !== undefined ? { floor: o.floor } : {}) })) break;
     const c = pending.shift()!;
     take.push(c);
     pairs += c.recipes.length;
