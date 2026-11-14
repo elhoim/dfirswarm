@@ -3,7 +3,7 @@ id: keys/recovery-key-scan
 title: What recovery_key_scan shows and does not show
 when: You run recovery_key_scan over files, an image or a capture and report what it found.
 needs: []
-card: recovery_key_scan ({"path": "<directory or file>"}) answers with locators (file, offset, length, encoding, structure check), never a value: cite a finding by file and offset. Run it as a job with secret_output: true; {"write_values": true} (refused outside a job) writes values only to recovery-passwords.jsonl under $OUT. It reads the first 8 MiB of each file unless max_bytes_per_file is raised, does no OCR and no unpacking, and lists every file it could not read or read only in part: a clean result is bounded by that coverage. A partial answer names what it did not reach: report those as not searched. Does not show: that a value opens anything, or what is in a key store.
+card: recovery_key_scan ({"path": "<directory or file>"}) answers with locators, never a value: cite file and offset. Run it in a secret_output job; {"write_values": true} writes values only to recovery-passwords.jsonl under $OUT. It reads 8 MiB of each file by default, unpacks nothing and lists what it did not read or reach: report those as not searched. Does not show: that a value opens anything.
 tools: [recovery_key_scan]
 requires_host: []
 ---

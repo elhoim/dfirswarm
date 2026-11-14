@@ -2,7 +2,7 @@
 id: data/http-cache
 title: HTTP cache bodies
 when: A file a Chromium browser cached is needed.
-card: cache_body: {"path": "<16 hex>_0"} writes one simple-cache entry's body out, decoded; a block-file cache DIRECTORY is listed first ({"path": "<dir>", "list": true}), then {"path": "<dir>", "entry": n} or {"address": "0x..."}; a plain file stored with brotli needs {"encoding": "br"}. partial with "brotli: not decodable here" means the body file is STILL compressed: nothing in it speaks for the page. The key (the URL), the headers and the body are files, never in the answer. An entry shows bytes were stored under a key, not that a person opened the page.
+card: cache_body {"path": "<16 hex>_0"} writes a simple-cache body out, decoded; a block-file cache DIRECTORY is listed first ({"path": "<dir>", "list": true}), then {"path": "<dir>", "entry": n} or {"address": "0x..."}; a plain brotli file needs {"encoding": "br"}. partial with "brotli: not decodable here" means the body file is STILL compressed. Does not show: that a person opened the page.
 needs: []
 tools: [cache_body]
 requires_host: []

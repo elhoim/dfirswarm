@@ -3,7 +3,7 @@ id: artifacts/fsevents
 title: FSEvents, retained filesystem change records
 when: Assess filesystem changes and relative order without inventing timestamps.
 needs: []
-card: fsevents_parse reads 1SLD and 2SLD pages only; another version is unsupported and the rest of that file is not decoded. Read status_basis, files_by_state and problems first: a zero count or an exit of 0 is not a finished examination. Past max_seconds the rest is not_attempted. A negative is: no matching record decoded from these files, by this parser and filter. Does not show: when a change happened, who made it, or that an absent path was never touched.
+card: fsevents_parse reads 1SLD and 2SLD pages only; another version is unsupported and the rest of its file not decoded. Read status_basis, files_by_state and problems first: exit 0 or a zero count is not a finished examination. A negative covers the records decoded by this parser and filter only. Does not show: when a change happened, who made it, or that an absent path was never touched.
 tools: [fsevents_parse]
 requires_host: []
 ---

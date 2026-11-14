@@ -3,7 +3,7 @@ id: patterns/yara
 title: YARA over an image or a dumped region
 when: You have case rules or a precise byte pattern to test against an image or a dumped region.
 needs: []
-card: vol_readiness {"path": "<image>", "views": ["plugins", "yara"], "plugins": ["windows.vadyarascan"]} says if the plugin is listed and the YARA binding imports. Else standalone yara gives file offsets: no address or process. yara -s prints matched bytes: use a secret_output: true job. A clean exit is not a complete scan. Does not show: a malware verdict.
+card: vol_readiness {"path": "<image>", "views": ["plugins", "yara"], "plugins": ["windows.vadyarascan"]} says if the plugin is listed and the YARA binding imports; standalone yara gives file offsets, no address or process. yara -s prints matched bytes: use a secret_output: true job. A clean exit is not a complete scan. Does not show: a malware verdict.
 tools: [vol_readiness]
 requires_host: [yara, vol]
 ---

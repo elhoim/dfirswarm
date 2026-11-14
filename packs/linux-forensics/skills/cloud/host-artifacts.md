@@ -3,7 +3,7 @@ id: cloud/host-artifacts
 title: Cloud-host identity, provisioning and remote administration
 when: A Linux host is a cloud instance: which instance, image or agent it was.
 needs: []
-card: journal_export {"path": "<the evidence's var/log/journal>", "unit": "<cloud-init or agent unit>"} dates cloud-init's stages from the evidence; never contact a metadata endpoint, the provider's API or an agent. Keep instance, image and disk identities apart: an instance id unlike the paperwork says imaged, cloned or restored, not tampered. Never run user data. Use a secret_output job; cite file and line. Does not show: who held the provider account, or what the provider logged.
+card: journal_export {"path": "<the evidence's var/log/journal>", "unit": "<cloud-init or agent unit>"} in a secret_output job dates cloud-init's stages; never contact the provider, its metadata endpoint or an agent, or run user data. Keep instance, image and disk ids apart: an instance id unlike the paperwork means a copy, not tampering. Does not show: who held the account or what the provider logged.
 tools: [journal_export]
 requires_host: []
 mentions: [cloudtrail_parse]

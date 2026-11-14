@@ -3,7 +3,7 @@ id: gaps/what-is-missing
 title: What this delivery can and cannot establish
 when: You write up or rely on anything drawn from a delivery.
 needs: [identify/collector]
-card: collection_id {"root": "<collection dir>"} classifies objects by first bytes and name (delivery.kind, objects); it does not say what was acquired or which media regions. not_observed is qualified by not_observed_caveats. Selected files carry no volume unallocated space or slack: state that as the delivery's limit, never "nothing deleted". Give each secondary source its own state; none implies another. Does not show: what the source held, or that an absent kind never existed.
+card: collection_id {"root": "<collection dir>"} sorts objects by first bytes and name, not by what was acquired or which media regions; read not_observed with not_observed_caveats. Selected files carry no unallocated space or slack: that is the delivery's limit, never "nothing deleted". Give each secondary source its own state. Does not show: what the source held, or that an absent kind never existed.
 tools: [collection_id]
 requires_host: []
 ---

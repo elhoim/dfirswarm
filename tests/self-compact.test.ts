@@ -489,19 +489,28 @@ test("Pi loader: a long command over the evidence, in a run with tool jobs, is t
   }
 });
 
-test("a hand-off's header is at most 2,000 characters beside the note and the skills line, whatever the registers hold", () => {
+test("a hand-off's header is at most 2,000 characters beside the note, its skills line included, whatever the registers hold", () => {
   const leads = ["Leads: 40 open, 12 yours.", `Yours: ${Array.from({ length: 60 }, (_, i) => `L-${i} (working; a long title that says what the lead is about, number ${i})`).join("; ")}`, `Blocked on you: ${"L-900 waits for your reading of job j000123; ".repeat(40)}`, "Finish: not ready (31, 9 of them yours): a list of everything that holds it"].join("\n");
-  const skills = `Rules of the tools you have run: ${"x".repeat(1500)}`;
+  // The skills line as skills.ts writes it: whole lines, the most needed first.
+  const skillLines = ["Skill bodies a compaction took out of your context: a/one. Load again (skill(id)) the ones you still need.", "Rules of the notes and tools you worked with (shown once in the run; the whole note: skill(id)):", ...Array.from({ length: 6 }, (_, i) => `- area/note-${i}: ${"r".repeat(180)}`)];
+  const skills = skillLines.join("\n");
   const facts = { name: "n", doing: "d", claims: Array.from({ length: 80 }, (_, i) => `work/a/file-${i}.md`), unread: { main: 3 }, ledgerTotal: 400, ledgerMine: 90, sentinel: false, spentUsd: 1, capUsd: 6, leads, skills, capHit: "c".repeat(400), forged: "f".repeat(900) };
   const h = handoffHeader("s1", 3, facts, true, "threshold");
-  assert.ok(h.length - skills.length - 1 <= HANDOFF_HEADER_MAX, `${h.length - skills.length - 1} characters beside the skills line`);
-  assert.ok(h.includes(skills), "the skills line is whole");
-  assert.match(h, /The lead register now[^\n]*\nLeads: 40 open, 12 yours\./);
+  assert.ok(h.length <= HANDOFF_HEADER_MAX, `${h.length} characters beside the note`);
+  // What is kept of the skills line is its first lines, whole; the rest is dropped, never cut inside a line.
+  const kept = skillLines.filter((l) => h.includes(l));
+  assert.deepEqual(kept, skillLines.slice(0, kept.length));
+  assert.ok(!h.includes("rrrr\u2026"));
   assert.match(h, /80 claims, claims lists them/);
   assert.ok(h.endsWith(":\n---"));
-  // A small register is carried whole.
-  const small = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, leads: "Leads: 2 open, 1 yours.\nYours: L-1 (working)\nFinish: READY by the registers" }, true, "threshold");
+  // A small register and a skills line that fit are carried whole.
+  const small = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, leads: "Leads: 2 open, 1 yours.\nYours: L-1 (working)\nFinish: READY by the registers", skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
   assert.match(small, /Yours: L-1 \(working\)\nFinish: READY by the registers; finish status lists what holds it\./);
+  assert.ok(small.includes(skillLines.slice(0, 4).join("\n")) && small.length <= HANDOFF_HEADER_MAX);
+  // A large register gives way to the skills line, which is bounded where it is written; both are said.
+  const both = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
+  assert.ok(both.length <= HANDOFF_HEADER_MAX && both.includes(skillLines.slice(0, 4).join("\n")));
+  assert.match(both, /The lead register now[^\n]*\nLeads: 40 open, 12 yours\./);
 });
 
 /** A stand-in for Pi: the hooks registerSelfCompact adds, the messages it sends, and a provider whose summaries are scripted. */

@@ -3,7 +3,7 @@ id: triage/paging-files
 title: The page file and the hibernation file
 when: pagefile.sys, swap or hiberfil.sys is in the evidence, with or without a RAM capture.
 needs: []
-card: ioc_scan {"path": "<pagefile.sys>", "needles": "<a>|<b>"} reads stored bytes: a hit is a file offset, with no process, virtual address or time. A search of an undecoded hiberfil.sys does not cover its saved memory. Inventory pagefile, swap and hiberfil.sys separately with their collection times: they can describe a different time from the RAM capture. Read status first (partial gives next_start). Context only with {"write_values": true} in a job with secret_output: true. Does not show: which process, address or time a paged-out byte belongs to.
+card: ioc_scan {"path": "<pagefile.sys>", "needles": "<a>|<b>"} reads stored bytes; a hit is a file offset: read status first (partial gives next_start). Inventory pagefile, swap and hiberfil.sys apart with collection times; an undecoded hiberfil.sys search misses its saved memory. Context needs {"write_values": true} in a secret_output job. Does not show: a paged-out byte's process, address or time.
 tools: [ioc_scan]
 requires_host: []
 ---

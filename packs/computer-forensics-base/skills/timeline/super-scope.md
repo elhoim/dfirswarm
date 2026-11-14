@@ -5,6 +5,7 @@ when: Choosing parsers, a zone, or another export.
 needs: []
 tools: [timeline_super]
 requires_host: [log2timeline, psort]
+card: timeline_super {"source": "<image>", "parsers": "<names>", "timezone": "<zone>"}: take parser names from the installed Plaso's help, not memory, and say which zone you gave and why. Re-export with {"mode": "export", "storage_file": "<.plaso>", "psort_filter": "<filter>"}: the default mode collects again. Does not show: that a parser you did not enable would have found nothing.
 ---
 
 Use only if you run or re-export `timeline_super` (`timeline/super` says when). Not for reading its result (there).

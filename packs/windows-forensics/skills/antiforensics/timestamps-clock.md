@@ -3,7 +3,7 @@ id: antiforensics/timestamps-clock
 title: Timestamp, clock changes
 when: File times disagree; clock moved?
 needs: [antiforensics/traces]
-card: mft_records {"path": "<$MFT>", "timestomp_only": true} keeps records whose $STANDARD_INFORMATION and $FILE_NAME times disagree: its si_ flags are indicators with ordinary causes. Compare the raw values with independent records for the same file reference and sequence (usn_journal {"path": "<$J>", "name": "<pattern>"}, event logs, Prefetch); a record with structural_errors is not compared as whole. A clock change is Security 4616 (evtx_query {"path": "<Security.evtx>", "event_ids": [4616]}): it makes the affected interval uncertain, not every time. Record ids, USNs and sequence numbers are not a common clock. Does not show: that a time was manipulated, by whom, or the true time.
+card: mft_records {"path": "<$MFT>", "timestomp_only": true} keeps records whose two time sets disagree: indicators with ordinary causes. Compare raw values with independent records of the same file (usn_journal, Prefetch). A clock change (Security 4616, evtx_query {"path": "<Security.evtx>", "event_ids": [4616]}) makes its interval uncertain only. Does not show: manipulation, by whom, or the true time.
 tools: [mft_records, usn_journal, evtx_query]
 requires_host: []
 ---

@@ -3,7 +3,7 @@ id: evidence/ad1
 title: An AD1 image is a collection in a container
 when: Evidence is an FTK Imager logical image (.ad1).
 core: 1
-card: ad1_extract: image is the first segment (the job gets the rest of the set). List first ({"list": true}: no file written; rows n, locator, type, size, path), then name what you need: members, a list of locators ("ad1:item=<address>", the locator column) OR item numbers as numbers (1234, the n column), never ad1:item=<n>; or paths (["*/Users/*/NTUSER.DAT"]); or members_file. The whole tree only with whole: true.
+card: ad1_extract: image is the first segment (the job gets the rest). List first ({"list": true}: no file written; rows n, locator, type, size, path), then name what you need: members, locators ("ad1:item=<address>", the locator column) OR item numbers as numbers (the n column), never ad1:item=<n>; or paths (["*/Users/*/NTUSER.DAT"]); or members_file. The whole tree only with whole: true.
 tools: [ad1_extract, catalog_search]
 requires_host: [target-query]
 ---

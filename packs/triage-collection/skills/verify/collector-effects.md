@@ -3,7 +3,7 @@ id: verify/collector-effects
 title: Collector footprint and chronology
 when: Events may be the collector's own, or the order of collection steps matters.
 needs: []
-card: collection_timestamps {"root": "<collection dir>"} gives the acquisition interval from each collector log's first and last timestamped line, or unknown (never from file times); a KAPE CopiedTimestamp states no zone. timestamp_decode decodes a number only: keep raw text, unit and zone basis. An event inside the interval is a candidate footprint to test, neither excluded nor accepted. Does not show: that the collector's clock was right.
+card: collection_timestamps {"root": "<collection dir>"} dates the acquisition from collector logs' first and last timed lines, or says unknown (never file times); a KAPE CopiedTimestamp states no zone. timestamp_decode decodes numbers only: keep raw text and zone. An event inside the interval is a candidate footprint, neither excluded nor accepted. Does not show: that the collector's clock was right.
 tools: [collection_manifest_parse, timestamp_decode, collection_timestamps]
 requires_host: []
 mentions: [KAPE]

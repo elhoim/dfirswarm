@@ -3,7 +3,7 @@ id: capture/derivatives
 title: Making a working derivative of a capture
 when: You need to filter, split, merge, deduplicate or build a capture from a hex dump.
 needs: []
-card: capture_transform {"operation": "dedup", "inputs": ["<capture>"], "out_dir": "<dir>"} writes a new file and never the original: record its command, settings, hashes and packet counts in and out. dedup can remove genuine retransmissions or one packet seen by two sensors; merge orders by timestamp and corrects no clock; a bpf_filter on a host drops the rest of the conversation. A hexdump result is synthetic (headers and times made up): never evidence that traffic occurred. program_group.left_behind makes the answer partial. A derivative holds payload: run with secret_output: true. Does not show: that a packet filtered out was irrelevant.
+card: capture_transform {"operation": "dedup", "inputs": ["<capture>"], "out_dir": "<dir>"} writes a new file: record its hashes and packet counts in and out. dedup can remove genuine retransmissions, merge corrects no clock, and a host bpf_filter drops the rest of the conversation. A hexdump result is synthetic; run with secret_output: true. Does not show: that a filtered packet was irrelevant.
 tools: [capture_transform]
 requires_host: [capinfos, editcap, mergecap, tcpdump, text2pcap]
 ---

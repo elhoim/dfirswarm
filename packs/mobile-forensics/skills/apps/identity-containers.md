@@ -3,7 +3,7 @@ id: apps/identity-containers
 title: App identity across containers, packages and restores
 when: You must say which app, user and device a directory or package belongs to.
 needs: []
-card: A container directory name is not an identity. In a backup the domain manifest_db lists (AppDomain-, AppDomainGroup-, AppDomainPlugin-) is the mapping; on a file system read the container's metadata plist with plist_read {"path": "<plist>"}. On Android map every path to package, user and root (CE or DE); ab_layout's derivative carries no user number. The same bundle id on two devices is the same app, not the same data: say fresh install, restore or migration, and from what. An unresolved mapping limits attribution to the app; never fill it from a listing. Does not show: who used the app, that data was created here, or that two roots are one account.
+card: A container directory name is no identity: map it by the backup domain manifest_db lists or the metadata plist (plist_read {"path": "<plist>"}). On Android map paths to package, user and root (CE or DE); ab_layout output has no user number. The same bundle id on two devices is the same app, not the same data; an unresolved mapping limits attribution to the app. Does not show: who used the app.
 tools: [plist_read, manifest_db, ab_layout]
 requires_host: []
 ---

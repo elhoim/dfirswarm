@@ -2,7 +2,7 @@
 id: data/qr
 title: QR symbols
 when: A QR code in a picture, damaged or in pieces.
-card: qr_read: {"image": "<picture>"} reads a whole symbol and, by itself, one with a finder erased or overdrawn (or {"mode": "repaint"}). Pieces of ONE symbol go together: {"mode": "fragments", "images": [..]}, never a call a piece. The payload is a file (payload_file), never in the answer: cite the picture, the file, version, level, mask and errors_corrected. "not a symbol" covers these methods only (looked_for, not_read): perspective, versions 11+, other symbologies are not read. An otpauth or Wi-Fi payload is a credential: run it with secret_output: true.
+card: qr_read {"image": "<picture>"} reads a whole symbol, even with a finder erased or overdrawn ({"mode": "repaint"} forces that); pieces of ONE symbol go in one call: {"mode": "fragments", "images": [..]}. The payload is in payload_file, never in the answer. "not a symbol" holds only for the methods in looked_for. An otpauth or Wi-Fi payload is a credential: run it with secret_output: true.
 needs: []
 tools: [qr_read]
 requires_host: []

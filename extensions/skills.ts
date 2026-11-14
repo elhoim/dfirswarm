@@ -376,6 +376,10 @@ export type SkillFile = {
   tokens: number;
   needs: string[];
   tools: string[];
+  /** The host programs its commands run (`requires_host:`): a command that runs one is a call of the note too. */
+  programs: string[];
+  /** Its `when:` line: what work it is for. */
+  when: string;
   /** The note's own card (`card:` in its front matter), when it writes one: what a seat is shown when it calls one of the note's tools without holding it. */
   card: string | null;
 };
@@ -400,6 +404,8 @@ export async function readSkillFile(pack: PackRef, id: string): Promise<SkillFil
     tokens: estimateTokens(body),
     needs: listOf(meta.needs),
     tools: listOf(meta.tools),
+    programs: listOf(meta.requires_host),
+    when: typeof meta.when === "string" ? meta.when : "",
     card: typeof meta.card === "string" && meta.card.trim() ? meta.card.trim() : null,
   };
 }
@@ -410,30 +416,63 @@ export async function readSkillFile(pack: PackRef, id: string): Promise<SkillFil
 
 /**
  * A card is a note's few lines a seat must not miss, shown with the result of a
- * call to one of the tools the note names (`tools:`) when the seat does not hold
- * the note: the method comes to the call instead of waiting to be asked for.
- * Pull alone did not reach the open models of the runs of one case: 5 of 8 seats
- * of the run sf4406b never loaded a note, and 5 of its 55 pack-tool calls (9 %)
- * came from a seat that held the tool's note (48 of 65, 74 %, on a Codex run).
- * Its ad1_extract errors were what evidence/ad1 says. Once per note and seat in
- * a context: a compaction shows it again at the next call. A tool more than
- * CARD_TOOL_SPREAD notes name (regkv, pe_info) has no one method: its first
- * call lists the notes that name it instead. `--skill-cards off`
- * (SWARM_SKILL_CARDS) turns both off.
+ * call to one of the tools the note names (`tools:`), or of a command that runs
+ * one of its programs (`requires_host:`), when the seat does not hold the note:
+ * the method comes to the call instead of waiting to be asked for. Pull alone
+ * did not reach the open models of the runs of one case: 5 of 8 seats of the
+ * run sf4406b never loaded a note, and 5 of its 55 pack-tool calls (9 %) came
+ * from a seat that held the tool's note (48 of 65, 74 %, on a Codex run). Its
+ * ad1_extract errors were what evidence/ad1 says.
+ *
+ * Which note's card a call brings is the note the call matches (`matchCard`):
+ * the argument forms its card writes for that tool (a provider, a source, a
+ * hive, a key), the words of the arguments the call gives, and the lead the
+ * seat works under. A tool many notes name (regkv, cloud_normalise, pe_info)
+ * shows each note's card on the call that matches it, so every note with a card
+ * has a call that reaches it. A call that matches no one note shows, on the
+ * tool's first call, the most specific note's card when at most
+ * CARD_TOOL_SPREAD notes name the tool, else the rules its notes give of it
+ * (`toolRules`). Each card once in the run for a seat, a relaunch included.
+ * `--skill-cards off` (SWARM_SKILL_CARDS) turns them off.
  */
 export const CARD_MAX_CHARS = 700;
-/** A tool more notes than this name is a generic one (catalog_search): its calls show no card. */
+/**
+ * A hand-written card (`card:`) is at most this long, and at most HAND_CARD_SENTENCES sentences: two or three rules with their
+ * argument forms, and what the tool does not show. Hand cards ran a median of 4 sentences and 445 characters.
+ */
+export const HAND_CARD_MAX = 400;
+export const HAND_CARD_SENTENCES = 4;
+/** A tool more notes than this name has no one method: a call that matches none of them shows the rules its notes give of it. */
 export const CARD_TOOL_SPREAD = 3;
-/** The notes named for a generic tool's call, at most. */
-export const NOTES_LISTED_MAX = 8;
-/** Cards the hand-off header carries, of the notes a compaction took out. */
-export const HANDOFF_CARDS_MAX = 3;
+/** The hand-off's skills line is at most this long: the notes read, the cards of the notes and tools the seat worked with, whole. */
+export const HANDOFF_SKILLS_MAX = 800;
+/** The session entry that keeps what cards a seat was shown (`registerSkills`). */
+export const CARDS_STATE_TYPE = "dfirswarm-skill-cards";
+/** The cards state a session's branch keeps: its last entry of CARDS_STATE_TYPE, or nothing. */
+export function cardsStateOf(entries: readonly unknown[]): { ever: string[]; held: Array<[string, string]> } | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i] as { type?: string; customType?: string; data?: { version?: number; ever?: unknown; held?: unknown } } | null;
+    if (e?.type !== "custom" || e.customType !== CARDS_STATE_TYPE || e.data?.version !== 1) continue;
+    const ever = Array.isArray(e.data.ever) ? e.data.ever.filter((x): x is string => typeof x === "string") : [];
+    const held = Array.isArray(e.data.held) ? e.data.held.filter((x): x is [string, string] => Array.isArray(x) && typeof x[0] === "string" && typeof x[1] === "string") : [];
+    return { ever, held };
+  }
+  return null;
+}
 export type CardsMode = "on" | "off" | "inject";
 export function parseCardsMode(raw: string | undefined): CardsMode {
   const v = raw?.trim().toLowerCase();
   // inject: as on, and a lead that is opened or claimed comes back with the rules of the notes that fit it, not their
   // names (the forced arm of the notes experiment: do the rules change what a seat does when they are in front of it?).
   return v === "off" ? "off" : v === "inject" ? "inject" : "on";
+}
+
+/** A card cut at a sentence within `max` characters. */
+function cutCard(t: string, max = CARD_MAX_CHARS): string {
+  if (t.length <= max) return t;
+  const head = t.slice(0, max);
+  const end = Math.max(head.lastIndexOf(". "), head.lastIndexOf(".\n"));
+  return `${(end > max / 2 ? head.slice(0, end + 1) : head).trimEnd()} …`;
 }
 
 /**
@@ -443,13 +482,7 @@ export function parseCardsMode(raw: string | undefined): CardsMode {
  * within CARD_MAX_CHARS.
  */
 export function skillCard(file: Pick<SkillFile, "title" | "body" | "card">): string {
-  const cut = (t: string) => {
-    if (t.length <= CARD_MAX_CHARS) return t;
-    const head = t.slice(0, CARD_MAX_CHARS);
-    const end = Math.max(head.lastIndexOf(". "), head.lastIndexOf(".\n"));
-    return `${(end > CARD_MAX_CHARS / 2 ? head.slice(0, end + 1) : head).trimEnd()} …`;
-  };
-  if (file.card) return cut(file.card);
+  if (file.card) return cutCard(file.card);
   const paras = file.body.split(/\n\s*\n/).map((p) => p.replace(/\s+$/, "")).filter((p) => p.trim());
   const out: string[] = [];
   if (file.title) out.push(file.title.endsWith(".") ? file.title : `${file.title}.`);
@@ -459,54 +492,34 @@ export function skillCard(file: Pick<SkillFile, "title" | "body" | "card">): str
   if (example) out.push(example.split("\n").slice(0, 3).map((l) => `    ${l.trim()}`).join("\n"));
   const limit = paras.find((p) => /^\*\*Does not show\.?\*\*/.test(p.trim()));
   if (limit) out.push(limit.trim().replace(/\s*\n\s*/g, " "));
-  return cut(out.join("\n"));
+  return cutCard(out.join("\n"));
 }
 
 /**
- * A tool's card from its own manifest, for a tool no one note is the method of: the part of its description past the
- * first sentence (SWARM.md already carries the first), cut at a sentence within CARD_MAX_CHARS. Null for a forged tool
- * (its maker wrote it this run), a manifest that cannot be read, or a description of one sentence.
+ * A tool's card from its own manifest, for a tool no note names: the part of its description past the first sentence
+ * (SWARM.md already carries the first), cut at a sentence within CARD_MAX_CHARS. Null for a forged tool (its maker
+ * wrote it this run), a manifest that cannot be read, or a description of one sentence.
  */
 export async function manifestCard(sandboxRoot: string, tool: string): Promise<string | null> {
   if (!/^[a-z0-9_]{1,64}$/.test(tool)) return null;
   try {
-    const { readFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
-    const m = JSON.parse(await readFile(join(sandboxRoot, "tools", tool, "manifest.json"), "utf8")) as { description?: unknown; pack?: unknown; by?: unknown };
+    const m = JSON.parse(await readFile(join(sandboxRoot, "tools", tool, "manifest.json"), "utf8")) as { description?: unknown };
     const text = typeof m.description === "string" ? m.description.replace(/\s+/g, " ").trim() : "";
     const first = /^.*?[.!?](?=\s|$)/.exec(text)?.[0] ?? text;
     const rest = text.slice(first.length).trim();
     if (rest.length < 80) return null;
-    if (rest.length <= CARD_MAX_CHARS) return rest;
-    const head = rest.slice(0, CARD_MAX_CHARS);
-    const end = head.lastIndexOf(". ");
-    return `${(end > CARD_MAX_CHARS / 2 ? head.slice(0, end + 1) : head).trimEnd()} \u2026`;
+    return cutCard(rest);
   } catch {
     return null;
   }
 }
 
-/** Each tool a note names, and the notes naming it, the most specific (fewest tools) first. */
-export async function toolNotes(packs: readonly PackIndex[]): Promise<Map<string, Array<{ pack: PackRef; id: string; spread: number }>>> {
-  const map = new Map<string, Array<{ pack: PackRef; id: string; spread: number }>>();
-  for (const pack of packs) {
-    for (const entry of pack.entries) {
-      const file = await readSkillFile(pack, entry.id);
-      if (!file) continue;
-      for (const t of file.tools) {
-        const list = map.get(t) ?? [];
-        list.push({ pack, id: entry.id, spread: file.tools.length });
-        map.set(t, list);
-      }
-    }
-  }
-  for (const list of map.values()) list.sort((a, b) => a.spread - b.spread || a.id.localeCompare(b.id));
-  return map;
-}
-
-/** The tool a call is of, as the notes name tools: a job's tool for job_run, else the call's own name. */
 const NOTE_STOP = new Set("the a an and or of to in on for from with by is are was were be it its this that what which when where how who why answer question find recover lead work data file files evidence image case".split(" "));
 const noteWords = (t: string): string[] => [...new Set(t.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !NOTE_STOP.has(w)))];
+/** Words a call's arguments share with every run (a run's own directories, a placeholder's filler): they tell no note apart. */
+const CALL_STOP = new Set([..."inputs input work store jobs job out your name names path paths dir directory folder tree root json jsonl txt csv log logs tmp out_dir one each not all any".split(" ")]);
+/** The words of a text as the cards compare them: lower case, three letters or more, no stop word. */
+export const cardWords = (t: string): string[] => noteWords(t).filter((w) => !CALL_STOP.has(w));
 
 /**
  * The notes of the run's packs that fit a piece of work, by the words its title and reason share with a note's id,
@@ -533,10 +546,372 @@ export function notesForText(packs: readonly PackIndex[], text: string, n = 3): 
   return out.sort((a, b) => b.score - a.score || a.ref.localeCompare(b.ref)).slice(0, n);
 }
 
-export function cardToolOf(name: string, input: Record<string, unknown> | undefined): string | null {
-  if (name === "skill" || name === "skill_done") return null;
-  if (name === "job_run") return typeof input?.tool === "string" && input.tool.trim() ? input.tool.trim() : null;
-  return name || null;
+/** A call as the cards read it: a tool and its arguments, or a command and the programs it runs; and the lead it names. */
+export type CardCall = { tool: string | null; programs: string[]; args: Record<string, unknown>; text: string; lead: string | null };
+
+const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+
+/** What runs a command line's programs and is not one of them. */
+const WRAPPERS = new Set(["sudo", "env", "time", "nice", "nohup", "exec", "command", "timeout", "stdbuf", "xargs", "then", "do", "else", "if", "while", "!"]);
+
+/** The programs a command line runs: the first word of each of its commands, by its base name, and the script or module a Python runs. */
+export function commandPrograms(cmd: string): string[] {
+  const out: string[] = [];
+  const bare = (w: string) => w.replace(/^['"]+|['"]+$/g, "").split("/").pop() ?? "";
+  for (const seg of cmd.split(/\|\||&&|\$\(|[;|&\n(){}`]/)) {
+    const words = seg.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length) {
+      const w = words[i]!;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) i++;
+      else if (WRAPPERS.has(w)) {
+        i++;
+        // Its options, an option's value (timeout -s KILL) and a duration.
+        while (i < words.length && (/^-/.test(words[i]!) || /^\d+(\.\d+)?[smhd]?$/.test(words[i]!) || (/^-\w$/.test(words[i - 1]!) && /^[A-Z0-9]+$/.test(words[i]!)))) i++;
+      } else break;
+    }
+    if (i >= words.length) continue;
+    const prog = bare(words[i]!);
+    if (!prog || !/^[A-Za-z0-9_.+-]{1,64}$/.test(prog)) continue;
+    out.push(prog);
+    if (/^python[0-9.]*$/.test(prog)) {
+      const next = words[i + 1];
+      if (next === "-m" && words[i + 2]) out.push(bare(words[i + 2]!));
+      else if (next && /\.py['"]?$/.test(next)) out.push(bare(next));
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** The call a tool's result is of: null for the skill tools, and for a job that runs neither a tool nor a command. */
+export function cardCallOf(name: string, input: Record<string, unknown> | undefined): CardCall | null {
+  if (!name || name === "skill" || name === "skill_done") return null;
+  const lead = typeof input?.lead === "string" && input.lead.trim() ? input.lead.trim() : null;
+  if (name === "job_run") {
+    if (typeof input?.tool === "string" && input.tool.trim()) return { tool: input.tool.trim(), programs: [], args: isRecord(input.args) ? input.args : {}, text: "", lead };
+    if (typeof input?.command === "string" && input.command.trim()) return { tool: null, programs: commandPrograms(input.command), args: {}, text: input.command, lead };
+    return null;
+  }
+  if (name === "bash") return typeof input?.command === "string" && input.command.trim() ? { tool: null, programs: commandPrograms(input.command), args: {}, text: input.command, lead: null } : null;
+  return { tool: name, programs: [], args: input ?? {}, text: "", lead: null };
+}
+
+/** The [start, end) of each JSON object a text writes, outermost only (a brace inside a quoted string is text). */
+function objectSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let depth = 0;
+  let start = -1;
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (quoted) {
+      if (c === "\\") i++;
+      else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"' && depth > 0) quoted = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}" && depth > 0) {
+      depth--;
+      if (depth === 0) spans.push([start, i + 1]);
+    }
+  }
+  return spans;
+}
+
+/**
+ * An argument form a card writes, as an object: JSON, with a bare placeholder (<n>) taken as a string and an elided list
+ * ([...]) as empty; else the key-value pairs at its top level that are written plainly. Null when it writes none.
+ */
+export function cardObject(text: string): Record<string, unknown> | null {
+  const t = text.replace(/\[\s*(?:\.\.\.|…)\s*\]/g, "[]").replace(/([:[,]\s*)<([^<>"\n]{1,80})>/g, '$1"<$2>"');
+  try {
+    const v = JSON.parse(t) as unknown;
+    if (isRecord(v)) return v;
+  } catch {
+    // not JSON as it stands: its plain pairs below
+  }
+  const out: Record<string, unknown> = {};
+  let depth = 0;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]!;
+    if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    else if (c === '"' && depth === 1) {
+      const m = /^"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*("(?:[^"\\]|\\.)*"|true|false|-?\d+(?:\.\d+)?)/.exec(t.slice(i));
+      if (m) {
+        try {
+          out[m[1]!] = JSON.parse(m[2]!);
+        } catch {
+          out[m[1]!] = m[2]!;
+        }
+        i += m[0].length - 1;
+      } else {
+        const skip = /^"(?:[^"\\]|\\.)*"/.exec(t.slice(i));
+        if (skip) i += skip[0].length - 1;
+      }
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const mentionRe = (name: string) => new RegExp(`(?<![A-Za-z0-9_])${escapeRe(name)}(?![A-Za-z0-9_])`, "g");
+
+/** A card's sentences: split after a full stop that ends a sentence, never inside an argument form. */
+export function cardSentences(card: string): string[] {
+  const spans = objectSpans(card);
+  const out: string[] = [];
+  let from = 0;
+  for (const m of card.matchAll(/[.!?]\s+(?=\S)/g)) {
+    const at = m.index! + 1;
+    if (spans.some(([a, b]) => at > a && at < b)) continue;
+    // An abbreviation's full stop ends no sentence.
+    if (/(?:\b(?:e\.g|i\.e|etc|vs|cf|approx|no)|\.\.)\.$/i.test(card.slice(Math.max(0, at - 8), at))) continue;
+    out.push(card.slice(from, at).trim());
+    from = at;
+  }
+  out.push(card.slice(from).trim());
+  return out.filter(Boolean);
+}
+
+/**
+ * The argument forms a card writes, each with the tool it is a form of: the nearest of `names` (the note's tools)
+ * written before it outside any form, else the first one after it in the same sentence; null when none is. `text` is
+ * the form as written.
+ */
+export function cardForms(card: string, names: readonly string[]): Array<{ owner: string | null; form: Record<string, unknown>; text: string }> {
+  const spans = objectSpans(card);
+  const inside = (at: number) => spans.some(([a, b]) => at >= a && at < b);
+  const mentions: Array<{ at: number; name: string }> = [];
+  for (const name of names) for (const m of card.matchAll(mentionRe(name))) if (!inside(m.index!)) mentions.push({ at: m.index!, name });
+  mentions.sort((a, b) => a.at - b.at);
+  const out: Array<{ owner: string | null; form: Record<string, unknown>; text: string }> = [];
+  for (const [a, b] of spans) {
+    const form = cardObject(card.slice(a, b));
+    if (!form) continue;
+    let owner = mentions.filter((m) => m.at < a).pop()?.name ?? null;
+    if (!owner) {
+      const end = /[.!?](\s|$)/.exec(card.slice(b))?.index;
+      owner = mentions.find((m) => m.at > b && (end === undefined || m.at < b + end))?.name ?? null;
+    }
+    out.push({ owner, form, text: card.slice(a, b) });
+  }
+  return out;
+}
+
+/** The argument forms a card writes, by the tool each is a form of (cardForms); a form no name owns is left out. */
+export function cardExamples(card: string, names: readonly string[]): Map<string, Array<Record<string, unknown>>> {
+  const out = new Map<string, Array<Record<string, unknown>>>();
+  for (const { owner, form } of cardForms(card, names)) if (owner) out.set(owner, [...(out.get(owner) ?? []), form]);
+  return out;
+}
+
+/** A note as the cards choose among them. */
+export type CardNote = {
+  pack: PackRef;
+  id: string;
+  /** SkillLedger.key of the note; `ref` is how a seat names it (pack:id where two packs of the run carry the id). */
+  key: string;
+  ref: string;
+  tools: string[];
+  programs: string[];
+  card: string;
+  /** Its card is its own `card:` line, not one taken from its body. */
+  hand: boolean;
+  examples: Map<string, Array<Record<string, unknown>>>;
+  /** Words of its id, title and when line: what a lead about its subject shares with it. */
+  about: Set<string>;
+};
+export type CardIndex = { notes: CardNote[]; byTool: Map<string, CardNote[]>; byProgram: Map<string, CardNote[]> };
+
+/** Every note of the run's packs that names a tool or a program, by each name, the most specific (fewest names) first. */
+export async function cardIndex(packs: readonly PackIndex[]): Promise<CardIndex> {
+  const ids = new Map<string, number>();
+  for (const p of packs) for (const e of p.entries) ids.set(e.id, (ids.get(e.id) ?? 0) + 1);
+  const notes: CardNote[] = [];
+  for (const pack of packs) {
+    for (const entry of pack.entries) {
+      const file = await readSkillFile(pack, entry.id);
+      if (!file || (!file.tools.length && !file.programs.length)) continue;
+      const card = skillCard(file);
+      notes.push({
+        pack,
+        id: entry.id,
+        key: SkillLedger.key(pack.id, entry.id),
+        ref: (ids.get(entry.id) ?? 0) > 1 ? `${pack.id}:${entry.id}` : entry.id,
+        tools: file.tools,
+        programs: file.programs,
+        card,
+        hand: Boolean(file.card),
+        examples: cardExamples(card, file.tools),
+        about: new Set(cardWords(`${entry.id.replace(/[/_-]/g, " ")} ${file.title} ${file.when}`)),
+      });
+    }
+  }
+  const byTool = new Map<string, CardNote[]>();
+  const byProgram = new Map<string, CardNote[]>();
+  for (const n of notes) {
+    for (const t of n.tools) byTool.set(t, [...(byTool.get(t) ?? []), n]);
+    for (const p of n.programs) byProgram.set(p, [...(byProgram.get(p) ?? []), n]);
+  }
+  for (const map of [byTool, byProgram]) for (const list of map.values()) list.sort((a, b) => a.tools.length + a.programs.length - (b.tools.length + b.programs.length) || a.id.localeCompare(b.id) || a.pack.id.localeCompare(b.pack.id));
+  return { notes, byTool, byProgram };
+}
+
+/** Every string a value holds, keys left out. */
+function stringsOf(v: unknown, out: string[] = []): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) for (const x of v) stringsOf(x, out);
+  else if (isRecord(v)) for (const x of Object.values(v)) stringsOf(x, out);
+  return out;
+}
+
+const placeholder = (v: unknown) => typeof v === "string" && /<[^<>]*>|\.\.\.|…|\{OUT\}|\$OUT/.test(v);
+/** A value that names a kind (a provider, a source, a format): one token. A call that gives another one is not that note's. */
+const kindValue = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_.:+-]{1,40}$/.test(v) && !placeholder(v);
+const same = (a: unknown, b: unknown): boolean => {
+  if (Array.isArray(b)) return b.every((x) => (Array.isArray(a) ? a : [a]).some((y) => same(y, x)));
+  if (typeof b === "string") return typeof a === "string" && a.trim().toLowerCase() === b.toLowerCase();
+  return String(a) === String(b);
+};
+
+/** How a call and a note's card agree: the pairs it gives as the card writes them, its words in the card's forms, and the lead's in the note's subject. */
+type Agreement = { pairs: string[]; words: string[]; lead: string[] };
+
+function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<string>, leadWords: Set<string>): Agreement | null {
+  const forms = call.tool ? (note.examples.get(name) ?? []) : [];
+  // A form the call contradicts (it gives another value of a kind the form names) is not the call's; a note whose every form is contradicted is not either.
+  const kept = forms.filter((f) => !Object.entries(f).some(([k, v]) => kindValue(v) && call.args[k] !== undefined && !same(call.args[k], v)));
+  if (forms.length && !kept.length) return null;
+  const pairs = new Set<string>();
+  const words = new Set<string>();
+  for (const f of kept) {
+    // Words count argument by argument: the call's hive against the form's hive. A form whose one-word placeholder the
+    // call's value does not hold (<SOFTWARE> for an NTUSER.DAT) is about another file, and its words count for nothing.
+    const agreed = new Set<string>();
+    let other = false;
+    for (const [k, v] of Object.entries(f)) {
+      if (call.args[k] === undefined) continue;
+      if (!placeholder(v) && (typeof v !== "object" || Array.isArray(v)) && same(call.args[k], v)) pairs.add(`${k}=${JSON.stringify(v)}`);
+      const formWords = cardWords(stringsOf(v).join(" "));
+      const given = new Set(cardWords(stringsOf(call.args[k]).join(" ")));
+      const shared = formWords.filter((w) => given.has(w));
+      for (const w of shared) agreed.add(w);
+      if (!shared.length && formWords.length && given.size && typeof v === "string" && /^<[^<>\s]+>$/.test(v)) other = true;
+    }
+    if (!other) for (const w of agreed) words.add(w);
+  }
+  // A command writes no argument form: its words are read against the note's subject.
+  const cmd = call.tool ? [] : [...callWords].filter((w) => note.about.has(w));
+  return { pairs: [...pairs], words: call.tool ? [...words] : cmd, lead: [...leadWords].filter((w) => note.about.has(w)) };
+}
+
+/**
+ * The note a call matches, among the notes that name its tool (or the program its command runs): the call gives a value
+ * a note's card writes for that tool (3 a pair), a word of its arguments that the card's forms hold (2 a word), or works
+ * a lead whose words the note's subject holds (1 a word). What most of the notes share tells none apart: a pair or a word
+ * counts only when at most half of them have it. The note matches with 2 or more, strictly more than any other. `fit` is
+ * every note the call does not contradict (a provider another than the one a note's every form names).
+ */
+export function matchCard(call: CardCall, name: string, notes: readonly CardNote[], leadText = ""): { best: CardNote | null; score: number; by: "args" | "lead" | null; fit: CardNote[] } {
+  const callWords = new Set(cardWords(call.tool ? stringsOf(call.args).join(" ") : call.text));
+  const leadWords = new Set(cardWords(leadText));
+  const rows: Array<{ note: CardNote; a: Agreement }> = [];
+  for (const note of notes) {
+    const a = agreement(note, call, name, callWords, leadWords);
+    if (a) rows.push({ note, a });
+  }
+  const fit = rows.map((r) => r.note);
+  const limit = Math.max(1, Math.floor(rows.length / 2));
+  const count = (pick: (a: Agreement) => string[]) => {
+    const c = new Map<string, number>();
+    for (const r of rows) for (const x of pick(r.a)) c.set(x, (c.get(x) ?? 0) + 1);
+    return (x: string) => (c.get(x) ?? 0) <= limit;
+  };
+  const rare = { pairs: count((a) => a.pairs), words: count((a) => a.words), lead: count((a) => a.lead) };
+  const scored = rows
+    .map((r) => {
+      const args = 3 * r.a.pairs.filter(rare.pairs).length + 2 * r.a.words.filter(rare.words).length;
+      const lead = r.a.lead.filter(rare.lead).length;
+      return { note: r.note, score: args + lead, by: (args >= lead ? "args" : "lead") as "args" | "lead" };
+    })
+    .sort((a, b) => b.score - a.score);
+  const [first, second] = scored;
+  if (!first || first.score < 2 || (second && second.score === first.score)) return { best: null, score: first?.score ?? 0, by: null, fit };
+  return { best: first.note, score: first.score, by: first.by, fit };
+}
+
+/** What a call brings: a note's card, the rules a tool's notes give of it, a tool's own manifest, or nothing. */
+export type CardChoice =
+  | { kind: "note"; name: string; note: CardNote; by: "args" | "lead" | "first" }
+  | { kind: "rules"; name: string; notes: CardNote[]; text: string }
+  | { kind: "manifest"; name: string };
+
+/**
+ * The card a call brings, by what the seat has seen (`ever`: `note:<key>`, `tool:<name>`) and holds. The note the call
+ * matches (matchCard), if the seat neither holds it nor was shown its card. Else, on the first call of the tool (or of
+ * the program): the most specific note's card when at most CARD_TOOL_SPREAD notes name it and the call contradicts none
+ * of them; else the rules its notes give of it (toolRules); else, for a tool no note names, its own manifest's. Never
+ * the bare list of note ids ("Notes that name regkv: ... and 11 more"), which was 9 of 39 cards of one run and
+ * followed by no load. A command's programs are tried in their order. `ever` is not changed here.
+ */
+export function chooseCard(index: CardIndex, call: CardCall, ever: ReadonlySet<string>, holds: (key: string) => boolean, leadText = ""): CardChoice | null {
+  for (const name of call.tool ? [call.tool] : call.programs) {
+    const all = (call.tool ? index.byTool : index.byProgram).get(name) ?? [];
+    if (!call.tool && !all.length) continue;
+    const open = (n: CardNote) => !holds(n.key) && !ever.has(`note:${n.key}`);
+    const m = matchCard(call, name, all, leadText);
+    if (m.best && open(m.best)) return { kind: "note", name, note: m.best, by: m.by ?? "args" };
+    if (ever.has(`tool:${name}`)) continue;
+    if (all.length && all.length <= CARD_TOOL_SPREAD) {
+      // One of a few notes is the method: the most specific the call does not contradict, unless the seat holds it.
+      const top = m.fit[0];
+      if (top && open(top)) return { kind: "note", name, note: top, by: "first" };
+      continue;
+    }
+    if (!all.length) return { kind: "manifest", name };
+    // The rules of the notes the seat holds, or whose card it was shown, are not given again.
+    const notes = (m.fit.length ? m.fit : all).filter(open);
+    const text = toolRules(name, notes);
+    if (text) return { kind: "rules", name, notes, text };
+  }
+  return null;
+}
+
+/**
+ * The rules a tool's notes give of it, for a call of a tool many notes name that matches none of them: each sentence of
+ * their own cards that names the tool, each once, whole sentences within CARD_MAX_CHARS; the ones the tool is the
+ * subject of first, and of those the ones that hold for any call (no note's argument form) before the ones a note's
+ * form makes its own case. Null when no hand-written card names it.
+ */
+export function toolRules(name: string, notes: readonly CardNote[], max = CARD_MAX_CHARS): string | null {
+  const seen = new Set<string>();
+  const found: Array<{ text: string; rank: number; order: number }> = [];
+  for (const n of notes) {
+    if (!n.hand) continue;
+    for (const s of cardSentences(n.card)) {
+      if (!mentionRe(name).test(s) || /^Does not show\b/.test(s)) continue;
+      const key = s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // The tool as the sentence's subject first, a rule for any call before one with a note's own argument form.
+      const subject = new RegExp(`^${escapeRe(name)}(?![A-Za-z0-9_])`).test(s);
+      const own = cardExamples(s, n.tools).has(name);
+      found.push({ text: s, rank: (subject ? 0 : 2) + (own ? 1 : 0), order: found.length });
+    }
+  }
+  found.sort((a, b) => a.rank - b.rank || a.order - b.order);
+  const out: string[] = [];
+  let length = 0;
+  for (const f of found) {
+    if (length + f.text.length + 1 > max) continue;
+    out.push(f.text);
+    length += f.text.length + 1;
+  }
+  return out.length ? out.join(" ") : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,8 +1628,8 @@ export type SkillsHandle = {
    * skills. Writes the one `skills_index` row of the process.
    */
   promptSection: (cwd: string, basePrompt: string) => Promise<string>;
-  /** The lines the hand-off header carries: the skill bodies a compaction took out of this seat's context and, when its prompt does not carry the index, the index. Empty when none. */
-  handoffLine: () => string;
+  /** The lines the hand-off header carries, at most `max` characters (HANDOFF_SKILLS_MAX): the skill bodies a compaction took out of this seat's context, the cards of the notes and tools it worked with, and where the index is when its prompt does not carry it. Empty when none. */
+  handoffLine: (max?: number) => string;
   /**
    * The part of the conversation a compaction is going to summarise, shaped for
    * the summary call: every skill body in it is one line naming the note and its
@@ -1306,14 +1681,27 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
 
   const sectionOnce = async () => (section ??= packIndexes().then((all) => renderSkillsSection(all)));
   const cardsMode = parseCardsMode(deps.cards);
-  let notesByTool: Promise<Map<string, Array<{ pack: PackRef; id: string; spread: number }>>> | null = null;
-  /** Notes whose card this context has shown: a compaction empties it. */
-  const cardsShown = new Set<string>();
-  /** The tools whose card this seat was shown in this run (never cleared), and the cards' words by note, to carry across a compaction. */
+  let cards: Promise<CardIndex> | null = null;
+  const cardsOnce = () => (cards ??= packIndexes().then((all) => cardIndex(all)));
+  /**
+   * What this seat was shown in this run (never cleared): `note:<key>` a note's card, `tool:<name>` a tool's first call,
+   * `lead:<id>` a lead's notes; and the cards' words by the name the seat knows them by, to carry across a compaction.
+   * Both are kept in the session (CARDS_STATE_TYPE), so a seat the watchdog starts again on its session is not shown them again.
+   */
   const cardsEver = new Set<string>();
   const cardsHeld = new Map<string, string>();
   /** Each note's card, by its key, once read: the hand-off header's cards are taken from here (it is written without a wait). */
   const cardText = new Map<string, string>();
+  /** The words of each lead this seat opened or claimed, and of the last one: the work a call is made for. */
+  const leadTexts = new Map<string, string>();
+  let lastLead = "";
+  const saveCards = () => {
+    try {
+      (pi as { appendEntry?: (type: string, data: unknown) => void }).appendEntry?.(CARDS_STATE_TYPE, { version: 1, ever: [...cardsEver], held: [...cardsHeld] });
+    } catch {
+      // the session may be ending; the state is still in memory
+    }
+  };
 
   // Pi runs the tool calls of one assistant message at the same time. Both of ours read
   // and write one ledger with awaits between, so they take turns, in the order the
@@ -1368,26 +1756,61 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
     return `\n\n${now === "stale" ? "The Skills section above does not list this run's packs; this is their index:\n\n" : ""}${built.text}`;
   }
 
-  function handoffLine(): string {
+  /**
+   * The hand-off's skills line, at most `max` characters (the header it goes in is 2,000 beside the note): the notes the
+   * compaction took out, then the cards of those notes and of the tools the seat ran (shown once in the run, so carried
+   * here), the last first, each whole, as many as fit; and, when the prompt lost the index, where it is (never the index
+   * itself, which ran to thousands of characters).
+   */
+  function handoffLine(max: number = HANDOFF_SKILLS_MAX): string {
     const ids = ledger.handoffIds();
-    const lines: string[] = [];
-    // One account of the notes read, each id once. With the release policy off it is the line a seat had before the unloader.
-    const account = releaseMode === "off" ? "" : renderHandoffReads(ledger.compactionAccount());
-    if (account) lines.push(account);
-    else if (ids.length) lines.push(`Skill bodies a compaction took out of your context: ${ids.join(", ")}. Load again (skill(id)) the ones you still need.`);
-    // The cards of the notes the compaction took out, the last read first: what must not be lost with the bodies.
+    const indexLine = sectionText && (source === "extension" || source === "stale") ? "Your prompt no longer carries this run's skill index: skill() with no id lists it." : "";
+    // The cards of the notes the compaction took out, the last read first, then the rules shown with a call (not shown again in this run), the last first.
+    const items: Array<[string, string]> = [];
     if (cardsMode !== "off") {
-      const cards = ids.slice().reverse().map((k) => [k, cardText.get(k)] as const).filter((x): x is readonly [string, string] => Boolean(x[1])).slice(0, HANDOFF_CARDS_MAX);
-      if (cards.length) lines.push(`Cards of the notes you were working with (the whole note: skill(id)):\n${cards.map(([k, c]) => `- ${k}:\n${c.split("\n").map((l) => `  ${l}`).join("\n")}`).join("\n")}`);
-      // The rules shown with a tool's first call are not shown again in this run, so they are carried here: the last
-      // HANDOFF_CARDS_MAX tools' cards, without the ones just listed.
-      const listed = new Set(cards.map(([k]) => k.split(":").pop()));
-      const shown = [...cardsHeld.entries()].filter(([ref]) => !listed.has(ref.split(":").pop())).slice(-HANDOFF_CARDS_MAX);
-      if (shown.length) lines.push(`Rules of the tools you have run (shown once with each tool's first call; the whole note: skill(id)):\n${shown.map(([ref, c]) => `- ${ref}:\n${c.split("\n").map((l) => `  ${l}`).join("\n")}`).join("\n")}`);
+      const listed = new Set<string>();
+      const take = (ref: string, card: string | undefined) => {
+        const bare = ref.split(":").pop()!;
+        if (!card || listed.has(bare)) return;
+        items.push([ref, card]);
+        listed.add(bare);
+      };
+      for (const k of ids.slice().reverse()) take(k, cardText.get(k));
+      for (const [ref, c] of [...cardsHeld.entries()].reverse()) take(ref, c);
     }
-    // A prompt the extension had to add the index to loses it with the run a hand-off starts: it comes back here.
-    if (sectionText && (source === "extension" || source === "stale")) lines.push(`The index of this run's packs (your prompt no longer carries it):\n${sectionText}`);
-    return lines.join("\n");
+    const head = "Rules you worked with (shown once in the run; whole note: skill(id)):";
+    // The account of the notes read, then whole cards while they fit; the index's line last, always.
+    const render = (account: string): { text: string; rows: number } => {
+      const lines: string[] = [];
+      let room = max - (indexLine ? indexLine.length + 1 : 0);
+      if (account && account.length <= room) {
+        lines.push(account);
+        room -= account.length + 1;
+      }
+      const rows: string[] = [];
+      let used = head.length + 1;
+      for (const [ref, c] of items) {
+        const row = `- ${ref}: ${c.replace(/\s*\n\s*/g, " ")}`;
+        if (used + row.length + 1 > room) continue;
+        rows.push(row);
+        used += row.length + 1;
+      }
+      if (rows.length) lines.push(`${head}\n${rows.join("\n")}`);
+      if (indexLine) lines.push(indexLine);
+      return { text: lines.join("\n"), rows: rows.length };
+    };
+    // The whole account (sizes, done or not) when a card still fits beside it; else the ids, as many as leave room for one.
+    // With the release policy off the account is the line a seat had before the unloader.
+    const short = (n: number) => `Skill bodies a compaction took out of your context: ${ids.slice(0, n).join(", ")}${n < ids.length ? `, and ${ids.length - n} more` : ""}. Load again (skill(id)) the ones you still need.`;
+    const accounts = [...(releaseMode === "off" ? [] : [renderHandoffReads(ledger.compactionAccount())]), ...ids.map((_, k) => short(ids.length - k)), ""].filter((a, k, all) => a || k === all.length - 1);
+    let best: { text: string; rows: number } | null = null;
+    for (const a of accounts) {
+      const got = render(a);
+      if (got.text.length > max) continue;
+      if (!best) best = got;
+      if (!items.length || got.rows > 0) return got.text;
+    }
+    return best?.text ?? "";
   }
 
   pi.on("session_start", async (_event, ctx) => {
@@ -1397,6 +1820,17 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
       deps.restoreTurns?.(assistantTurns(ctx.sessionManager.getBranch()));
     } catch {
       // a session that cannot be read starts with an empty ledger: a body is sent once more, nothing worse
+    }
+    try {
+      // A process started again on its session (the watchdog's relaunch) is the same seat: the cards it was shown stay shown.
+      // A fresh session (the old one set aside) has none of them in its context, and is shown them again.
+      const kept = cardsStateOf(ctx.sessionManager.getBranch());
+      if (kept) {
+        for (const k of kept.ever) cardsEver.add(k);
+        for (const [ref, card] of kept.held) cardsHeld.set(ref, card);
+      }
+    } catch {
+      // a branch that cannot be read: the cards are shown once more, nothing worse
     }
   });
 
@@ -1413,8 +1847,6 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
     }
     // A compaction rebuilt the ledger from the session: what was waiting to be checked is settled by it.
     unverified = [];
-    // The cards it showed went with the context: the next call of a tool shows its note's card again.
-    cardsShown.clear();
     unreleasable.clear();
     watch = { after: "compaction", turn: deps.turns() };
     const stubbed = ledger.compactionAccount().released;
@@ -1788,14 +2220,19 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
 
   pi.on("tool_result", async (event, ctx) => {
     if (cardsMode === "off") return undefined;
-    const ev = event as unknown as { toolName?: string; input?: Record<string, unknown> };
+    const ev = event as unknown as { toolName?: string; input?: Record<string, unknown>; isError?: boolean };
+    const cwd = (ctx as unknown as { cwd: string }).cwd;
     const content = Array.isArray(event.content) ? event.content : [];
-    // A lead taken: the notes that fit its work, by name, once a lead (notesForText).
-    if ((ev.toolName === "lead_open" || ev.toolName === "lead_claim") && !(event as unknown as { isError?: boolean }).isError) {
+    // A lead taken: the notes that fit its work, by name, once a lead (notesForText); and its words, which choose the card of a later call.
+    if ((ev.toolName === "lead_open" || ev.toolName === "lead_claim") && !ev.isError) {
       try {
         const said = content.map((c) => (c as { text?: string }).text ?? "").join(" ");
         const lead = /\bL-\d+\b/.exec(`${String(ev.input?.lead ?? "")} ${said}`)?.[0] ?? "";
         const about = `${String(ev.input?.title ?? "")} ${String(ev.input?.why ?? "")} ${/"title":\s*"([^"]{0,300})"/.exec(said)?.[1] ?? ""}`;
+        if (about.trim()) {
+          if (lead) leadTexts.set(lead, about);
+          lastLead = about;
+        }
         const key = `lead:${lead || about.slice(0, 80)}`;
         if (cardsEver.has(key)) return undefined;
         const notes = notesForText(await packIndexes(), about).filter((x) => !ledger.get(x.ref) && !cardsHeld.has(x.ref));
@@ -1805,72 +2242,65 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
         if (cardsMode === "inject") {
           // The forced arm: the rules themselves, for the two notes that fit best.
           const all = await packIndexes();
-          const cards: string[] = [];
+          const ruled: string[] = [];
           for (const x of notes.slice(0, 2)) {
             const pack = all.find((p) => p.id === x.pack);
             const file = pack ? await readSkillFile(pack, x.id) : null;
             if (!file) continue;
             const card = skillCard(file);
             cardsHeld.set(x.ref, card);
-            cards.push(`- ${x.ref}:\n${card.split("\n").map((l) => `  ${l}`).join("\n")}`);
+            cardsEver.add(`note:${SkillLedger.key(x.pack, x.id)}`);
+            ruled.push(`- ${x.ref}:\n${card.split("\n").map((l) => `  ${l}`).join("\n")}`);
           }
-          if (cards.length) words = `The rules of the notes that fit this lead, to work by (the whole note: skill(id)):\n${cards.join("\n")}`;
+          if (ruled.length) words = `The rules of the notes that fit this lead, to work by (the whole note: skill(id)):\n${ruled.join("\n")}`;
         }
-        await deps.trace((ctx as unknown as { cwd: string }).cwd, "skill_card", { lead, ids: notes.map((x) => x.ref) }, { ok: true, kind: cardsMode === "inject" ? "lead_injected" : "lead", tokens: estimateTokens(words), turn: deps.turns() }).catch(() => undefined);
+        saveCards();
+        await deps.trace(cwd, "skill_card", { lead, ids: notes.map((x) => x.ref) }, { ok: true, kind: cardsMode === "inject" ? "lead_injected" : "lead", tokens: estimateTokens(words), turn: deps.turns() }).catch(() => undefined);
         return { content: [...content, { type: "text" as const, text: words }] };
       } catch {
         return undefined;
       }
     }
-    const tool = cardToolOf(ev.toolName ?? "", ev.input);
-    if (!tool) return undefined;
+    // A call that was refused or failed before it ran gets no card: seven of 39 cards of one run were pinned to a refusal.
+    if (ev.isError) return undefined;
+    const call = cardCallOf(ev.toolName ?? "", ev.input);
+    if (!call) return undefined;
     try {
-      const notes = (await (notesByTool ??= packIndexes().then((all) => toolNotes(all)))).get(tool) ?? [];
-      const refOf = (n: { pack: PackRef; id: string }) => (notes.filter((x) => x.id === n.id).length > 1 ? `${n.pack.id}:${n.id}` : n.id);
-      // A call that was refused or failed before it ran gets no card: seven of 39 cards of one run were pinned to a refusal.
-      if ((event as unknown as { isError?: boolean }).isError) return undefined;
-      // A generic tool (regkv, evtx_query, pe_info: more notes name it than CARD_TOOL_SPREAD) or one no note names has no
-      // one note that is its method. It gets its own manifest's rules, once: SWARM.md lists a pack tool in one line, so
-      // what its description says it does not show reaches a seat nowhere else unless it asks. Never the bare list of
-      // note ids ("Notes that name regkv: ... and 11 more"), which was 9 of 39 cards of one run and followed by no load.
-      if (!notes.length || notes.length > CARD_TOOL_SPREAD) {
-        const toolKey = `tool:${tool}`;
-        if (cardsEver.has(toolKey)) return undefined;
-        const card = await manifestCard((ctx as unknown as { cwd: string }).cwd, tool);
-        // Asked once a tool, whatever the answer: a shell or a read has no manifest, and is not looked up at every call.
-        cardsEver.add(toolKey);
-        if (!card) return undefined;
-        cardsHeld.set(`${tool} (its manifest)`, card);
-        const words = `Before you read this result, what ${tool} says of itself (its manifest; whole with tools(name: "${tool}")):\n${card}`;
-        await deps.trace((ctx as unknown as { cwd: string }).cwd, "skill_card", { tool, id: "manifest" }, { ok: true, pack: null, tokens: estimateTokens(words), turn: deps.turns() }).catch(() => undefined);
-        return { content: [{ type: "text" as const, text: words }, ...content] };
-      }
-      // One card a tool, the most specific note's, once in the run for this seat: not again after a compaction (20 of 39
-      // were the same card), and never a second note's for the same tool (the second picks were off the subject).
-      const toolKey = `tool:${tool}`;
-      if (cardsEver.has(toolKey)) return undefined;
-      const pick = notes[0]!;
-      const key = SkillLedger.key(pick.pack.id, pick.id);
-      if (ledger.get(key)) return undefined;
-      cardsEver.add(toolKey);
-      cardsShown.add(key);
-      let card = cardText.get(key);
-      if (!card) {
-        const file = await readSkillFile(pick.pack, pick.id);
-        if (!file) return undefined;
-        card = skillCard(file);
-        cardText.set(key, card);
-      }
-      const ref = refOf(pick);
-      cardsHeld.set(ref, card);
-      const words = `Before you read this result, the rules of ${tool} (from the note \`${ref}\`, ${pick.pack.id}; the whole note: skill('${ref}')):\n${card}`;
-      await deps.trace((ctx as unknown as { cwd: string }).cwd, "skill_card", { tool, id: pick.id }, { ok: true, pack: pick.pack.id, tokens: estimateTokens(words), turn: deps.turns() }).catch(() => undefined);
+      const shown = await cardFor(call, cwd);
+      if (!shown) return undefined;
+      saveCards();
+      await deps.trace(cwd, "skill_card", { tool: shown.name, id: shown.id }, { ok: true, pack: shown.pack, by: shown.by, tokens: estimateTokens(shown.words), turn: deps.turns() }).catch(() => undefined);
       // First in the result, where it is read: 24 of 39 cards sat in the last fifth of the result they came with.
-      return { content: [{ type: "text" as const, text: words }, ...content] };
+      return { content: [{ type: "text" as const, text: shown.words }, ...content] };
     } catch {
       return undefined;
     }
   });
+
+  /** The card a call brings (chooseCard) and its words; the state says it was shown, and a name asked once is not asked again. */
+  async function cardFor(call: CardCall, cwd: string): Promise<{ name: string; id: string; pack: string | null; by: string; words: string } | null> {
+    const index = await cardsOnce();
+    const leadText = (call.lead && leadTexts.get(call.lead)) || lastLead;
+    const choice = chooseCard(index, call, cardsEver, (key) => Boolean(ledger.get(key)), leadText);
+    // Asked once a name, whatever the answer: a shell or a read has no rules, and is not looked up at every call.
+    for (const name of call.tool ? [call.tool] : call.programs) if ((call.tool ? index.byTool : index.byProgram).has(name) || call.tool) cardsEver.add(`tool:${name}`);
+    if (!choice) return null;
+    if (choice.kind === "note") {
+      const { note, name } = choice;
+      cardsEver.add(`note:${note.key}`);
+      cardText.set(note.key, note.card);
+      cardsHeld.set(note.ref, note.card);
+      return { name, id: note.id, pack: note.pack.id, by: choice.by, words: `Before you read this result, the rules of ${name} (from the note \`${note.ref}\`, ${note.pack.id}; the whole note: skill('${note.ref}')):\n${note.card}` };
+    }
+    if (choice.kind === "rules") {
+      cardsHeld.set(`${choice.name} (its notes)`, choice.text);
+      return { name: choice.name, id: "rules", pack: null, by: "first", words: `Before you read this result, the rules of ${choice.name} from the notes that name it (a call that gives what one of them writes brings that note's card; the whole note: skill(id)):\n${choice.text}` };
+    }
+    const card = await manifestCard(cwd, choice.name);
+    if (!card) return null;
+    cardsHeld.set(`${choice.name} (its manifest)`, card);
+    return { name: choice.name, id: "manifest", pack: null, by: "first", words: `Before you read this result, what ${choice.name} says of itself (its manifest; whole with tools(name: "${choice.name}")):\n${card}` };
+  }
 
   /**
    * The first assistant reply after a release or a compaction, and how many thinking

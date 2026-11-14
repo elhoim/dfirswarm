@@ -556,9 +556,9 @@ export function handoffLeads(digest: string, max: number = HANDOFF_LEADS_MAX): s
 }
 
 /**
- * The whole of a hand-off's header but the note and the skills line: 2,000 characters. Hand-offs of eight runs carried 5,000
- * to 13,000 characters beside the note, most of it other seats' work and tool lists, into a context that had just been
- * emptied. The skills line is apart (it is the rules of the tools the seat has run, which a compaction would otherwise lose).
+ * The whole of a hand-off's header but the note: 2,000 characters. Hand-offs of eight runs carried 5,000 to 13,000
+ * characters beside the note, most of it other seats' work and tool lists, into a context that had just been emptied.
+ * The skills line (the rules of the tools the seat has run, which a compaction would otherwise lose) is inside it.
  */
 export const HANDOFF_HEADER_MAX = 2000;
 
@@ -594,13 +594,17 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
       : "This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.",
   );
   const last = hadNote ? "Your note follows verbatim; continue from its NEXT ACTION and never restart work it marks as done:\n---" : "No note was saved before this compaction (it was Pi's own recovery, not a hand-off). Read the summary above, call inbox, then continue.";
-  // The lead register takes what the rest leaves of HANDOFF_HEADER_MAX; the skills line is counted apart.
+  // The skills line comes bounded (skills.ts HANDOFF_SKILLS_MAX) and is counted in HANDOFF_HEADER_MAX: whole lines of it are
+  // dropped from its end when the lines above leave less. The lead register takes what is left.
   const LEADS_HEAD = "The lead register now (your leads are yours: go on with them, or release them; leads and finish status give the rest):\n";
   const used = [...lines, last].reduce((a, l) => a + l.length + 1, 0);
-  const room = HANDOFF_HEADER_MAX - used - LEADS_HEAD.length - 1;
+  const skillLines = (facts.skills ?? "").split("\n").filter(Boolean);
+  while (skillLines.length && used + skillLines.join("\n").length + 1 > HANDOFF_HEADER_MAX) skillLines.pop();
+  const skills = skillLines.join("\n");
+  const room = HANDOFF_HEADER_MAX - used - (skills ? skills.length + 1 : 0) - LEADS_HEAD.length - 1;
   const leads = facts.leads && room >= 120 ? [`${LEADS_HEAD}${handoffLeads(facts.leads, Math.min(HANDOFF_LEADS_MAX, room))}`] : facts.leads ? ["The lead register: call leads (no room for it here)."] : [];
   const tail = lines.pop() as string;
-  lines.push(...leads, ...(facts.skills ? [facts.skills] : []), tail, last);
+  lines.push(...leads, ...(skills ? [skills] : []), tail, last);
   return lines.join("\n");
 }
 

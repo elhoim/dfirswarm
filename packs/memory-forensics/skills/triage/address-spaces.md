@@ -3,7 +3,7 @@ id: triage/address-spaces
 title: Which address space a number is in
 when: A number from memory needs a place, or a raw region is compared with a rebuilt executable.
 needs: []
-card: A mem_carve hit is a container offset, not a physical or virtual address. Translate only with a map you can name: a crash dump's runs (mem_profile {"path": "<image>"} prints physical_start and file_offset), a LiME header, a Volatility layer and plugin, or a mem_fs path with the MemProcFS version. Missing or padded pages have no bytes: count them. Does not show: that equal numbers in two spaces are one place.
+card: A mem_carve hit is a container offset, not a physical or virtual address. Translate only by a named map: a crash dump's runs (mem_profile {"path": "<image>"} prints physical_start and file_offset), a LiME header, a Volatility layer and plugin, or a mem_fs path and MemProcFS version. Missing or padded pages have no bytes: count them. Does not show: that equal numbers in two spaces are one place.
 tools: [mem_profile, mem_fs, mem_carve]
 requires_host: [vol]
 ---

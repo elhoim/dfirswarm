@@ -851,7 +851,7 @@ test("the hand-off header lists what the seat read: sizes, which it marked done,
       seat.session.context = [{ type: "compaction", id: "k", firstKeptEntryId: null }];
       await seat.fire("session_compact", {});
       // The account, then the cards of the notes taken out (--skill-cards, on by default): the account is read on its own here.
-      const [header, cards] = seat.handle.handoffLine().split("\nCards of the notes you were working with");
+      const [header, cards] = seat.handle.handoffLine().split("\nRules you worked with");
       assert.match(cards ?? "", /pack-a:evidence\/two/, "the hand-off carries the card of the note taken out and not marked done");
       assert.equal(
         header.replace(/ \d+ \(/g, " N ("),

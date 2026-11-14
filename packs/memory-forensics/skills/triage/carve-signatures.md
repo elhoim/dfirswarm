@@ -3,7 +3,7 @@ id: triage/carve-signatures
 title: Carving structures by signature
 when: Using mem_carve or sig_carve to find hives, event logs, Prefetch or PE headers in an image.
 needs: []
-card: mem_carve {"path": "<image>", "kinds": ["registry hive"]}: read status first; partial gives coverage.resume_start for the rest. Offsets are file offsets, the only provenance. cut_complete false: the slice is shorter than declared, not a cut image. sig_carve gives the signature, not the start (object_offset). Slices: {"write_values": true} in a secret_output job. Does not show: a whole file, or absence from no hits.
+card: mem_carve {"path": "<image>", "kinds": ["registry hive"]}: read status first (partial gives coverage.resume_start); file offsets are the only provenance. cut_complete false: the slice is shorter than declared, not a cut image; sig_carve gives the signature, not object_offset. mem_carve slices need {"write_values": true} in a secret_output job. Does not show: a whole file, or absence from no hits.
 tools: [mem_carve, sig_carve, carve_handoff]
 requires_host: []
 ---

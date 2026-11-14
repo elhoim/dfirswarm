@@ -3,7 +3,7 @@ id: triage/no-framework
 title: A memory image no framework can read
 when: The job image lacks a usable framework, symbols or dependencies, or you want an answer first.
 needs: []
-card: Name the missing capability (framework, layer, symbols, plugin dependency). mem_carve {"path": "<image>"} first; parse a slice only with a tool in the run, else say it was not done; then ioc_scan or chunk_needles. Never present pattern matches as a process list. Slices and context: {"write_values": true} in a secret_output job. Does not show: a whole file from a hit.
+card: Name the missing capability (framework, layer, symbols, plugin dependency); never present pattern matches as a process list. mem_carve {"path": "<image>"} first; parse a slice only with a tool in the run, else say it was not done; then ioc_scan or chunk_needles. Slices and context: {"write_values": true} in a secret_output job. Does not show: a whole file from a hit.
 tools: [ioc_scan, chunk_needles, mem_carve]
 requires_host: [strings, yara]
 mentions: [regkv, evtx_carve, mam_scan, prefetch_mam]

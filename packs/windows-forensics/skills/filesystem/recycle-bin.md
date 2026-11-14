@@ -3,7 +3,7 @@ id: filesystem/recycle-bin
 title: Recycle Bin $I
 when: Original path, size, time.
 needs: [filesystem/deleted]
-card: recyclebin_i {"path": "<directory of $I files, named by the SID>"}: read status and the counts before an entry (a truncated record is never a complete path). bin_directory_sid is the account whose bin received the item, not who deleted it; deleted_at is when it went to the bin, not when the bin was emptied. r_file names the $R only if you extracted it beside the $I: record the $R's state in the image either way. No $I does not show the file was not deleted. Corroborate with usn_journal {"path": "<$J>", "name": "<name>"}. Does not show: where the content is now.
+card: recyclebin_i {"path": "<directory of $I files, named by the SID>"}: read status and counts first; a truncated record is never a complete path. bin_directory_sid is whose bin got the item, not who deleted it; deleted_at is the move to the bin, not the emptying. r_file names the $R only if you extracted it beside the $I. Does not show: where the content is now; no $I is no proof of no deletion.
 tools: [recyclebin_i, usn_journal]
 requires_host: []
 ---

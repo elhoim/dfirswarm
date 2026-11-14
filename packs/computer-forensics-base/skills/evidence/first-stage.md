@@ -2,7 +2,7 @@
 id: evidence/first-stage
 title: First-stage candidates
 when: Which file started it on one machine.
-card: first-stage-candidates (catalog_request target=<tree or member list> recipe=first-stage-candidates): ranks every macro-capable document of the WHOLE member list, wherever it lies, not only Documents, Desktop and Downloads; read coverage.json whole_list_read; the member list is catalog_search which=members. To answer "cannot be determined" to a "which file" question the whole member list must have been searched. A rank is a candidate with its signals named; a name found in a hive or log is a lead to the record, which regkv, evtx_query and prefetch_mam read.
+card: first-stage-candidates (catalog_request target=<tree or member list> recipe=first-stage-candidates) ranks macro-capable documents of the WHOLE member list (catalog_search which=members): read whole_list_read. To answer "cannot be determined" to a "which file" question the whole member list must have been searched. A rank is a lead: confirm it with regkv, evtx_query, prefetch_mam.
 needs: []
 tools: [catalog_search]
 requires_host: []

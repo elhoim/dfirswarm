@@ -3,7 +3,7 @@ id: strings/discipline
 title: A string in memory is an observation
 when: Any claim built on text found in a memory image.
 needs: []
-card: ioc_scan and chunk_needles {"path": "<file>", "needles": "<a>|<b>"} search only the needles given, ASCII and UTF-16LE, case-sensitive, in stored bytes. Read status (partial says where to go on), then all_results, not the inline page. Context only with {"write_values": true} in a secret_output job. Cite offset, address space, encoding and method. Does not show: that anything ran, connected or was typed.
+card: ioc_scan and chunk_needles {"path": "<file>", "needles": "<a>|<b>"} search only the needles given, ASCII and UTF-16LE, case-sensitive, in stored bytes. Read status (partial says where to go on), then all_results, not the inline page; cite offset, address space, encoding, method. Context needs {"write_values": true} in a secret_output job. Does not show: that anything ran, connected or was typed.
 tools: [ioc_scan, chunk_needles]
 requires_host: [strings]
 ---

@@ -3,7 +3,7 @@ id: triage/what-you-have
 title: Classify a memory capture first
 when: A memory image, crash or process dump, VM state, paging or hibernation file is in the evidence.
 needs: [evidence/verify]
-card: check_inputs, then mem_profile {"path": "<image>"}: a heuristic over the header and a sample. "unrecognised" fits a flat capture and a non-memory file alike; OS hints are strings in sampled_ranges; file_pages_4k_estimate is length over 4096. Confirm format, architecture, ranges and completion from validated headers and the acquisition record, not the name. A check_inputs pass is agreement with the manifest, not authenticity. Does not show: completeness, build or capture time.
+card: check_inputs (agreement with the manifest, not authenticity), then mem_profile {"path": "<image>"}: a heuristic over header and sample. "unrecognised" fits a flat capture and a non-memory file alike; file_pages_4k_estimate is length over 4096. Take format, architecture, ranges and completion from validated headers and the acquisition record. Does not show: completeness, build or capture time.
 tools: [mem_profile, check_inputs]
 requires_host: []
 ---
