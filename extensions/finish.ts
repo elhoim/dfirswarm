@@ -1715,26 +1715,131 @@ export async function recordCheck(sandboxRoot: string, by: string, revision: str
 }
 
 /**
- * Where the finish stands, for any seat (finish status): readiness, the
- * coordinator, the last check, the report's review, and what is late
- * against the report. What is late needs the lease's boundary: before a
- * coordinator's prepare (or done) there is none, and nothing is listed.
+ * The question a report's heading or a table row's first cell names: `1`, `1. What ...`, `Q1`, `Q-1`, `Question 1`,
+ * `question:1`. Null for any other heading (Summary, Timeline, Method).
  */
+export function reportQuestionOf(text: string): string | null {
+  const t = text.replace(/[*_`]/g, "").trim();
+  const m = /^question:([A-Za-z0-9._-]+)/i.exec(t) ?? /^(?:§\s*)?(\d{1,3})(?:[.):](?:\s|$)|$)/.exec(t) ?? /^(?:Q|Question)\s*-?\s*(\d{1,4})\b/i.exec(t);
+  return m ? `question:${m[1]}` : null;
+}
+
+/** A line of a report or a ledger value as the two are compared: its first line's words, without marks, citations, edge punctuation or case. */
+export function answerLineKey(line: string): string {
+  return firstLine(line)
+    .replace(/\s*[([]\s*E-\d+(?:\s*[,;]\s*E-\d+)*\s*[)\]]/g, "")
+    .replace(/[*`]|__/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\s"'“”]+|[\s.;,"'“”]+$/g, "")
+    .toLowerCase();
+}
+
+/** A line that labels the answer ("Answer: x", "**Answer:** x", "- A: x"): what follows the label, or null. */
+function labelledAnswer(line: string): string | null {
+  const m = /^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*(?:answer|a)\s*(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?\s*(.*)$/i.exec(line);
+  return m ? m[1]!.replace(/^(?:\*\*|__)\s*/, "").trim() : null;
+}
+
+/** A line that only frames a section (the question repeated, a quote, a rule, a table's separator): never its answer. */
+function framing(line: string): boolean {
+  const t = line.trim();
+  return !t || /^>/.test(t) || /^(?:[-*_]\s*){3,}$/.test(t) || /^\|?\s*:?-{3,}/.test(t) || /^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*(?:question|q)\s*(?:\*\*|__)?\s*[:：]/i.test(t);
+}
+
 /**
- * A report held against the ledger: each question's standing answer whose value's first line the report does not hold,
- * and each E-<n> the report cites that the ledger does not have. A run's report held six exact strings its ledger had
- * as sentences (s082123), another cited E-97 in a ledger that ended at E-95, a third said "pending" twelve minutes
- * after the answer was recorded. Pure: `answers` are the standing answers, `maxSeq` the ledger's last entry.
+ * The answer a report gives each question, as a reader takes it: in a section whose heading names the question, the
+ * line labelled as its answer, else its first line that says something (the question repeated, a quote and a rule are
+ * passed over); in a table, the row whose first cell names the question, its second cell. The first one a question
+ * has counts.
  */
-export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number): string[] {
+export function reportAnswers(report: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const lines = report.split(/\r?\n/);
+  let fenced = false;
+  let current: { q: string; level: number; lines: string[] } | null = null;
+  const close = () => {
+    if (!current || out.has(current.q)) return;
+    const said = current.lines.filter((l) => !framing(l));
+    const labelled = current.lines.map(labelledAnswer).find((x) => x !== null && x !== "");
+    const first = labelled ?? said.find((l) => !/^\s*\|/.test(l)) ?? said[0];
+    if (first !== undefined) out.set(current.q, first);
+  };
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (fenced) continue;
+    const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (h) {
+      const level = h[1]!.length;
+      const q = reportQuestionOf(h[2]!);
+      if (q || !current || level <= current.level) {
+        close();
+        current = q ? { q, level, lines: [] } : null;
+      }
+      continue;
+    }
+    const row = /^\s*\|(.+)\|\s*$/.exec(line);
+    if (row) {
+      const cells = row[1]!.split("|").map((c) => c.trim());
+      const q = cells.length >= 2 ? reportQuestionOf(cells[0]!) : null;
+      if (q && !out.has(q) && cells[1]) {
+        out.set(q, cells[1]);
+        continue;
+      }
+    }
+    current?.lines.push(line);
+  }
+  close();
+  return out;
+}
+
+/** How many dated events a report says its timeline holds ("42 dated events", "a timeline of 42 events", "42 events on the timeline"); null when it says none. */
+export function reportEventCount(report: string): number | null {
+  const flat = report.replace(/[*_`]/g, "").replace(/\s+/g, " ");
+  const m =
+    /\b(\d{1,6}) dated events?\b/i.exec(flat) ??
+    /\btimeline (?:of|with|holds|has|lists) (\d{1,6}) (?:dated )?events?\b/i.exec(flat) ??
+    /\b(\d{1,6}) (?:dated )?events? (?:on|in) the (?:timeline|ledger)\b/i.exec(flat);
+  return m ? Number(m[1]) : null;
+}
+
+/** The ledger's dated events that stand: kind event, a time that parses, not superseded. Only these are counted. */
+export function datedEvents(entries: readonly P.LedgerEntry[], replaced: ReadonlySet<number> | ReadonlyMap<number, unknown>): number {
+  return entries.filter((e) => e.kind === "event" && !replaced.has(e.seq) && Number.isFinite(Date.parse(String(e.ts ?? "")))).length;
+}
+
+/**
+ * A report held against the ledger, section by section (B7). Each question's answer in the report (reportAnswers: the
+ * line its section leads with, or its table row) is compared with the first line of the question's standing answer's
+ * value, without marks, citations or case; a question answered in one and not the other is named too. A count of dated
+ * events the report states is held to the ledger's standing dated events (an undated or superseded event is not one).
+ * And each E-<n> the report cites that the ledger does not have. A run's report held six exact strings its ledger had
+ * as sentences (s082123), another cited E-97 in a ledger that ended at E-95, a third said "pending" twelve minutes after
+ * the answer was recorded. Finding the value anywhere in the report is not enough: a report whose section 5 leads with
+ * a sentence and quotes the value further down is graded on the sentence. Pure: `answers` are the standing answers,
+ * `maxSeq` the ledger's last entry, `dated` its standing dated events when known.
+ */
+export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number, dated?: number): string[] {
   const out: string[] = [];
-  const flat = report.replace(/[*_`]/g, "").replace(/\s+/g, " ").toLowerCase();
+  const said = reportAnswers(report);
+  const cut = (x: string) => (x.length > 120 ? `${x.slice(0, 117)}...` : x);
+  const standing = new Map(answers.map((a) => [a.section, a]));
   for (const a of answers) {
     const first = firstLine(a.value);
     if (!first) continue;
-    const want = first.replace(/[*_`]/g, "").replace(/\s+/g, " ").toLowerCase();
-    if (!flat.includes(want)) out.push(`the report does not hold ${a.section}'s standing answer (E-${a.seq}): its value's first line, ${first.length > 120 ? `${first.slice(0, 117)}...` : first}, is not in it; the report and the ledger must say the same, so bring one to the other`);
+    const line = said.get(a.section);
+    if (line === undefined) {
+      out.push(`the report has no section for ${a.section}, whose standing answer is E-${a.seq} (${cut(first)}): give it a section that leads with that answer`);
+      continue;
+    }
+    if (answerLineKey(line) !== answerLineKey(first)) out.push(`the report's section for ${a.section} leads with "${cut(firstLine(line))}", and its standing answer E-${a.seq} is "${cut(first)}": the report and the ledger must say the same, so bring one to the other`);
   }
+  for (const [q, line] of said) {
+    if (standing.has(q) || !answerLineKey(line)) continue;
+    out.push(`the report's section for ${q} leads with "${cut(firstLine(line))}", and the ledger has no standing answer for ${q}: record it, or say in the report that it is not answered`);
+  }
+  const count = reportEventCount(report);
+  if (dated !== undefined && count !== null && count !== dated) out.push(`the report says its timeline holds ${count} dated event${count === 1 ? "" : "s"}, and the ledger has ${dated} standing dated event${dated === 1 ? "" : "s"} (an undated or superseded event is not counted)`);
   const cited = new Set([...report.matchAll(/\bE-(\d{1,6})\b/g)].map((m) => Number(m[1])));
   const missing = [...cited].filter((n) => n > maxSeq || n < 1).sort((x, y) => x - y);
   if (missing.length) out.push(`the report cites ${missing.slice(0, 10).map((n) => `E-${n}`).join(", ")}${missing.length > 10 ? ` and ${missing.length - 10} more` : ""}, which the ledger does not have (its last entry is E-${maxSeq})`);
@@ -1749,9 +1854,15 @@ export async function reportCheck(sandboxRoot: string, report: string | null | u
   const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
   const replaced = P.supersededBy(entries);
   const answers = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && String(e.section ?? "").startsWith("question:")).map((e) => ({ section: String(e.section), seq: e.seq, value: String(e.value ?? "") }));
-  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0));
+  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0), datedEvents(entries, replaced));
 }
 
+/**
+ * Where the finish stands, for any seat (finish status): readiness, the
+ * coordinator, the last check, the report's review, and what is late
+ * against the report. What is late needs the lease's boundary: before a
+ * coordinator's prepare (or done) there is none, and nothing is listed.
+ */
 export async function finishStatus(ctx: P.SwarmContext): Promise<Record<string, unknown>> {
   const r = await readiness(ctx.sandboxRoot);
   const st = await readFinish(ctx.sandboxRoot);
