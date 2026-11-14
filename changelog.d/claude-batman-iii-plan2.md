@@ -275,3 +275,42 @@ timeline entry's host; a census that could not be read is not counted as one), e
 (`recovery_key_scan` names the first 2,000 entries it did not reach and counts the rest), computer-forensics-base 1.17.4 to 1.17.17,
 network-forensics 1.14.16 (`pcap_extract`, `conn_series`, `quic_inspect`, `tls_decrypt` and the capture recipe end a program that
 closed its output).
+
+### Fixed: the gaps an independent review found in this change
+
+A review of the plan's 70 items against the code found 33 only partly done; each is now met in code and held by a test, and a criterion
+that needs a live run is held by a stand-in (a fixture, synthetic scale, a stand-in hub):
+
+- **Hub and job service.** Each register (ledger, budget, history) has its own lock and in-process line, so a record holding its lock no
+  longer stalls a usage fold or a post. An answer past the 256 KiB wall is cut, the whole kept in the seat's `tool-output/`, and what
+  leaves is always within the wall (host runs too); the ledger window is paged by bytes at the hub. A derived-catalogue offer, `meantRef`,
+  `images_unread` and `job_status` read the manifest index, not the manifest. The staging budget is one for every live run on a disk, and
+  a quota promised and not yet written is held as a reservation. Health samples carry disk speed, memory pressure and structure sizes, and
+  the 60% heap snapshot is tested on the real hub. Every line of `vm-hub.log` says when.
+- **Records and finish.** The kinds' record tools go to the weak model class only (`extensions/model-class.ts`, one definition for them
+  and for leads); the worker prompt is 73,097 bytes (was 80,300). An extra digest is refused. Unrecorded work holds `done` for up to 600 s
+  and is asked about once; a sighted answer format is said on the result; `record_candidate` records a candidate in one call. The report
+  is compared with the ledger section by section.
+- **Seats.** The hand-off header keeps the seat's jobs, leads and finish count ahead of its skills line within 2,000 characters; the
+  summary starts on a copy at the notice line; every image a seat reads is brought within 1,568 px and 300 KB; the tools list is 8,482
+  characters for 153 tools; the context hook's reads share one 1.5 s deadline; a library hint is repeated once a compaction cycle.
+- **Jobs.** A pack tool called directly resolves `job:`, `input:`, `import:`, `$OUT` and `{OUT}` and runs a directory once per file, as on
+  `job_run`. `make_tool` requires a self-test, run on a staged copy. A path another job holds is refused naming that job, the nearest
+  paths and `store_find`. A shell call stopped at its limit is given a ready `job_run` call, and a sleep loop over jobs a `wait` that waits.
+  A manifest's `companions` brings a hive's `.LOG*` or a database's `-wal` into a job's scope.
+- **Leads and watchdog.** A seat stuck 15 minutes in one call has its leads offered, a silent one's are freed; a seat of the weak class
+  names at most three questions to a lead, and its team is seeded by default; the watchdog reads the platform (commit backlog, hub
+  latency) before it nudges, and a seat joined to another's identical job is not idle.
+- **Operator.** `start`, `stop` and `resume` run from a frozen copy of swarm.sh; a run still in its kickoff counts against capacity;
+  `swarm.sh pack-add` adds a pack to a live run, and the hub keeper adds the memory pack itself when a catalogue lists a dump; a supplied
+  program that passed its known-answer test meets `--requires`; the QR probe tries `qr_read`, OCR is tested against a rendered line, and
+  the result is in SWARM.md, which is 45,077 bytes with every pack (the per-tool catalogue is PACK-TOOLS.md); `metrics` prints the plan's
+  fourteen measures and `--arms` sets runs of the notes experiment side by side.
+- **Cards and packs.** A card is chosen from the note a call matches, never by words common to a tool's notes; every hand card is reached,
+  at most 400 characters and four sentences. brotli 1.2.1 is in the base pack's requirements, and the rebuilt `full` image decodes it.
+  The generic job contract test gives seven tool families a valid input at a relative path with spaces.
+
+Two verification rounds followed. The first found a forged tool whose child left its process group outliving the tool's limit, and the
+watchdog's log stamper holding the launcher's output open for the whole run (a console start, `| tee` and `ssh … start` saw no end);
+both are fixed, with the P2s it found. The last round found the hub keeper's pack-add refused from the run's frozen copy, which had no
+`images/`; the copy now carries them. What that round found otherwise is listed as known limits in the pull request.
