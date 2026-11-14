@@ -1221,6 +1221,40 @@ figure or "not measured" and why the run's registers cannot give it (the JSON's
 | Empty summaries | Compactions whose `summary_chars` is 0, of those whose row gives it. |
 | Largest answer | The largest answer a seat's tool call returned, in characters, and which tool; and answers too large to send. |
 
+Last, **Section 8** gives the fourteen measures of the improvement plan's
+verification runs, in that table's order, each with its figure or "not
+measured" and why (the JSON's `section8`: each row's `n`, `figure`, `unit`, the
+`register` it was read from, and the job or entry ids it counts in `items`):
+
+| # | Measure | What is measured, exactly |
+| --- | --- | --- |
+| 1 | Commit wait of small jobs | The seconds from each job's `job_finished` to its first `job_committed`, summed over the jobs that committed 50 output files or fewer (job-seconds). |
+| 2 | Seal rate | Files a second over the jobs that committed 10,000 files or more: their files over their seconds from `job_fenced` (else the end) to the commit; and the slowest one. Not measured without such a job: a small seal's time is its fixed cost. |
+| 3 | Largest hub answer | The largest answer the hub cut at its bound (`answer_too_large`, in bytes); else the largest `answer_chars` a seat's row gives (characters). |
+| 4 | Table lock timeouts | Trace rows that say "Timed out waiting for locks/". |
+| 5 | Gap before a model call | The gaps of the harness measure above, summed over every request that followed a tool result (seat-minutes). Only with a gateway log. |
+| 6 | Refusals per accepted record | As the harness measure. |
+| 7 | Library share of job_run text | The library hint (`library_chars`) over `job_run`'s answers (`answer_chars`). |
+| 8 | Compactions per seat-hour, with packs and without | This run's figure, and whether it ran with packs (its `skills_index` rows name them). The ratio needs a run of the other kind: `--arms` gives it over the runs it is given. |
+| 9 | Shell time | The `duration_ms` of the seats' `bash` and `powershell` rows, summed (seat-minutes); rows without one are counted apart. |
+| 10 | Plain values in established answers | The standing established answers in scope whose value's first line gives the question's format where it names one, else does not read as a sentence (the record's own format check), over all of them. |
+| 11 | High-confidence answer versions changed or lowered | Each answer entry stated high whose question a later answer entry gave another value (its first line), another result, or a confidence below high; listed by entry. |
+| 12 | Minutes from first sighting to answer | The harness measure; its figure is the longest. |
+| 13 | Arrival of the kickoff listing | Minutes from the run's start (`budget.json` `started_at`, else the journal's `store_opened`) to the first `generation_committed` a kickoff recipe made. |
+| 14 | Whole-image extractions | Tool, command and recipe jobs, not a listing, that name no selection (`members`, `members_file`, `paths`, …) and ask for the whole (`whole: true`) or committed 10,000 files or more. A call joined to an identical one (`job_deduplicated`) is no job and is not counted. |
+
+`--arms <run-dir>...` (`swarm.sh metrics --arms <id>...`) sets the runs of the
+notes experiment side by side by their `--skill-cards` arm, read from each
+run's registry record (else from its trace: a lead's card that carries the
+notes' rules marks inject, one that names them marks on): the cards given, the share of
+wrong formats in the first tool call after a card against the other tool calls
+(a wrong format: a `job_run` refused before it ran, or a tool called as itself
+that exited 2), refusals per accepted record, and rows 8, 10, 11 and 12 by run.
+Inject against on is judged only with two runs or more of each arm, and a
+difference is said only when every run of one arm is on one side of every run
+of the other. Row 8's ratio is the mean of the runs with packs over the mean
+of those without.
+
 `--compare` reads two runs of the same goal after both ended, question by
 question by section, each run over its own scope: its standing result and
 the result's kind (it asserts: established or partial; a negative, as the
