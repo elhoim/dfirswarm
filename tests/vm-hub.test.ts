@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
 import { agentDeadPath, agentDonePath, appendEvent, claimName, createContext, diffWatchedPaths, finishLineVerdict, postMessage, runFinishLine, teamView, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
-import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
+import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, stampLines, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 after(async () => {
@@ -2423,4 +2423,27 @@ test("a seat's harness that sees the provider answer with another model is heard
   assert.equal(told().length, 1, "once per seat and model");
   assert.deepEqual(JSON.parse(told()[0].split("\t")[1]), { agent: "a0" });
   assert.equal(lines.filter((l) => l.tool === "model_reported").length, 3, "every line reaches the trace");
+});
+
+test("every line of the hub's log says when (Plan 2, 0.13): its own, an error's, a chunk that ends mid-line goes on unstamped", async () => {
+  const got: string[] = [];
+  const stream = { write: (chunk: string) => (got.push(chunk), true) };
+  let n = 0;
+  const put = stampLines(stream as never, () => `2026-11-14T10:00:0${n++}.000Z`);
+  stream.write("vm-hub: up, 2 agent socket(s)\n" as never);
+  stream.write("first half, " as never);
+  stream.write("second half\nError: boom\n    at x\n" as never);
+  stream.write(Buffer.from("bytes\n") as never);
+  put();
+  stream.write("after\n" as never);
+  assert.equal(got.join(""), "2026-11-14T10:00:00.000Z vm-hub: up, 2 agent socket(s)\n2026-11-14T10:00:01.000Z first half, second half\n2026-11-14T10:00:02.000Z Error: boom\n2026-11-14T10:00:03.000Z     at x\n2026-11-14T10:00:04.000Z bytes\nafter\n");
+  // The hub itself: what it says on its way out is stamped, and SWARM_LOG_TS=0 leaves it as it was.
+  const { spawnSync } = await import("node:child_process");
+  const script = join(import.meta.dirname, "..", "scripts", "vm-hub.ts");
+  const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", script], { encoding: "utf8", input: "" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z vm-hub: usage: /);
+  assert.ok(r.stderr.split("\n").filter(Boolean).every((l) => /^\d{4}-\d{2}-\d{2}T[\d:.]+Z /.test(l)), r.stderr);
+  const plain = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", script], { encoding: "utf8", input: "", env: { ...process.env, SWARM_LOG_TS: "0" } });
+  assert.match(plain.stderr, /^vm-hub: usage: /);
 });

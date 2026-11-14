@@ -3416,7 +3416,50 @@ export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number 
   return Number.isInteger(n) && n > 0 ? n : 14400;
 }
 
+/**
+ * Each line the hub writes to its log (traces/vm-hub.log takes its stdout and
+ * stderr: its own lines, Node's warnings, an error's stack) begins with when,
+ * in UTC, as idle-nudge's do under SWARM_LOG_TS (Plan 2, 0.13): the log of the
+ * runs s17fdfe and s5d814f could not be laid beside the trace. A chunk that
+ * ends mid-line leaves the next chunk to go on with it, unstamped. What the
+ * runtime writes past these streams (the text of a fatal out-of-memory) is
+ * not stamped. Returns a function that puts the stream back.
+ */
+export function stampLines(stream: { write: (...a: never[]) => boolean }, now: () => string = () => new Date().toISOString()): () => void {
+  const write = stream.write;
+  let atStart = true;
+  const stamped = function (this: unknown, chunk: unknown, ...rest: unknown[]): boolean {
+    const text = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? Buffer.from(chunk).toString(typeof rest[0] === "string" ? (rest[0] as BufferEncoding) : "utf8") : String(chunk);
+    let out = "";
+    for (let i = 0; i < text.length; ) {
+      if (atStart) {
+        out += `${now()} `;
+        atStart = false;
+      }
+      const nl = text.indexOf("\n", i);
+      if (nl < 0) {
+        out += text.slice(i);
+        break;
+      }
+      out += text.slice(i, nl + 1);
+      i = nl + 1;
+      atStart = true;
+    }
+    const tail = rest.filter((x) => typeof x === "function");
+    return (write as (...a: unknown[]) => boolean).call(stream, out, "utf8", ...tail);
+  };
+  stream.write = stamped as unknown as typeof stream.write;
+  return () => {
+    stream.write = write;
+  };
+}
+
 async function main(): Promise<void> {
+  // SWARM_LOG_TS=0 leaves the lines as they are.
+  if (process.env.SWARM_LOG_TS !== "0") {
+    stampLines(process.stdout);
+    stampLines(process.stderr);
+  }
   const args = process.argv.slice(2);
   const opt = (name: string) => {
     const i = args.indexOf(name);
