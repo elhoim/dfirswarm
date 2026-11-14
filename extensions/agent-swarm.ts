@@ -383,18 +383,40 @@ export function jobRunShape(p: { command?: unknown; tool?: unknown; args?: unkno
 
 /**
  * A shell command that waits on a job by sleeping in a loop over the store or a job's files: 42 such loops cost one run
- * 117 seat-minutes. job_status waits for a job, and `wait` wakes on its result post. Returns why it is refused, or null.
+ * 117 seat-minutes. job_status waits for a job, and `wait` wakes on its result post. Returns why it is refused, with the
+ * job_status call to send instead for each job the loop names (at most three), or null.
  */
 export function sleepLoopOverJobs(command: unknown): string | null {
   const c = typeof command === "string" ? command : "";
   if (!/\b(while|until|for)\b[\s\S]*\bsleep\s+\d/.test(c)) return null;
   if (!/store\/jobs\/|job_status|\bj\d{6}\b/.test(c)) return null;
-  return "this command sleeps in a loop to wait on a job. Do not poll from the shell: job_status(job_id, wait_seconds: 100) waits for it and says why it waits (queued behind what, or finished and being sealed), and wait wakes on the post tagged result that says it is done. Meanwhile take other work";
+  const ids = [...new Set(c.match(/\bj\d{6,}\b/g) ?? [])].slice(0, 3);
+  const calls = (ids.length ? ids : ["<the job's id>"]).map((id) => `job_status(${JSON.stringify({ job_id: id, wait_seconds: 100 })})`);
+  return `this command sleeps in a loop to wait on a job. Do not poll from the shell: send ${calls.join(" and ")} instead. It waits for the job and says why it waits (queued behind what, or finished and being sealed), and wait wakes on the post tagged result that says it is done. Meanwhile take other work`;
 }
 
-export function shellTimeoutNote(l: ShellLimit): string {
+/** The most of a command a ready job_run call carries whole; a longer one is named by its length. */
+export const READY_COMMAND_MAX = 4000;
+/** A job's own limit, as job_run takes it (default 900, at most 14400). */
+const JOB_TIMEOUT_DEFAULT_S = 900;
+const JOB_TIMEOUT_MAX_S = 14_400;
+
+/**
+ * The job_run call that runs a shell call stopped at its limit as a job: the same command, and a limit of its own (the
+ * time the call asked for when that was over the shell's most, else a job's default). A command longer than
+ * READY_COMMAND_MAX is named by its length rather than repeated.
+ */
+export function readyJobRun(command: unknown, l: ShellLimit): string {
+  const c = typeof command === "string" ? command.trim() : "";
+  const timeout = l.why === "capped" && l.asked ? Math.min(Math.ceil(l.asked), JOB_TIMEOUT_MAX_S) : JOB_TIMEOUT_DEFAULT_S;
+  if (!c) return `job_run(${JSON.stringify({ command: "<the same command>", timeout_seconds: timeout })})`;
+  if (c.length > READY_COMMAND_MAX) return `job_run({"command": <the same command, ${c.length} characters>, "timeout_seconds": ${timeout}})`;
+  return `job_run(${JSON.stringify({ command: c, timeout_seconds: timeout })})`;
+}
+
+export function shellTimeoutNote(l: ShellLimit, command?: unknown): string {
   const was = l.why === "capped" ? `the ${l.asked} s it asked for is over the harness's limit of ${l.seconds} s for one shell call in your VM` : `a shell call in your VM that names no timeout has the harness's limit of ${l.seconds} s`;
-  return `The call was stopped at its limit: ${was}. Run longer work as a job (job_run with the same command, and timeout_seconds for what it needs): it has a limit of its own, its output is kept in the store and can be cited, and you go on working while it runs (job_status, or wait for its post). A call that must run in your own VM for longer names its own timeout, up to ${SHELL_TIMEOUT_MAX_S} s.`;
+  return `The call was stopped at its limit: ${was}. Run longer work as a job (job_run with the same command, and timeout_seconds for what it needs): it has a limit of its own, its output is kept in the store and can be cited, and you go on working while it runs (job_status, or wait for its post). Ready to send: ${readyJobRun(command, l)}. A job runs from the run's directory and writes only under $OUT: point the command's outputs there, and list what it reads in inputs to give it only that. A call that must run in your own VM for longer names its own timeout, up to ${SHELL_TIMEOUT_MAX_S} s.`;
 }
 
 /**
@@ -2163,7 +2185,7 @@ export default function (pi: ExtensionAPI) {
     const limit = callId ? shellLimits.get(callId) : undefined;
     if (callId) shellLimits.delete(callId);
     if (limit && isError && /timeout|timed out/i.test(JSON.stringify(content ?? ""))) {
-      content = [...(Array.isArray(content) ? content : []), { type: "text", text: shellTimeoutNote(limit) }];
+      content = [...(Array.isArray(content) ? content : []), { type: "text", text: shellTimeoutNote(limit, input?.command) }];
       contentChanged = true;
       if (agentId) await logEvent(ctx.cwd, agentId, "shell_timeout", { tool: name }, { ok: true, seconds: limit.seconds, why: limit.why }).catch(() => undefined);
     }
