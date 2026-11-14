@@ -225,7 +225,7 @@ import { coerceArgs } from "./forged-args.ts";
 import { sightingDigest } from "./sighting.ts";
 
 /** How long a read made before a model call may take before the call goes out on the last known value. */
-const PRECALL_DEADLINE_MS = 1500;
+export const PRECALL_DEADLINE_MS = 1500;
 
 type ToolCtx = { cwd: string };
 
@@ -1550,20 +1550,25 @@ export default function (pi: ExtensionAPI) {
     if (boardSocket() && hubLost.since) return;
     const cwd = ctx.cwd;
     // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
-    // Each read has PRECALL_DEADLINE_MS: past it the call goes out on the last value the hub gave (last-known.ts), and
-    // the read goes on for the next call. A busy hub must not stand between a tool result and the model.
-    const before = await precallBudget.read(() => readBudgetLive(cwd)).catch(() => null);
+    // The reads before this call share one deadline, PRECALL_DEADLINE_MS from now: the sentinel is read beside the
+    // budget, not after it, and each read waits only what is left. Past it the call goes out on the last value the hub
+    // gave (last-known.ts), and the read goes on for the next call; a read already past a deadline is not waited on
+    // again. Three reads one after another, each with its own deadline, held a call 4.5 s while the hub was held.
+    const until = Date.now() + PRECALL_DEADLINE_MS;
+    const left = () => Math.max(0, until - Date.now());
+    const sentinelRead = precallSentinel.read(() => swarmDoneExists(cwd), left()).catch(() => false);
+    const before = await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => null);
     if (before) await enforceAllCaps(cwd, before, ctx).catch(() => undefined);
     // Read again after the caps were enforced: the check that writes the
     // pause holds the call it was made for too.
-    const budget = before ? await precallBudget.read(() => readBudgetLive(cwd)).catch(() => before) : null;
+    const budget = before ? await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => before) : null;
     // A paused run (the stop policy): this call does not go out. The turn
     // ends here and the seat stays, idle, with everything it held; the
     // operator's extension wakes it (the watchdog's prompt). In a VM this is
     // advisory: the hub prompts no paused seat, and the model gateway
     // refuses the call on the host.
     const paused = budget?.paused;
-    if (paused && !stoppedByHarness && !(await precallSentinel.read(() => swarmDoneExists(cwd)).catch(() => false))) {
+    if (paused && !stoppedByHarness && !(await sentinelRead)) {
       if (pauseHeld !== paused.at) {
         pauseHeld = paused.at;
         await logEvent(cwd, agentId, "pause_hold", { reason: paused.reason, since: paused.at }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub and the model gateway hold the brake)" : "host" }).catch(() => undefined);
@@ -1572,7 +1577,7 @@ export default function (pi: ExtensionAPI) {
       ctx.abort();
       return;
     }
-    const sentinel = !stoppedByHarness && (await precallSentinel.read(() => swarmDoneExists(cwd)).catch(() => false));
+    const sentinel = !stoppedByHarness && (await sentinelRead);
     if (!stoppedByHarness && !sentinel) return;
     precallStopped = true;
     if (sentinel) {
