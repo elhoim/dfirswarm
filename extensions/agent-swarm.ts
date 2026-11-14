@@ -403,16 +403,18 @@ export function jobRunShape(p: { command?: unknown; tool?: unknown; args?: unkno
 
 /**
  * A shell command that waits on a job by sleeping in a loop over the store or a job's files: 42 such loops cost one run
- * 117 seat-minutes. job_status waits for a job, and `wait` wakes on its result post. Returns why it is refused, with the
- * job_status call to send instead for each job the loop names (at most three), or null.
+ * 117 seat-minutes. `wait` sleeps at no cost and wakes on the job's result post, which goes to the seat that ran the job
+ * and to each seat that joined it; job_status says where a job stands now and does not wait. Returns why it is refused,
+ * with the wait call to send instead and the job_status call for each job the loop names (at most three), or null.
  */
 export function sleepLoopOverJobs(command: unknown): string | null {
   const c = typeof command === "string" ? command : "";
   if (!/\b(while|until|for)\b[\s\S]*\bsleep\s+\d/.test(c)) return null;
   if (!/store\/jobs\/|job_status|\bj\d{6}\b/.test(c)) return null;
   const ids = [...new Set(c.match(/\bj\d{6,}\b/g) ?? [])].slice(0, 3);
-  const calls = (ids.length ? ids : ["<the job's id>"]).map((id) => `job_status(${JSON.stringify({ job_id: id, wait_seconds: 100 })})`);
-  return `this command sleeps in a loop to wait on a job. Do not poll from the shell: send ${calls.join(" and ")} instead. It waits for the job and says why it waits (queued behind what, or finished and being sealed), and wait wakes on the post tagged result that says it is done. Meanwhile take other work`;
+  const status = (ids.length ? ids : ["<the job's id>"]).map((id) => `job_status(${JSON.stringify({ job_id: id })})`);
+  const many = ids.length > 1;
+  return `this command sleeps in a loop to wait on a job. Do not poll from the shell: send wait(${JSON.stringify({ seconds: WAIT_MAX_SECONDS })}) instead. It sleeps at no cost and wakes on the post tagged result that says a job is done, which comes to the seat that ran the job and to each seat that joined it, or on any other post for you. ${status.join(" and ")} ${many ? "say" : "says"} where ${many ? "each job stands" : "it stands"} now (queued behind what, or finished and being sealed), without waiting. Or take other work meanwhile: the post comes to you then too`;
 }
 
 /** The most of a command a ready job_run call carries whole; a longer one is named by its length. */
