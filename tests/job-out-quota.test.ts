@@ -186,7 +186,10 @@ test("in the service, a job started while another writes is promised what the fi
     // what else this host wrote between the measures).
     const promised = qa - 64 + qb;
     assert.ok(promised <= freeAtB - 100 + 16, `A may still write ${qa - 64} MiB and B ${qb} MiB: ${promised} MiB promised, ${freeAtB - 100} MiB there`);
-    assert.ok(qb >= 1 && qa > qb, `A ${qa} MiB, B ${qb} MiB`);
+    assert.ok(qb >= 1, `A ${qa} MiB, B ${qb} MiB`);
+    // On a disk with room past the idle slots' keep (4 GiB each), the first job alone was promised all but that keep, so more than the
+    // second; on a small one (a microVM's /tmp) the idle slot keeps its even share and the two come out alike.
+    if (freeAtB > 3 * 4096) assert.ok(qa > qb, `A ${qa} MiB, B ${qb} MiB`);
     // As each job was promised before: all the room to the first, half of it to the second, together far past it.
     assert.ok(outQuotaMb(freeAtB + 64, 100, {}, 1) - 64 + outQuotaMb(freeAtB, 100, {}, 2) > freeAtB - 100 + 16);
     for (const g of gates) g();
