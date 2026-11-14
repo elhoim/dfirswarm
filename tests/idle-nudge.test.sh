@@ -265,11 +265,23 @@ comp_once --compact-stall-sec 300
 [[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat with a stalled compaction was nudged"
 pass "a compaction open past --compact-stall-sec is said once, on the board and the trace, and the seat is not nudged"
 row k0 compact_done 100 '{"reason":"manual","via":"self"}' >> "$CS/traces/events.jsonl"
+# The board's post about its stalled compaction waits unread: that is said within the grace, in words that claim nothing
+# of a turn it has not ended (0.11: the grace holds back only "you ended your turn").
 comp_once --compact-stall-sec 300
-[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat 100 s out of its compaction was told it had ended its turn: $(cat "$PROMPT_LOG")"
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a seat out of its compaction with a post unread was not told of it: $(cat "$PROMPT_LOG")"
+grep '^k0	' "$PROMPT_LOG" | grep -q 'You have 1 post(s) you have not read. Read inbox before you go on' || fail "the unread post is not what the nudge says: $(cat "$PROMPT_LOG")"
+grep '^k0	' "$PROMPT_LOG" | grep -q 'You ended your turn' && fail "a seat 100 s out of its compaction was told it had ended its turn: $(cat "$PROMPT_LOG")"
+grep -q '"tool":"idle_nudge","args":{"agent":"k0","idle_seconds":[0-9]*,"why":"news"}' <<<"$(trace_of "$CS")" || fail "the news nudge is not on the trace as one: $(trace_of "$CS" | grep idle_nudge)"
+pass "within the grace after a compaction, posts it has not read are still said, without saying it ended its turn"
+printf '{"main": %d}\n' "$((10#$(ls "$CS/threads/main" | sed -n 's/^\([0-9]\{6\}\)-.*/\1/p' | sort -n | tail -1)))" > "$CS/inbox/k0/cursors.json"
+: > "$CS/traces/idle-nudge.state"
+# Nothing unread, and silent past the idle limit: within the grace it is still not told it ended its turn.
+comp_once --compact-stall-sec 300 --idle-sec 60
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a seat 100 s out of its compaction was told it had ended its turn: $(cat "$PROMPT_LOG")"
 pass "a seat just out of a compaction is not told it ended its turn: its hand-off is on its way (--compact-grace-sec, 300 by default)"
-comp_once --compact-stall-sec 300 --compact-grace-sec 60
-[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a seat whose compaction ended is not watched again"
+comp_once --compact-stall-sec 300 --compact-grace-sec 60 --idle-sec 60
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 2 ]] || fail "a seat whose compaction ended is not watched again"
+grep '^k0	' "$PROMPT_LOG" | tail -1 | grep -q 'You ended your turn' || fail "past the grace the seat is not told it ended its turn: $(tail -1 "$PROMPT_LOG")"
 pass "once the compaction ends and the grace is over the seat is watched like any other"
 
 # --- a local model's first turn ---------------------------------------------
@@ -367,6 +379,25 @@ for _ in $(seq 100); do [[ -s "$TMP/vm-prompts.txt" ]] && break; sleep 0.05; don
 jq -e 'select(.deliver == "steer" and (.text | startswith("For 11 minutes you have called only wait and inbox")))' "$TMP/vm-prompts.txt" >/dev/null 2>&1 \
   || fail "a waiting VM agent was not steered through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
 pass "an agent in a microVM that only waits is steered through the hub though the hub says it is working"
+
+# --- a prompt the hub refuses is not counted, and the hub's own reason is logged (A5) ---
+# v0's link goes; the status the watchdog reads still says linked (written before the link closed).
+kill "$LINK_PID" 2>/dev/null; wait "$LINK_PID" 2>/dev/null || true
+for _ in $(seq 100); do jq -e '.agents.v0.connected == false' "$HUB_DIR/status.json" >/dev/null 2>&1 && break; sleep 0.05; done
+printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/stale-status.json"
+: > "$VM_SB/traces/idle-nudge.state"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$TMP/stale-status.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 --wait-idle-sec 600 >"$TMP/refused.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/refused.log")"
+grep -q 'could not prompt v0 (waiting), not counted: v0 is not linked to the hub (its process ended, or its link is down)' "$TMP/refused.log" || fail "the hub's reason is not logged: $(cat "$TMP/refused.log")"
+[[ "$(awk '$1 == "v0" { print $2 }' "$VM_SB/traces/idle-nudge.state")" == "" ]] || fail "a refused prompt was counted: $(cat "$VM_SB/traces/idle-nudge.state")"
+trace_of "$VM_SB" | grep -q '"tool":"idle_nudge","args":{"agent":"v0","idle_seconds":[0-9]*,"why":"waiting"},"result":{"ok":false,"nudges":0,"reason":"v0 is not linked to the hub (its process ended, or its link is down)"}' \
+  || fail "the refusal is not on the trace with the hub's reason: $(trace_of "$VM_SB" | grep idle_nudge | tail -2)"
+pass "a prompt the hub refuses is not counted, and the log and the trace carry the hub's own reason"
+# Asked to keep it for the seat's next hello, the hub takes it: queued.
+answer="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_DIR/admin.sock" '{"op":"prompt","agent":"v0","text":"hand-off","kind":"relaunch","queue":true}')" || fail "a queued prompt was refused: $answer"
+jq -e '.ok == true and .delivered == false and .queued == true' <<<"$answer" >/dev/null || fail "the hub does not say it keeps the words: $answer"
+pass "a prompt the hub keeps for the seat's next hello is taken, and said to be queued"
 
 # --- a hub that died is brought back by the watchdog, from what the hub kept ----
 kill "$HUB_PID" 2>/dev/null; wait "$HUB_PID" 2>/dev/null || true
@@ -517,13 +548,23 @@ printf '{"type":"message","message":{"role":"user"}}\n' > "$DS/.pi-sessions/d0/s
 head -c 3000 /dev/zero | tr '\0' 'x' >> "$DS/.pi-sessions/d0/s.jsonl"; printf '\n' >> "$DS/.pi-sessions/d0/s.jsonl"
 printf '{"type":"message"}\n' > "$DS/.pi-sessions/d1/s.jsonl"
 PANE_LOG="$TMP/pane.log"; : > "$PANE_LOG"
+HANDOFF_LOG="$TMP/handoff.log"; : > "$HANDOFF_LOG"
 cat > "$TMP/bin/herdr-down" <<SH
 #!/bin/sh
 if [ "\$1" = pane ] && [ "\$2" = run ]; then printf '%s\t%s\n' "\$3" "\$4" >> "$PANE_LOG"; exit 0; fi
+if [ "\$1" = agent ] && [ "\$2" = prompt ]; then printf '%s\t%s\n' "\$3" "\$4" | tr '\n' ' ' >> "$HANDOFF_LOG"; printf '\n' >> "$HANDOFF_LOG"; exit 0; fi
 exit 0
 SH
+# What d0 holds, for its hand-off.
+node --experimental-strip-types --no-warnings -e '
+  const [leads, S] = process.argv.slice(1);
+  import(leads).then(async (L) => {
+    const r = await L.openLead({ sandboxRoot: S, agentId: "d0" }, { title: "Recover the deleted mail", why: "the timeline rests on it", take: true });
+    if (!r.ok) { console.error(r.reason); process.exit(1); }
+  });
+' "$ROOT/extensions/leads.ts" "$DS" || fail "could not open d0's lead"
 chmod +x "$TMP/bin/herdr-down"
-down_once() { SWARM_HUB_DIR="$DH" SWARM_HUB_STATUS="$DH/status.json" SWARM_SEAT_DOWN_SEC="${1:-0}" SWARM_SEAT_LINE_MAX_BYTES=2000 SWARM_SEAT_RELAUNCH_MAX=2 HERDR_BIN="$TMP/bin/herdr-down" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$DS" --once --idle-sec 100000 2>&1; }
+down_once() { SWARM_HUB_DIR="$DH" SWARM_HUB_STATUS="$DH/status.json" SWARM_SEAT_DOWN_SEC="${1:-0}" SWARM_SEAT_RELAUNCH_WAIT_SEC=0 SWARM_SEAT_LINE_MAX_BYTES=2000 SWARM_SEAT_RELAUNCH_MAX=2 HERDR_BIN="$TMP/bin/herdr-down" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$DS" --once --idle-sec 100000 2>&1; }
 out="$(down_once 100000)"
 [[ ! -s "$PANE_LOG" ]] || fail "a seat whose link had just gone down was started again at once: $(cat "$PANE_LOG")"
 grep -q '^d0 ' "$DS/traces/seat-down.state" || fail "the seat's link going down was not noted: $out"
@@ -535,10 +576,21 @@ ls "$DS"/.pi-sessions/d0/retired-*/s.jsonl >/dev/null 2>&1 || fail "the session 
 [[ -f "$DS/.pi-sessions/d1/s.jsonl" ]] || fail "another seat's session was touched"
 grep -q 'started d0 again in wD:p1 (attempt 1 of 2, with a fresh session' <<<"$out" || fail "the relaunch was not said: $out"
 pass "a seat whose link stays down is said and started again in its pane, with a fresh session when the old one cannot be loaded"
+handoff="$(grep '^d0	' "$HANDOFF_LOG" | head -1 | cut -f2-)"
+grep -q "^The harness started you again: your process had ended. Your earlier conversation was set aside because it held a message too large to load" <<<"$handoff" || fail "the relaunched seat was not given its hand-off: $(cat "$HANDOFF_LOG")"
+grep -q "What the run's records hold of yours: Leads you hold: L-1 \"Recover the deleted mail\" (active)" <<<"$handoff" || fail "the hand-off is not built from the seat's records: $handoff"
+grep -q 'Your standing entries: none yet. Your jobs: none open' <<<"$handoff" || fail "the hand-off does not say what the records hold of its entries and jobs: $handoff"
+[[ "${#handoff}" -le 2001 ]] || fail "the hand-off is over 2,000 characters: ${#handoff}"
+{ trace_of "$DS"; cat "$DH/hub-spill.jsonl" 2>/dev/null; } | grep '"tool":"seat_relaunched"' | head -1 | grep -q '"handoff":{"given":true,"queued":false,"from":"records","chars":[0-9]*}' || fail "the relaunch's hand-off is not on the trace: $(cat "$DH/hub-spill.jsonl" 2>/dev/null | grep seat_relaunched | head -1)"
+grep -q 'its hand-off from the records ([0-9]* characters) was given' <<<"$out" || fail "the log does not say the hand-off was given: $out"
+pass "a relaunched seat is handed what the records hold of it (its leads, entries and jobs), within 2,000 characters, and the trace says so"
 out="$(down_once 0)"; out="$(down_once 0)"
 [[ -f "$DS/done/agents/d0.dead" ]] || fail "a seat that did not come back after its relaunches is not recorded dead: $out / $(cat "$DS/traces/seat-down.state")"
 [[ "$(grep -c 'launch-d0.sh' "$PANE_LOG")" -eq 2 ]] || fail "the seat was started $(grep -c 'launch-d0.sh' "$PANE_LOG") times, not the 2 it is allowed"
 [[ ! -e "$DS/done/ALL_AGENTS_DEAD" ]] || fail "the run was called dead while a seat is up"
+[[ "$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" list "$DS" --json | jq -r '.leads[] | select(.id == "L-1") | .holder')" == null ]] || fail "a dead seat still holds its lead"
+trace_of "$DS" | grep -q '"tool":"lead_stall","args":{"agent":"d0","kind":"dead"' || fail "the dead seat's leads freed are not on the trace"
+pass "a seat recorded dead has its leads freed at once"
 printf '{"agents":{"d0":{"connected":false},"d1":{"connected":true}}}\n' > "$DH/status.json"
 : > "$DS/done/agents/d1.done"
 out="$(down_once 0)"
@@ -549,6 +601,128 @@ rm -f "$DS/done/agents/d0.dead" "$DS/done/ALL_AGENTS_DEAD" "$DS/done/agents/d1.d
 out="$(down_once 0)"
 grep -q '^d0 ' "$DS/traces/seat-down.state" && fail "a seat that came back is still counted down"
 pass "a seat whose link came back is no longer counted"
+
+# Within three minutes of its process ending, a seat is said down and started again (A5): 60 s from the watchdog first
+# seeing its link down (180 s before), its link read every 10 s between the 30 s passes.
+grep -q 'SEAT_DOWN_SEC="${SWARM_SEAT_DOWN_SEC:-60}"' "$ROOT/scripts/idle-nudge.sh" && grep -q 'SEAT_POLL_SEC="${SWARM_SEAT_POLL_SEC:-10}"' "$ROOT/scripts/idle-nudge.sh" \
+  || fail "the defaults are not 60 s down and a 10 s read between passes"
+printf '{"agents":{"d0":{"connected":false},"d1":{"connected":true}}}\n' > "$DH/status.json"
+: > "$PANE_LOG"; printf 'd0 %s 0 0\n' "$(( $(date +%s) - 65 ))" > "$DS/traces/seat-down.state"
+out="$(SWARM_HUB_DIR="$DH" SWARM_HUB_STATUS="$DH/status.json" HERDR_BIN="$TMP/bin/herdr-down" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$DS" --once --idle-sec 100000 2>&1)"
+grep -q "launch-d0.sh" "$PANE_LOG" || fail "with the defaults a link down 65 s was not said down and started again: $out"
+{ trace_of "$DS"; cat "$DH/hub-spill.jsonl" 2>/dev/null; } | grep '"tool":"seat_down"' | tail -1 | grep -q '"down_seconds":6[5-9]' || fail "seat_down is not on the trace at 65 s: $(cat "$DH/hub-spill.jsonl" 2>/dev/null | grep seat_down | tail -1)"
+pass "with the defaults a seat whose link is down 65 s is said down and started again"
+: > "$PANE_LOG"; rm -f "$DS/traces/seat-down.state"
+nap_start="$(date +%s)"
+SWARM_SEAT_POLL_SEC=1 SWARM_SEAT_DOWN_SEC=2 SWARM_HUB_DIR="$DH" SWARM_HUB_STATUS="$DH/status.json" HERDR_BIN="$TMP/bin/herdr-down" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$DS" --interval 30 --idle-sec 100000 >"$TMP/nap.log" 2>&1 &
+NAP_PID=$!
+for _ in $(seq 150); do grep -q "launch-d0.sh" "$PANE_LOG" && break; sleep 0.1; done
+kill "$NAP_PID" 2>/dev/null; wait "$NAP_PID" 2>/dev/null || true
+grep -q "launch-d0.sh" "$PANE_LOG" || fail "between two passes the seat's link was not read: $(cat "$TMP/nap.log")"
+[[ $(( $(date +%s) - nap_start )) -lt 12 ]] || fail "the relaunch waited for the next pass"
+pass "between two passes the seats' links are read every SEAT_POLL_SEC, so a seat down is not left for the next pass"
+
+# --- a lead's holder stuck in one call, or silent (D5) -------------------------
+LK="$TMP/leadstall"
+mkdir -p "$LK"/{traces,done/agents,threads/main,inbox/h0,inbox/h1,.pi-sessions/h0,.pi-sessions/h1,locks}
+printf '{"swarm_id":"lk","n":2,"agents":[{"id":"h0","role":"worker"},{"id":"h1","role":"worker"}]}\n' > "$LK/team.json"
+printf '{"main": 0}\n' > "$LK/inbox/h0/cursors.json"; printf '{"main": 0}\n' > "$LK/inbox/h1/cursors.json"
+{ row h0 bash 1000; row h1 bash 30; } > "$LK/traces/events.jsonl"
+: > "$LK/.pi-sessions/h0/s.jsonl"; : > "$LK/.pi-sessions/h1/s.jsonl"
+touch -t "$(date -v-1000S +%Y%m%d%H%M.%S 2>/dev/null || date -d '1000 seconds ago' +%Y%m%d%H%M.%S)" "$LK/.pi-sessions/h0/s.jsonl"
+printf '{"since":"%s","started_at":"%s"}\n' "$(ago 300)" "$(ago 300)" > "$LK/inbox/h1/waiting.json"
+node --experimental-strip-types --no-warnings -e '
+  const [leads, S] = process.argv.slice(1);
+  import(leads).then(async (L) => {
+    const r = await L.openLead({ sandboxRoot: S, agentId: "h0" }, { title: "Parse the browser history", why: "question 4", take: true });
+    if (!r.ok) { console.error(r.reason); process.exit(1); }
+  });
+' "$ROOT/extensions/leads.ts" "$LK" || fail "could not open h0's lead"
+out="$(HERDR_BIN="$TMP/bin/herdr-working" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LK" --once --idle-sec 0 2>&1)"
+grep -q '"ev":"stale".*"cause":"stuck_call"' "$LK/leads/leads.jsonl" || fail "the stuck holder's lead was not marked: $out"
+[[ "$(grep -c '"ev":"offer".*"to":"h1".*"reason":"parked"' "$LK/leads/leads.jsonl")" -eq 1 ]] || fail "the stuck holder's lead was not offered to the waiting seat: $(cat "$LK/leads/leads.jsonl")"
+grep -q 'h0 has been in one call for 16 min holding 1 lead(s): L-1 offered to h1' <<<"$out" || fail "the offer is not in the log: $out"
+trace_of "$LK" | grep -q '"tool":"lead_stall","args":{"agent":"h0","kind":"call","silent_seconds":' || fail "the offer is not on the trace"
+out="$(HERDR_BIN="$TMP/bin/herdr-working" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LK" --once --idle-sec 0 2>&1)"
+[[ "$(grep -c '"ev":"offer"' "$LK/leads/leads.jsonl")" -eq 1 ]] || fail "a second offer was made while the first holds"
+pass "a holder 15 minutes in one call has its lead marked and offered to the seat waiting longest, once while the offer holds"
+# Its pane idle now (its turn ended), still nothing on its session: silent, and its lead is freed.
+out="$(HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LK" --once --idle-sec 0 2>&1)"
+grep -q '"ev":"release".*"by":"system".*"cause":"silent_seat"' "$LK/leads/leads.jsonl" || grep -q '"by":"system","ev":"release".*"cause":"silent_seat"' "$LK/leads/leads.jsonl" || fail "the silent holder's lead was not freed: $(tail -2 "$LK/leads/leads.jsonl")"
+grep -q 'h0 was silent 16 min: its lead(s) L-1 freed for any seat' <<<"$out" || fail "the release is not in the log: $out"
+HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LK" --once --idle-sec 0 >/dev/null 2>&1
+[[ "$(trace_of "$LK" | grep -c '"tool":"lead_stall"')" -eq 2 ]] || fail "the same silence was acted on twice: $(trace_of "$LK" | grep lead_stall)"
+pass "a holder silent 15 minutes with its turn ended has its leads freed, once per silence"
+
+# --- the platform is read first (D7) -----------------------------------------
+# Six jobs finished twelve minutes ago wait for their seal and nothing was sealed for sixteen: the store is the stall. Not an
+# until-solved run: it is said all the same, the operator is told, and no seat is nudged until it clears.
+PS="$TMP/pruns/splat"
+mkdir -p "$PS"/{traces,done/agents,threads/main,inbox/p0,.pi-sessions/p0,locks,store/jobs} "$TMP/pruns/notify"
+printf '{"swarm_id":"splat","n":1,"agents":[{"id":"p0","role":"worker"}]}\n' > "$PS/team.json"
+printf '{"main": 0}\n' > "$PS/inbox/p0/cursors.json"
+row p0 bash 300 > "$PS/traces/events.jsonl"
+: > "$PS/.pi-sessions/p0/s.jsonl"
+touch -t "$(date -v-300S +%Y%m%d%H%M.%S 2>/dev/null || date -d '300 seconds ago' +%Y%m%d%H%M.%S)" "$PS/.pi-sessions/p0/s.jsonl"
+for i in 1 2 3 4 5 6; do
+  mkdir -p "$PS/store/jobs/j00000$i"
+  printf '{"id":"j00000%s","state":"finished","finished_at":"%s","requester":{"agent":"p0"},"spec":{"kind":"command","command":"x"}}\n' "$i" "$(ago 720)" > "$PS/store/jobs/j00000$i/job.json"
+done
+printf '{"v":1,"seq":0,"at":"%s","type":"job_committed","job":"j000000"}\n' "$(ago 960)" > "$PS/store/journal.jsonl"
+jq -n --arg sb "$PS" '{runs: [{id: "splat", state: "running", sandbox: $sb, notify: true}]}' > "$TMP/pruns/registry.json"
+printf 'cat >> %q\n' "$TMP/plat-events.jsonl" > "$TMP/pruns/notify/splat.cmd"
+chmod 600 "$TMP/pruns/notify/splat.cmd"
+: > "$PROMPT_LOG"
+plat_once() { SWARM_RUNS_DIR="$TMP/pruns" HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$PS" --once --idle-sec 180 "$@" 2>&1; }
+out="$(plat_once)"
+grep -q 'idle-nudge: PLATFORM STALL, the store: no job sealed for 16 minutes while 6 finished job(s) wait for their seal; the seats were told it is not their work (#1), and none is nudged until it clears' <<<"$out" || fail "the operator's log does not say the platform is the stall: $out"
+[[ "$(grep -c '^p0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat was nudged while the platform was the stall: $(cat "$PROMPT_LOG")"
+post="$(cat "$PS"/threads/main/*.md 2>/dev/null || true)"
+grep -q 'PLATFORM STALL: nothing has been sealed for 16 minutes while 6 job(s) that finished 12 to 12 minutes ago wait for their seal' <<<"$post" || fail "the seats were not told: $post"
+grep -q '^tag: hold' <<<"$post" || fail "the post is not a hold: $post"
+trace_of "$PS" | grep -q '"tool":"regroup",.*"kind":"platform","cause":"store"' || fail "the trace does not carry the platform's cause: $(trace_of "$PS" | grep regroup)"
+for _ in $(seq 50); do [[ -s "$TMP/plat-events.jsonl" ]] && break; sleep 0.1; done
+jq -e 'select(.event == "platform_stall" and .run == "splat" and .detail.reason == "store" and .detail.late_jobs == 6)' "$TMP/plat-events.jsonl" >/dev/null \
+  || fail "the notify hook was not told: $(cat "$TMP/plat-events.jsonl" 2>/dev/null)"
+out="$(SWARM_PLATFORM_CHECK_SEC=0 plat_once)"
+[[ "$(ls "$PS"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the stall was said twice"
+[[ "$(grep -c '^p0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat was nudged while the stall stands"
+pass "the platform is read before any nudge, in any run: the store's stall is said once to the seats and to the operator (log, trace, notify hook), and no seat is nudged while it stands"
+printf '{"v":1,"seq":1,"at":"%s","type":"job_committed","job":"j000001"}\n' "$(ago 1)" >> "$PS/store/journal.jsonl"
+for i in 1 2 3 4 5 6; do printf '{"id":"j00000%s","state":"committed","status":"ok","finished_at":"%s","requester":{"agent":"p0"},"spec":{"kind":"command","command":"x"}}\n' "$i" "$(ago 720)" > "$PS/store/jobs/j00000$i/job.json"; done
+out="$(SWARM_PLATFORM_CHECK_SEC=0 plat_once)"
+grep -q 'idle-nudge: the platform stall (store, since .*) has cleared: the seats are watched again' <<<"$out" || fail "the clearing is not said: $out"
+grep '^p0	' "$PROMPT_LOG" | grep -q 'You ended your turn' || fail "the seat is not watched again once the stall cleared: $(cat "$PROMPT_LOG") / $out"
+pass "once the store moves the stall is said cleared and the seats are nudged again"
+
+# --- a refused prompt on a host run: not counted, Herdr's own words logged (A5) ----
+HR="$TMP/refuse"
+mkdir -p "$HR"/{traces,done/agents,threads/main,inbox/r0,.pi-sessions/r0,locks}
+printf '{"swarm_id":"hr","n":1,"agents":[{"id":"r0","role":"worker"}]}\n' > "$HR/team.json"
+printf '{"main": 0}\n' > "$HR/inbox/r0/cursors.json"
+row r0 bash 300 > "$HR/traces/events.jsonl"
+: > "$HR/.pi-sessions/r0/s.jsonl"
+touch -t "$(date -v-300S +%Y%m%d%H%M.%S 2>/dev/null || date -d '300 seconds ago' +%Y%m%d%H%M.%S)" "$HR/.pi-sessions/r0/s.jsonl"
+cat > "$TMP/bin/herdr-refuse" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent get") printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+  "agent prompt") printf '%s\t%s\n' "$3" "$4" >> "$PROMPT_LOG.tried"; echo "error: pane w9:p3 is gone" >&2; exit 1 ;;
+  *) : ;;
+esac
+SH
+chmod +x "$TMP/bin/herdr-refuse"
+: > "$PROMPT_LOG"; : > "$PROMPT_LOG.tried"
+out="$(HERDR_BIN="$TMP/bin/herdr-refuse" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$HR" --once --idle-sec 180 2>&1)"
+grep -q 'could not prompt r0 (idle), not counted: error: pane w9:p3 is gone' <<<"$out" || fail "Herdr's own words are not logged: $out"
+[[ -z "$(awk '$1 == "r0"' "$HR/traces/idle-nudge.state")" ]] || fail "a refused prompt was counted: $(cat "$HR/traces/idle-nudge.state")"
+HERDR_BIN="$TMP/bin/herdr-refuse" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$HR" --once --idle-sec 180 >/dev/null 2>&1
+[[ "$(grep -c 'Nudge 1 of 3' "$PROMPT_LOG.tried")" -eq 2 ]] || fail "the refused nudge was counted on its retry: $(cat "$PROMPT_LOG.tried")"
+HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$HR" --once --idle-sec 180 >/dev/null 2>&1
+grep '^r0	' "$PROMPT_LOG" | grep -q 'Nudge 1 of 3' || fail "the first prompt taken is not nudge 1: $(cat "$PROMPT_LOG")"
+[[ "$(awk '$1 == "r0" { print $2 }' "$HR/traces/idle-nudge.state")" == 1 ]] || fail "the prompt taken was not counted"
+pass "a prompt Herdr refuses is not counted and its words are logged; the first one taken is nudge 1"
 
 # --- the log says when --------------------------------------------------------
 : > "$PROMPT_LOG"

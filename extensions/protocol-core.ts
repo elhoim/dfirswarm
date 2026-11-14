@@ -6338,6 +6338,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and interpreted, the watchdog's regroup in an until-solved run, and the
   // operator's answer to a lead.
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
+  // The watchdog offering the leads of a holder stuck in one call, or freeing a silent seat's (leads.ts seatStallLeads).
+  "lead_stall",
   // The question register (extensions/questions.ts): its tools, and the premise register's (premises.ts).
   "question_open", "questions", "question_ask", "premise_propose",
   // The coordination of the work and of the finish (docs/adr/0015): a lead

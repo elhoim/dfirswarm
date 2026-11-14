@@ -3790,7 +3790,7 @@ cmd_start() {
   local skill_release=""
   # Whether a note's card comes with the result of a call to one of its tools: on (empty) or off.
   local skill_cards=""
-  local seed_leads=0 lead_max_questions=""
+  local seed_leads=auto lead_max_questions=""
   local pack_skills=""
   local extra_env=()
   while [[ $# -gt 0 ]]; do
@@ -3924,6 +3924,7 @@ cmd_start() {
       --skill-cards) skill_cards="$2"; shift 2 ;;
       # One open, unheld lead per question at kickoff (leads-cli.ts seed), and the most questions one lead may name.
       --seed-leads) seed_leads=1; shift ;;
+      --no-seed-leads) seed_leads=0; shift ;;
       --lead-max-questions) lead_max_questions="$2"; [[ "$lead_max_questions" =~ ^[1-8]$ ]] || { echo "BLOCKER: --lead-max-questions takes 1 to 8." >&2; exit 2; }; shift 2 ;;
       --pack-skills) pack_skills="$2"; shift 2 ;;
       --case-id) case_id="$2"; shift 2 ;;
@@ -6346,10 +6347,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   else
     echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
   fi
-  if [[ "${seed_leads:-0}" -eq 1 ]]; then
+  # On by default for a team with a seat of the weak model class (leads.ts modelClass), for any team with --seed-leads.
+  if [[ "${seed_leads:-auto}" != 0 ]]; then
     local seeded_leads
-    if seeded_leads="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" seed "$sandbox" 2>/dev/null)"; then
-      echo "Leads:        $(jq -r '.opened | length' <<<"$seeded_leads") seeded, one for each question no lead answers ($(jq -r '.opened | join(", ")' <<<"$seeded_leads")): open and unheld, for a seat to claim"
+    if seeded_leads="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" seed "$sandbox" $([[ "${seed_leads:-auto}" == auto ]] && printf -- '--weak-only') 2>/dev/null)"; then
+      jq -r 'if (.opened | length) > 0 then "Leads:        \(.opened | length) seeded, one for each question no lead answers (\(.opened | join(", "))): open and unheld, for a seat to claim" else empty end' <<<"$seeded_leads"
     else
       echo "WARN: --seed-leads: the leads could not be seeded; the seats open their own." >&2
     fi
