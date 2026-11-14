@@ -197,6 +197,20 @@ const FILE_FNS = new Set(["publishFile", "recordFileVersion", "fileDiff"]);
 const TRANSFER_SEAT_BYTES = 96 * 1024 * 1024;
 const TRANSFER_SEAT_COUNT = 4;
 const TRANSFER_IDLE_MS = 5 * 60_000;
+/** How long a health sample's disk and memory probes may take (Hub.healthProbeMs): a probe of 1 MB and one fsync takes well under a second on a disk that works. */
+const HEALTH_PROBE_MS = 10_000;
+/** What the disk probe says (hub-health.ts diskSpeed). */
+type DiskProbe = Awaited<ReturnType<typeof diskSpeed>>;
+
+/** `p`'s value, or `late()`'s once `ms` have passed without it; the timer does not hold the process. */
+function within<T>(p: Promise<T>, ms: number, late: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(late()), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, bound]).finally(() => clearTimeout(timer));
+}
 /** The states a seat reports (the extension's), and how much text may go with one. */
 const SEAT_STATES = new Set(["idle", "working", "blocked", "unknown"]);
 const STATE_DETAIL_MAX = 200;
@@ -1106,6 +1120,12 @@ export class Hub {
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private healthTimer?: ReturnType<typeof setInterval>;
   private snapshotTaken = false;
+  /** The disk probe of a health sample (hub-health.ts diskSpeed); a test gives one that never ends. */
+  diskProbe: (dir: string) => Promise<DiskProbe> = diskSpeed;
+  /** How long a sample's disk and memory probes may take before the sample is taken without them (HEALTH_PROBE_MS; a test shortens it). */
+  healthProbeMs = HEALTH_PROBE_MS;
+  /** A disk probe that has not ended, and since when: no other is started on a disk that hangs. */
+  private diskProbing: { since: number } | null = null;
   private memoryHigh = false;
   /** The sockets a seat's VM holds, and whose: every line written on one is checked against P.WIRE_LINE_MAX. */
   private seatSockets = new WeakMap<Socket, string>();
@@ -2690,9 +2710,14 @@ export class Hub {
     };
   }
 
-  /** One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at a quiet moment. */
+  /**
+   * One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at
+   * a quiet moment. The disk's and the memory's probes are bounded (healthProbeMs): an fsync that never returned held the sample,
+   * and with it every later sample, the 60% heap snapshot and the 85% restart (the timer starts none while one runs). A probe past
+   * its bound is said slow or hung in the sample, and the heap is read and acted on all the same.
+   */
   async healthTick(loop: { read(): { p50: number; p99: number; max: number } }): Promise<void> {
-    const [pressure, disk] = await Promise.all([memoryPressure().catch(() => undefined), diskSpeed(this.cfg.dir).catch(() => undefined)]);
+    const [pressure, disk] = await Promise.all([within(memoryPressure().catch(() => undefined), this.healthProbeMs, () => undefined), this.probeDisk()]);
     const h = sampleHealth(loop.read(), this.holdsNow(), { pressure, disk });
     await this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
     if (snapshotDue(h, this.snapshotTaken)) {
@@ -2718,6 +2743,20 @@ export class Hub {
         .then(() => this.flushRefusals().catch(() => undefined))
         .then(() => process.exit(75));
     }
+  }
+
+  /** The disk's speed for a health sample, within healthProbeMs; a probe that does not end is said so, and none other is started while it hangs. */
+  private async probeDisk(): Promise<DiskProbe> {
+    const unknown = (why: string): DiskProbe => ({ disk_write_mb_s: null, disk_fsync_ms: null, disk_error: why });
+    if (this.diskProbing) return unknown(`the disk probe started ${Math.round((Date.now() - this.diskProbing.since) / 1000)} s ago has not ended: the disk under ${this.cfg.dir} is slow or hung`);
+    const probing = { since: Date.now() };
+    this.diskProbing = probing;
+    const probe = this.diskProbe(this.cfg.dir)
+      .catch((err: Error) => unknown(String(err?.message ?? err).slice(0, 200)))
+      .finally(() => {
+        if (this.diskProbing === probing) this.diskProbing = null;
+      });
+    return within(probe, this.healthProbeMs, () => unknown(`the disk probe did not end within ${this.healthProbeMs} ms: the disk under ${this.cfg.dir} is slow or hung`));
   }
 
   /** Said once each time the heap passes three quarters of its limit, and again after it has gone back under two thirds. */
