@@ -25,18 +25,25 @@
  *   about 900 revisions of one file.
  * - listForgedTools: the seat registers a tool from each manifest it lists
  *   and finds one by name to run it; a manifest is the forge's to bound.
- * - listLedger: the ledger tool (agent-swarm.ts) pages the window itself:
- *   it keeps the whole window among the seat's kept outputs and answers one
- *   page under the inbox bound, naming `next` and `remaining` from the
- *   window's count, which a cut window would make wrong. The window is at
- *   most 500 entries, each within the ledger's field limits.
  *
  * Everything else, a job's answer and a diff included, is held to the wall:
  * what does not fit is cut, and the whole is kept in a file the answer names.
+ * The ledger's window (listLedger) is held to it too, and never needs
+ * cutting: past the wall the hub answers it in pages of whole entries
+ * (ledgerPage), each within the wall, and the seat's board.ts joins them
+ * (joinLedgerPages), so the ledger tool (agent-swarm.ts) still has the
+ * whole window to page under the inbox bound, with `next` and `remaining`
+ * counted from all of it. An entry past the wall alone comes on a page of
+ * its own and is cut by the wall like any answer, its answer_cut saying so.
  */
-export const UNBOUNDED_FNS: ReadonlySet<string> = new Set(["listFileHistory", "listForgedTools", "listLedger"]);
-/** The functions exempt from the wall where the seat's own process runs the call (a host run): nothing crosses a wire. */
-export const HOST_UNBOUNDED_FNS: ReadonlySet<string> = UNBOUNDED_FNS;
+export const UNBOUNDED_FNS: ReadonlySet<string> = new Set(["listFileHistory", "listForgedTools"]);
+/**
+ * The functions exempt from the wall where the seat's own process runs the
+ * call (a host run): those above, and listLedger, whose window crosses no
+ * wire there and which the ledger tool pages itself (a window cut by the
+ * wall would make its `remaining` wrong).
+ */
+export const HOST_UNBOUNDED_FNS: ReadonlySet<string> = new Set([...UNBOUNDED_FNS, "listLedger"]);
 
 export function rpcAnswerMax(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SWARM_RPC_ANSWER_MAX_BYTES);
@@ -282,6 +289,73 @@ function capAll(v: unknown, room: number, cutAt: (n: number) => (key: string, x:
   if (!n) return v;
   said(lo, n);
   return JSON.parse(JSON.stringify(v, cutAt(lo) as (this: unknown, key: string, x: unknown) => unknown));
+}
+
+/**
+ * A page of the ledger's window as the hub answers it when the whole window
+ * is past the wall: whole entries up to the wall, how many of the window are
+ * held back, and the seq the next page starts from (asked as the cursor
+ * `{from: next}`, the call's third argument).
+ */
+export type LedgerPage<T> = { ledger_page: true; entries: T[]; window: number; remaining: number; next?: number; note: string };
+
+/**
+ * The hub's answer to listLedger for `window`: the window itself when it is
+ * within the wall, else its first page (LedgerPage), whole entries, at least
+ * one. Measured as the entries are sent, so the default call, a `limit` of
+ * 500, a `from` that reaches back to E-1 and a list of 2,000 `ids` (3.3 MB on
+ * a ledger of 2,000 entries of 1.6 KB) are all answered within it.
+ */
+export function ledgerPage<T extends { seq: number }>(window: T[], max = rpcAnswerMax()): T[] | LedgerPage<T> {
+  const room = Math.max(1024, max - INFO_ROOM);
+  const sizes = window.map((e) => bytesOf(e) + 1);
+  if (sizes.reduce((a, b) => a + b, 1) <= room) return window;
+  const entries: T[] = [];
+  let used = 2;
+  for (let i = 0; i < window.length; i++) {
+    if (entries.length && used + sizes[i]! > room) break;
+    entries.push(window[i]!);
+    used += sizes[i]!;
+  }
+  const remaining = window.length - entries.length;
+  const next = remaining ? window[entries.length]!.seq : undefined;
+  return {
+    ledger_page: true,
+    entries,
+    window: window.length,
+    remaining,
+    ...(next !== undefined ? { next } : {}),
+    note: remaining ? `${remaining} more entr${remaining === 1 ? "y" : "ies"} of this window of ${window.length} are held back to keep the answer within ${max} bytes: ask again with the cursor {from: ${next}} for the next page` : `the window's one entry is past ${max} bytes alone`,
+  };
+}
+
+function isLedgerPage<T>(x: unknown): x is LedgerPage<T> {
+  return isPlainObject(x) && x.ledger_page === true && Array.isArray(x.entries);
+}
+
+/**
+ * The ledger's window, whole, from the hub's pages (ledgerPage): `call`
+ * asks with no cursor, then with each page's `{from: next}`, until the
+ * window as it was at the first page is whole. Entries recorded meanwhile
+ * after it are left for the next listing, which reaches them by `from`.
+ */
+export async function joinLedgerPages<T extends { seq: number }>(call: (cursor?: { from: number }) => Promise<unknown>): Promise<T[]> {
+  const first = await call();
+  if (!isLedgerPage<T>(first)) return first as T[];
+  const out: T[] = [...first.entries];
+  let page: LedgerPage<T> = first;
+  // Each page holds one entry at least, so the window's count of pages is the most there can be.
+  for (let n = 0; n < first.window && page.remaining > 0 && page.next !== undefined && out.length < first.window; n++) {
+    const a = await call({ from: page.next });
+    if (!isLedgerPage<T>(a)) {
+      out.push(...(a as T[]));
+      break;
+    }
+    if (!a.entries.length) break;
+    out.push(...a.entries);
+    page = a;
+  }
+  return out.length > first.window ? out.slice(0, first.window) : out;
 }
 
 /** One item of a list in a header or digest, cut to a bound with a mark that it was cut. */

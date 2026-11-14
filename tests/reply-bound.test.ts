@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundItem, boundItems, boundRpcAnswer, rpcAnswerMax, UNBOUNDED_FNS, type AnswerCut } from "../extensions/reply-bound.ts";
+import { boundItem, boundItems, boundRpcAnswer, HOST_UNBOUNDED_FNS, joinLedgerPages, ledgerPage, rpcAnswerMax, UNBOUNDED_FNS, type AnswerCut } from "../extensions/reply-bound.ts";
 import { HANDOFF_LEADS_MAX, handoffLeads } from "../extensions/self-compact.ts";
 
 test("an answer past the bound is cut to it, the whole kept and named; one within it goes as it is", async () => {
@@ -116,9 +116,27 @@ test("what leaves is always within the wall: many long texts are cut alike in on
 
 test("only the answers code reads whole (a lookup, a window it pages itself) are exempt; a diff, a restore, a job's answer and a fetch are held to the wall; the bound can be set", async () => {
   const big = { ok: true, result: { diff: "y".repeat(600_000) } };
-  assert.deepEqual([...UNBOUNDED_FNS].sort(), ["listFileHistory", "listForgedTools", "listLedger"]);
+  assert.deepEqual([...UNBOUNDED_FNS].sort(), ["listFileHistory", "listForgedTools"]);
   for (const fn of UNBOUNDED_FNS) assert.deepEqual((await boundRpcAnswer(fn, big, async () => { throw new Error("not called"); })).answer, big);
-  for (const fn of ["fileDiff", "restoreFileVersion", "jobStatus", "jobSubmit", "netFetch", "runFinishLine"]) {
+  // The ledger's window is paged by the hub within the wall (ledgerPage, tests/ledger-page.test.ts), and the wall stands behind it; in a
+  // host run nothing crosses a wire and the ledger tool pages the window itself.
+  assert.deepEqual([...HOST_UNBOUNDED_FNS].sort(), ["listFileHistory", "listForgedTools", "listLedger"]);
+  const window = Array.from({ length: 3000 }, (_, i) => ({ seq: i + 1, value: "w".repeat(300) }));
+  const page = ledgerPage(window) as { ledger_page: true; entries: Array<{ seq: number }>; window: number; remaining: number; next: number; note: string };
+  assert.equal(page.ledger_page, true);
+  assert.ok(Buffer.byteLength(JSON.stringify({ ok: true, result: page })) <= 262144);
+  assert.deepEqual([page.window, page.entries.length + page.remaining, page.next], [3000, 3000, page.entries.length + 1]);
+  assert.match(page.note, /held back to keep the answer within 262144 bytes: ask again with the cursor \{from: \d+\}/);
+  assert.deepEqual(ledgerPage(window.slice(0, 10)), window.slice(0, 10), "a window within the wall is answered as it is");
+  // Joined from pages, also when entries are recorded between them: the window as it was at the first page, each once.
+  let ledger = [...window];
+  const joined = await joinLedgerPages<{ seq: number }>(async (cursor) => {
+    const got = ledgerPage(cursor ? ledger.filter((e) => e.seq >= cursor.from) : ledger);
+    ledger = [...ledger, { seq: ledger.length + 1, value: "late" }];
+    return got;
+  });
+  assert.deepEqual(joined.map((e) => e.seq), window.map((e) => e.seq));
+  for (const fn of ["listLedger", "fileDiff", "restoreFileVersion", "jobStatus", "jobSubmit", "netFetch", "runFinishLine"]) {
     const r = await boundRpcAnswer(fn, big, async (t) => ({ path: "p", bytes: t.length, sha256: "s" }));
     assert.equal(r.answer.ok, true, fn);
     assert.ok(Buffer.byteLength(JSON.stringify(r.answer)) <= 262144, fn);

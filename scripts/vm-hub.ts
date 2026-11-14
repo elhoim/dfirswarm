@@ -95,7 +95,7 @@ import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, reque
 import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
 import { commandNames, freshCoverage, libraryHint, seatLibraryHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
-import { boundRpcAnswer } from "../extensions/reply-bound.ts";
+import { boundRpcAnswer, ledgerPage } from "../extensions/reply-bound.ts";
 import { sweepsHeld } from "../extensions/store-sweep.ts";
 import { jobsListing, storeFind } from "./store-find.ts";
 import { diskSpeed, healthEveryMs, loopMonitor, memoryPressure, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
@@ -716,7 +716,14 @@ export function boardTable(hub: {
     listClaims: () => P.listClaims(S),
     listFileHistory: (_who, a) => P.listFileHistory(S, String(a[1] ?? "")),
     listForgedTools: () => P.listForgedTools(S),
-    listLedger: (_who, a) => P.listLedger(S, (a[1] as { kind?: string; limit?: number }) ?? {}),
+    listLedger: async (_who, a) => {
+      // The window the seat asked for (a kind, the newest `limit`, `from` a seq, exact `ids`), answered within the wall: past it, in
+      // pages of whole entries (reply-bound.ts ledgerPage), the next one asked with the cursor {from: <seq>} as the third argument.
+      const filter = (isObject(a[1]) ? a[1] : {}) as Parameters<typeof P.listLedger>[1] & object;
+      const at = isObject(a[2]) && Number.isInteger(a[2].from) ? (a[2].from as number) : undefined;
+      const window = await P.listLedger(S, at === undefined || filter.ids ? filter : { ...filter, from: at });
+      return ledgerPage(at === undefined ? window : window.filter((e) => e.seq >= at));
+    },
     listTeam: (who) => P.listTeam(as(who)),
     teamView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
