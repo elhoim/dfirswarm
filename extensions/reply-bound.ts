@@ -35,6 +35,8 @@
  * what does not fit is cut, and the whole is kept in a file the answer names.
  */
 export const UNBOUNDED_FNS: ReadonlySet<string> = new Set(["listFileHistory", "listForgedTools", "listLedger"]);
+/** The functions exempt from the wall where the seat's own process runs the call (a host run): nothing crosses a wire. */
+export const HOST_UNBOUNDED_FNS: ReadonlySet<string> = UNBOUNDED_FNS;
 
 export function rpcAnswerMax(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SWARM_RPC_ANSWER_MAX_BYTES);
@@ -46,14 +48,26 @@ export type Kept = { path: string; bytes: number; sha256: string } | { write_err
 /** What an answer cut to the bound says of itself, at the top of an object answer (`answer_cut`): its whole size, the bound, where the whole is, and what was cut. */
 export type AnswerCut = { fn: string; bytes: number; max: number; kept?: string; kept_sha256?: string; kept_error?: string; cut: string[]; note: string };
 
+/** Bytes of the bound kept for what an answer says of its cut (answer_cut: the note, where the whole is, the list of cuts). */
+const INFO_ROOM = 8 * 1024;
+/** The most cuts an answer names, each at most this many characters. */
+const CUTS_SHOWN = 20;
+const CUT_CHARS = 200;
+
 /**
  * The answer to send for `fn`: the answer itself within the bound; past it,
- * the answer with its largest parts cut until it fits (a long text cut with
- * a mark at the cut, a long list cut to its first items, at least one kept),
- * the whole kept by `keep`, and, on an object answer, `answer_cut` saying
- * how large it was, where the whole is and what was cut. The run s5d814f's
- * 76 MB answers closed every seat's link; an answer that said only that it
- * was too large left the seat without the part that fit.
+ * the answer with its largest parts cut until it fits (shrinkToFit: a long
+ * text cut with a mark at the cut, a long list cut to its first items, at
+ * least one kept), the whole kept by `keep`, and, on an object answer,
+ * `answer_cut` saying how large it was, where the whole is and what was cut.
+ * The run s5d814f's 76 MB answers closed every seat's link; an answer that
+ * said only that it was too large left the seat without the part that fit.
+ *
+ * What leaves is always within the bound, measured as it is sent: an answer
+ * whose shape alone is past the bound once every text and list in it is cut
+ * (tens of thousands of short fields) is answered with a stub that says so
+ * and names the file that keeps the whole, never sent over the bound with a
+ * note that says it was cut.
  */
 export async function boundRpcAnswer(fn: string, answer: RpcAnswer, keep: (text: string) => Promise<Kept>, max = rpcAnswerMax()): Promise<{ answer: RpcAnswer; cut?: { fn: string; bytes: number; max: number; kept?: string } }> {
   if (UNBOUNDED_FNS.has(fn)) return { answer };
@@ -61,34 +75,59 @@ export async function boundRpcAnswer(fn: string, answer: RpcAnswer, keep: (text:
   const bytes = Buffer.byteLength(text);
   if (bytes <= max) return { answer };
   const kept = await keep(text).catch((err: Error) => ({ write_error: err.message }) as Kept);
-  const where = "path" in kept ? `kept whole at ${kept.path} (${kept.bytes} bytes, sha256 ${kept.sha256}): read it in pages (read with offset and limit) for the rest` : `the whole could not be kept (${kept.write_error})`;
-  const note = `the hub's answer to ${fn} was ${bytes} bytes, over the bound of ${max} on an answer: what did not fit is cut, ${where}. This is a fault of the harness, not of your call: a narrower request (a filter, a page, an id) answers whole; tell the operator on the board`;
+  const name = clip(fn, 120);
+  const where = "path" in kept ? `kept whole at ${kept.path} (${kept.bytes} bytes, sha256 ${kept.sha256}): read it in pages (read with offset and limit) for the rest` : `the whole could not be kept (${clip(kept.write_error, 300)})`;
   const mark = "path" in kept ? `[cut by the answer bound: the whole answer is ${kept.path}]` : "[cut by the answer bound]";
+  const keptInfo = "path" in kept ? { kept: kept.path, kept_sha256: kept.sha256 } : { kept_error: clip(kept.write_error, 300) };
+  const cut = { fn, bytes, max, ...("path" in kept ? { kept: kept.path } : {}) };
+  const ask = "This is a fault of the harness, not of your call: a narrower request (a filter, a page, an id) answers whole; tell the operator on the board";
   const cuts: string[] = [];
   // Room for the note and the list of cuts beside what is kept.
-  const room = Math.max(1024, max - 4096);
+  const room = Math.max(1024, max - INFO_ROOM);
   const body = answer.ok ? answer.result : answer.error;
   const shrunk = shrinkToFit(body, room, mark, cuts);
-  const info: AnswerCut = { fn, bytes, max, ...("path" in kept ? { kept: kept.path, kept_sha256: kept.sha256 } : { kept_error: kept.write_error }), cut: cuts.slice(0, 20), note };
-  const out: RpcAnswer = answer.ok
-    ? { ok: true, result: isPlainObject(shrunk) ? { ...shrunk, answer_cut: info } : typeof shrunk === "string" ? `${shrunk}\n(${note})` : shrunk }
-    : { ok: false, error: `${String(shrunk)} (${note})` };
-  return { answer: out, cut: { fn, bytes, max, ...("path" in kept ? { kept: kept.path } : {}) } };
+  if (bytesOf(shrunk) <= room) {
+    const note = `the hub's answer to ${name} was ${bytes} bytes, over the bound of ${max} on an answer: what did not fit is cut, ${where}. ${ask}`;
+    const info: AnswerCut = { fn: name, bytes, max, ...keptInfo, cut: shownCuts(cuts), note };
+    const out: RpcAnswer = answer.ok
+      ? { ok: true, result: isPlainObject(shrunk) ? { ...shrunk, answer_cut: info } : typeof shrunk === "string" ? `${shrunk}\n(${note})` : shrunk }
+      : { ok: false, error: `${String(shrunk)} (${note})` };
+    if (bytesOf(out) <= max) return { answer: out, cut };
+  }
+  // Nothing of it fits: its shape alone is past the bound with every text and list in it cut. A stub says so and where the whole is.
+  const note = `the hub's answer to ${name} was ${bytes} bytes, over the bound of ${max} on an answer, and none of it is sent: even with every text and list in it cut, its shape alone is past the bound; ${where}. ${ask}`;
+  const info: AnswerCut = { fn: name, bytes, max, ...keptInfo, cut: [], note };
+  const out: RpcAnswer = answer.ok && isPlainObject(body) ? { ok: true, result: { answer_cut: info } } : answer.ok && typeof body === "string" ? { ok: true, result: `(${note})` } : { ok: false, error: note };
+  return { answer: out, cut };
+}
+
+function clip(text: string, n: number): string {
+  return text.length <= n ? text : `${text.slice(0, n - 1)}…`;
+}
+
+/** The cuts an answer names: the first CUTS_SHOWN, each at most CUT_CHARS characters, and how many more. */
+function shownCuts(cuts: string[]): string[] {
+  const shown = cuts.slice(0, CUTS_SHOWN).map((c) => clip(c, CUT_CHARS));
+  return cuts.length > CUTS_SHOWN ? [...shown, `and ${cuts.length - CUTS_SHOWN} more cuts`] : shown;
 }
 
 /**
  * A value as it is answered here, without a hub (a host run: the function
- * ran in this process): the same wall, the whole kept by `keep`.
+ * ran in this process): the same wall, the whole kept by `keep`. An answer
+ * none of which fits is refused with what the hub would have said, as the
+ * hub's refusal reaches a seat (board.ts callBoard).
  */
 export async function boundLocalAnswer<T>(fn: string, value: T, keep: (text: string) => Promise<Kept>, max = rpcAnswerMax()): Promise<T> {
-  if (UNBOUNDED_FNS.has(fn) || value === undefined) return value;
+  if (HOST_UNBOUNDED_FNS.has(fn) || value === undefined) return value;
+  let bounded: RpcAnswer;
   try {
-    const { answer } = await boundRpcAnswer(fn, { ok: true, result: value }, keep, max);
-    return answer.result as T;
+    bounded = (await boundRpcAnswer(fn, { ok: true, result: value }, keep, max)).answer;
   } catch {
     // Not JSON (a value only this process can hold): it never crosses a wire, and is answered as it is.
     return value;
   }
+  if (!bounded.ok) throw new Error(bounded.error);
+  return bounded.result as T;
 }
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
@@ -97,55 +136,152 @@ function isPlainObject(x: unknown): x is Record<string, unknown> {
 
 const bytesOf = (x: unknown): number => Buffer.byteLength(JSON.stringify(x) ?? "");
 
+/** Rounds of the largest part first before every text, then every list, is cut to one length. */
+const LARGEST_ROUNDS = 8;
+/** A text is cut to no fewer characters than this. */
+const TEXT_KEEP_MIN = 64;
+
+type Part = { x: unknown; parent: unknown; key: string | number | null; up: number };
+
+/** Every value in `v`, with where it sits (its parent, its key, the index of its parent's entry): walked without recursion, so a deep answer cannot end the walk. */
+function parts(v: unknown): Part[] {
+  const out: Part[] = [];
+  const stack: Part[] = [{ x: v, parent: null, key: null, up: -1 }];
+  while (stack.length) {
+    const n = stack.pop()!;
+    out.push(n);
+    const here = out.length - 1;
+    if (Array.isArray(n.x)) for (let i = n.x.length - 1; i >= 0; i--) stack.push({ x: n.x[i], parent: n.x, key: i, up: here });
+    else if (isPlainObject(n.x)) for (const [k, y] of Object.entries(n.x).reverse()) stack.push({ x: y, parent: n.x, key: k, up: here });
+  }
+  return out;
+}
+
+/** Where a part sits, as the keys from the answer's top joined by dots ("(the answer)" for the top itself). */
+function pathOf(all: Part[], i: number): string {
+  const keys: Array<string | number> = [];
+  for (let at = i; at >= 0 && all[at]!.key !== null; at = all[at]!.up) keys.unshift(all[at]!.key!);
+  return keys.length ? keys.join(".") : "(the answer)";
+}
+
 /**
- * Cut `value` until its JSON is at most `room` bytes: each round the largest
- * string or list in it is cut by what is over (a string to its first
- * characters and `mark`, a list to its first items, one at least), and what
- * was cut is said in `cuts`. Numbers, booleans and short fields are never
- * touched, so the counts and states a caller reads stay as they were.
+ * Cut `value` until its JSON is at most `room` bytes, and say what was cut
+ * in `cuts`. Numbers, booleans, keys and short texts are never touched, so
+ * the counts and states a caller reads stay as they were.
+ *
+ * 1. The largest part first, a few rounds: the largest string or list is cut
+ *    by what is over (a string to its first characters and `mark`, a list to
+ *    its first items, one at least). One long text or one long list most
+ *    often holds what is over, and this cuts nothing else. A largest part
+ *    that cannot take all that is over and is not half the answer is one of
+ *    many alike, and is left to the next step.
+ * 2. Then every text longer than one length is cut to it, the longest length
+ *    that fits (found by halving, each try measured as it would be sent):
+ *    two hundred texts of 10 KB each are cut alike in one pass, where cutting
+ *    one a round ran out of rounds.
+ * 3. Then every list longer than one count is cut to it, the same way.
+ *
+ * What is left over `room` after the three is the answer's shape itself
+ * (tens of thousands of short fields); the caller does not send it.
  */
 export function shrinkToFit(value: unknown, room: number, mark: string, cuts: string[]): unknown {
   let v = structuredClone(value);
-  for (let round = 0; round < 64; round++) {
+  for (let round = 0; round < LARGEST_ROUNDS; round++) {
     const total = bytesOf(v);
     if (total <= room) return v;
     const over = total - room;
-    let best: { size: number; path: Array<string | number>; parent: unknown; key: string | number | null } | null = null;
-    const walk = (x: unknown, parent: unknown, key: string | number | null, path: Array<string | number>) => {
-      if (typeof x === "string" || Array.isArray(x)) {
-        const size = bytesOf(x);
-        const cuttable = typeof x === "string" ? x.length > mark.length + 64 : x.length > 1;
-        if (cuttable && (!best || size > best.size)) best = { size, path, parent, key };
+    const all = parts(v);
+    let best = -1;
+    let bestSize = 0;
+    all.forEach((p, i) => {
+      const cuttable = typeof p.x === "string" ? p.x.length > mark.length + TEXT_KEEP_MIN : Array.isArray(p.x) && p.x.length > 1;
+      if (!cuttable) return;
+      const size = bytesOf(p.x);
+      if (size > bestSize) {
+        best = i;
+        bestSize = size;
       }
-      if (Array.isArray(x)) x.forEach((y, i) => walk(y, x, i, [...path, i]));
-      else if (isPlainObject(x)) for (const [k, y] of Object.entries(x)) walk(y, x, k, [...path, k]);
-    };
-    walk(v, null, null, []);
-    if (!best) return v;
-    const b = best as { size: number; path: Array<string | number>; parent: unknown; key: string | number | null };
-    const at = b.path.length ? b.path.join(".") : "(the answer)";
-    const target = b.key === null ? v : (b.parent as Record<string | number, unknown>)[b.key];
+    });
+    if (best < 0) break;
+    const b = all[best] as Part & { x: string | unknown[] };
+    const at = pathOf(all, best);
     let next: unknown;
-    if (typeof target === "string") {
+    let said: string;
+    let absorbs: boolean;
+    if (typeof b.x === "string") {
       // JSON may take more bytes than characters; cut by what is over, as characters, and go round again if need be.
-      const keepChars = Math.max(64, target.length - over - mark.length - 32);
-      next = `${target.slice(0, keepChars)}… ${mark}`;
-      cuts.push(`${at}: ${keepChars} of ${target.length} characters`);
+      const want = b.x.length - over - mark.length - 32;
+      const keepChars = Math.max(TEXT_KEEP_MIN, want);
+      absorbs = want >= TEXT_KEEP_MIN;
+      next = `${b.x.slice(0, keepChars)}… ${mark}`;
+      said = `${at}: ${keepChars} of ${b.x.length} characters`;
     } else {
-      const xs = target as unknown[];
-      let size = b.size;
+      const xs = b.x;
+      let size = bestSize;
       let n = xs.length;
-      while (n > 1 && size > b.size - over) {
+      while (n > 1 && size > bestSize - over) {
         n -= 1;
         size -= bytesOf(xs[n]) + 1;
       }
+      absorbs = size <= bestSize - over;
       next = xs.slice(0, n);
-      cuts.push(`${at}: the first ${n} of ${xs.length} items`);
+      said = `${at}: the first ${n} of ${xs.length} items`;
     }
+    // A part that cannot take all that is over, and is not most of the answer, is one of many alike: they are cut together below.
+    if (!absorbs && bestSize * 2 < total) break;
+    cuts.push(said);
     if (b.key === null) v = next;
     else (b.parent as Record<string | number, unknown>)[b.key] = next;
   }
+  if (bytesOf(v) <= room) return v;
+  const tail = `… ${mark}`;
+  const cutText = (x: string, c: number): string => (x.length > c + tail.length ? `${x.slice(0, c)}${tail}` : x);
+  v = capAll(
+    v,
+    room,
+    (c) => (_k: string, x: unknown) => (typeof x === "string" ? cutText(x, c) : x),
+    parts(v).reduce((m, p) => (typeof p.x === "string" ? Math.max(m, p.x.length) : m), 0),
+    TEXT_KEEP_MIN,
+    (c, n) => cuts.push(`every text longer than ${c} characters (${n} of them): its first ${c} characters`),
+    (c) => parts(v).filter((p) => typeof p.x === "string" && p.x.length > c + tail.length).length,
+  );
+  if (bytesOf(v) <= room) return v;
+  v = capAll(
+    v,
+    room,
+    (k) => (_key: string, x: unknown) => (Array.isArray(x) && x.length > k ? x.slice(0, k) : x),
+    parts(v).reduce((m, p) => (Array.isArray(p.x) ? Math.max(m, p.x.length) : m), 0),
+    1,
+    (k, n) => cuts.push(`every list longer than ${k} items (${n} of them): its first ${k}`),
+    (k) => parts(v).filter((p) => Array.isArray(p.x) && p.x.length > k).length,
+  );
   return v;
+}
+
+/**
+ * `v` with one length applied to every part it cuts (`cutAt(n)`, a JSON
+ * replacer): the largest `n` from `least` to `most` whose answer fits
+ * `room`, found by halving the ratio between what fits and what does not
+ * (each try measured as it would be sent), or `least` when nothing does.
+ * `said(n, count)` names the cut.
+ */
+function capAll(v: unknown, room: number, cutAt: (n: number) => (key: string, x: unknown) => unknown, most: number, least: number, said: (n: number, count: number) => void, count: (n: number) => number): unknown {
+  if (most <= least) return v;
+  const size = (n: number) => Buffer.byteLength(JSON.stringify(v, cutAt(n) as (this: unknown, key: string, x: unknown) => unknown) ?? "");
+  let lo = least;
+  let hi = most;
+  if (size(lo) <= room) {
+    // lo fits and hi does not: halve the ratio between them until they are close.
+    while (hi - lo > 1 && hi / lo > 1.1) {
+      const mid = Math.max(lo + 1, Math.min(hi - 1, Math.floor(Math.sqrt(lo * hi))));
+      if (size(mid) <= room) lo = mid;
+      else hi = mid;
+    }
+  }
+  const n = count(lo);
+  if (!n) return v;
+  said(lo, n);
+  return JSON.parse(JSON.stringify(v, cutAt(lo) as (this: unknown, key: string, x: unknown) => unknown));
 }
 
 /** One item of a list in a header or digest, cut to a bound with a mark that it was cut. */

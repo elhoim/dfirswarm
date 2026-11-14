@@ -55,6 +55,65 @@ test("an answer past the bound is cut to it, the whole kept and named; one withi
   assert.match((unkept.answer.result as { text: string }).text, /\[cut by the answer bound\]$/);
 });
 
+test("what leaves is always within the wall: many long texts are cut alike in one pass, a deep answer is cut, and an answer whose shape alone is past it is a stub that names the kept file", async () => {
+  const kept: string[] = [];
+  const keep = async (text: string) => (kept.push(text), { path: "tool-output/a0/20261114-answer-leadsView.text.log", bytes: Buffer.byteLength(text), sha256: "cd".repeat(32) });
+  const sent = (a: unknown) => Buffer.byteLength(JSON.stringify(a));
+  // Two hundred texts of 10 KB each (2 MB): cutting one text a round gave up after 64 rounds and sent 1.37 MB, saying it had cut.
+  const wide: Record<string, unknown> = { state: "open", count: 200 };
+  for (let i = 0; i < 200; i++) wide[`f${i}`] = `field ${i} ` + "x".repeat(10_000);
+  const r = await boundRpcAnswer("leadsView", { ok: true, result: wide }, keep);
+  assert.ok(sent(r.answer) <= 262144, `${sent(r.answer)} bytes sent`);
+  const res = r.answer.result as Record<string, string | number | AnswerCut> & { answer_cut: AnswerCut };
+  assert.deepEqual([res.state, res.count], ["open", 200], "the short fields stay as they were");
+  for (let i = 0; i < 200; i++) assert.ok(String(res[`f${i}`]).startsWith(`field ${i} xxx`) && String(res[`f${i}`]).endsWith("[cut by the answer bound: the whole answer is tool-output/a0/20261114-answer-leadsView.text.log]"), `f${i} is cut with the mark`);
+  const lens = Array.from({ length: 200 }, (_, i) => String(res[`f${i}`]).length);
+  assert.ok(Math.min(...lens) > 500, `every text keeps a part of itself (the shortest is ${Math.min(...lens)} characters)`);
+  assert.match(res.answer_cut.note, /what did not fit is cut, kept whole at tool-output\/a0\//);
+  assert.ok(res.answer_cut.cut.some((c) => /^every text longer than \d+ characters \(\d+ of them\): its first \d+ characters$/.test(c)), JSON.stringify(res.answer_cut.cut));
+  assert.equal(kept.at(-1), JSON.stringify({ ok: true, result: wide }), "the whole is kept");
+  // A deep answer: three hundred levels, each with a text of 5 KB.
+  let deep: Record<string, unknown> = { leaf: true };
+  for (let i = 0; i < 300; i++) deep = { level: i, text: `level ${i} ` + "d".repeat(5000), inner: deep };
+  const d = await boundRpcAnswer("leadsView", { ok: true, result: deep }, keep);
+  assert.ok(sent(d.answer) <= 262144, `${sent(d.answer)} bytes sent`);
+  let at = d.answer.result as Record<string, unknown>;
+  for (let i = 299; i >= 0; i--) {
+    assert.equal(at.level, i, "every level is there, with its number");
+    at = at.inner as Record<string, unknown>;
+  }
+  assert.equal(at.leaf, true);
+  // Lists of lists of short texts: no text is long enough to cut, so the lists are.
+  const lists = { rows: Array.from({ length: 400 }, (_, i) => ({ id: i, tags: Array.from({ length: 60 }, (_, k) => `tag-${i}-${k}`) })) };
+  const l = await boundRpcAnswer("leadsView", { ok: true, result: lists }, keep);
+  assert.ok(sent(l.answer) <= 262144, `${sent(l.answer)} bytes sent`);
+  assert.ok((l.answer.result as { rows: unknown[] }).rows.length >= 1);
+  // Sixty thousand short fields: nothing in it can be cut, and none of it is sent; a stub says so and names the kept file.
+  const flat: Record<string, string> = {};
+  for (let i = 0; i < 60_000; i++) flat[`k${i}`] = `v${i}`;
+  const f = await boundRpcAnswer("leadsView", { ok: true, result: flat }, keep, 64 * 1024);
+  assert.ok(sent(f.answer) <= 2048, `the stub is ${sent(f.answer)} bytes`);
+  const stub = (f.answer.result as { answer_cut: AnswerCut }).answer_cut;
+  assert.deepEqual(Object.keys(f.answer.result as object), ["answer_cut"]);
+  assert.equal(stub.kept, "tool-output/a0/20261114-answer-leadsView.text.log");
+  assert.match(stub.note, /none of it is sent: even with every text and list in it cut, its shape alone is past the bound; kept whole at tool-output\/a0\//);
+  assert.doesNotMatch(stub.note, /what did not fit is cut/, "the stub does not say it sent a part");
+  assert.deepEqual(f.cut, { fn: "leadsView", bytes: Buffer.byteLength(JSON.stringify({ ok: true, result: flat })), max: 64 * 1024, kept: "tool-output/a0/20261114-answer-leadsView.text.log" });
+  // A list of such objects cut to one is still past it: refused, never an empty list that looks whole.
+  const listed = await boundRpcAnswer("listClaims", { ok: true, result: [flat, flat] }, keep, 64 * 1024);
+  assert.equal(listed.answer.ok, false);
+  assert.match(String(listed.answer.error), /none of it is sent/);
+  // Every size of bound, on every shape: within it.
+  for (const max of [16 * 1024, 64 * 1024, 262144]) {
+    for (const body of [wide, deep, lists, flat, "t".repeat(900_000)]) {
+      const b = await boundRpcAnswer("leadsView", { ok: true, result: body }, keep, max);
+      assert.ok(sent(b.answer) <= max, `${sent(b.answer)} bytes over a bound of ${max}`);
+    }
+    const e = await boundRpcAnswer("recordEntry", { ok: false, error: "e".repeat(900_000) }, keep, max);
+    assert.ok(sent(e.answer) <= max);
+  }
+});
+
 test("only the answers code reads whole (a lookup, a window it pages itself) are exempt; a diff, a restore, a job's answer and a fetch are held to the wall; the bound can be set", async () => {
   const big = { ok: true, result: { diff: "y".repeat(600_000) } };
   assert.deepEqual([...UNBOUNDED_FNS].sort(), ["listFileHistory", "listForgedTools", "listLedger"]);
