@@ -6496,6 +6496,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   "file_history", "file_restore", "file_diff", "thread_open", "thread_join", "done",
   "playwright", "browser_check", "make_tool", "tools", "system", "inputs", "name", "record", "ledger",
   "attest", "dispute", "record_finding", "record_answer", "record_coverage", "record_limitation", "record_absence", "record_candidate",
+  // the record tools a seat is offered (B2), an answer format sighted in a result (B5), a pack added to a live run (E7)
+  "record_tools", "format_sighted", "pack_added",
   // the harness's own trace events: a forged tool with one of these names
   // would land its calls under the same name and be counted as the event
   "agent_start", "agent_stop", "thinking", "claim_violation", "inputs_guard", "inputs_violation",

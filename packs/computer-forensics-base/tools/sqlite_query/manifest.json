@@ -75,7 +75,7 @@
     }
   ],
   "version": 22,
-  "sha256": "2269eb623ae17925911be46e72d9368776b2a5871cc7ba5df32dcc72fbbeff2e",
+  "sha256": "0c624b25ddedc086209c9c5f0686b7b9598cee614ab5ec331e7d413aefddd4da",
   "companions": [
     {
       "param": "db_path",
