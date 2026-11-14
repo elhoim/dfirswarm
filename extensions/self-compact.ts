@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, findCutPoint, serializeConversation, sessionEntryToContextMessages, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, estimateTokens, findCutPoint, serializeConversation, sessionEntryToContextMessages, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { SELF_COMPACT_PROMPT_LINE } from "./seat-prompt.ts";
 import {
@@ -157,6 +157,8 @@ export type HandoffFacts = {
   skills?: string;
   /** The facts could not be read (the hub unreachable): the header says unknown, never zeros or absent. */
   unknown?: boolean;
+  /** The facts are still being read: the note goes now and they follow in a message of their own (HANDOFF_FACTS_TYPE). */
+  pending?: boolean;
   /**
    * The rules that change during a run and that only the forced prompt used to
    * carry, so that the run a hand-off starts has them: the instruction that
@@ -171,13 +173,25 @@ export type HandoffFacts = {
   stopping?: boolean;
 };
 
-/** How long a hand-off waits for the hub's facts before it is sent with them marked unknown. */
-export const HANDOFF_FACTS_MS = 4000;
+/**
+ * How long a hand-off's note waits for the hub's facts (claims, unread posts, the ledger, the lead register) before it
+ * goes without them. A hub that answers at once costs the note nothing and the seat gets one message; a held one does
+ * not hold the note (hand-offs came 2 to 4.5 minutes after the compaction in four runs, and the watchdog told the seat
+ * it had ended its turn).
+ */
+export const HANDOFF_FACTS_GRACE_MS = 500;
+/** How long the facts are waited for in all: past it they follow as unknown. */
+export const HANDOFF_FACTS_MS = 5000;
+/**
+ * customType of the message that brings the facts a note went without. Pi's extension API sends a message and appends
+ * an entry, and has no way to change a message once it is sent (sendMessage, sendUserMessage, appendEntry): the facts
+ * cannot be added to the note itself, so they come as a message of their own, right behind it.
+ */
+export const HANDOFF_FACTS_TYPE = "self-compact-facts";
 
 /**
- * The hub's facts for a hand-off, or "unknown" when the hub fails or does not answer within `ms`: the note does not wait
- * for the hub (hand-offs came 2 to 4.5 minutes after the compaction in four runs, and the watchdog told the seat it had
- * ended its turn), and a header with unknown facts says so instead of zeros (the run s082123).
+ * The hub's facts for a hand-off, or "unknown" when the hub fails or does not answer within `ms`, and a header with
+ * unknown facts says so instead of zeros (the run s082123).
  */
 export async function factsWithin(read: () => Promise<HandoffFacts>, ms: number): Promise<HandoffFacts> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -195,8 +209,15 @@ export type SelfCompactDeps = {
   /** One trace line; the extension's own `logEvent`, so attribution and the collector are the same. */
   trace: (cwd: string, tool: string, args: Record<string, unknown>, result: unknown) => Promise<void>;
   handoffFacts: (cwd: string, agentId: string) => Promise<HandoffFacts>;
-  /** How long the hand-off waits for those facts before it goes without them (HANDOFF_FACTS_MS). */
+  /** How long the facts are waited for in all before they follow as unknown (HANDOFF_FACTS_MS). */
   handoffFactsMs?: number;
+  /** How long the note waits for them before it goes without them (HANDOFF_FACTS_GRACE_MS). */
+  handoffFactsGraceMs?: number;
+  /**
+   * false: no summary is begun on a copy at the notice line (C3), and every compaction summarizes its whole history.
+   * Left out, it is on unless SWARM_COMPACT_PRESUMMARY is off.
+   */
+  preSummary?: boolean;
   /** Where the four prompt files live (the repo's `prompts/`). */
   promptsDir: string;
   /** An operator-supplied summary prompt file (SWARM_COMPACT_PROMPT), replacing `compaction-summary.md`. */
@@ -401,6 +422,68 @@ export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens:
   return false;
 }
 
+/** A message as the summary's copy names it: its role, its time and its tool call or custom type (a context edit may change its text). */
+export function messageKey(message: unknown): string {
+  const m = (message ?? {}) as { role?: unknown; timestamp?: unknown; toolCallId?: unknown; customType?: unknown };
+  return `${String(m.role ?? "?")}|${String(m.timestamp ?? "")}|${String(m.toolCallId ?? m.customType ?? "")}`;
+}
+
+/**
+ * What a compaction made now would summarize, from the messages the model is sent (C3): the conversation after the
+ * last compaction's summary, less the newest `keepRecent` tokens, which Pi keeps, never cut between a tool call and its
+ * results. `previousSummary` is the last compaction's summary. Null when nothing lies past the kept tail.
+ */
+export function summaryCopy(messages: readonly unknown[], keepRecent: number, estimate: (message: never) => number): { messages: unknown[]; keys: string[]; previousSummary?: string } | null {
+  type M = { role?: string; customType?: string; summary?: unknown };
+  let start = 0;
+  let previousSummary: string | undefined;
+  messages.forEach((m, i) => {
+    if ((m as M)?.role === "compactionSummary") {
+      previousSummary = typeof (m as M).summary === "string" ? ((m as M).summary as string) : undefined;
+      start = i + 1;
+    }
+  });
+  const body = messages.slice(start).filter((m) => (m as M)?.role !== "system" && !((m as M)?.role === "custom" && (m as M).customType === GUIDANCE_TYPE));
+  let kept = 0;
+  let cut = -1;
+  for (let i = body.length - 1; i >= 0; i -= 1) {
+    kept += estimate(body[i] as never);
+    if (kept >= keepRecent) {
+      cut = i;
+      break;
+    }
+  }
+  if (cut < 0) return null;
+  while (cut < body.length && (body[cut] as M)?.role === "toolResult") cut += 1;
+  const copy = body.slice(0, cut);
+  return copy.length ? { messages: copy, keys: copy.map(messageKey), ...(previousSummary !== undefined ? { previousSummary } : {}) } : null;
+}
+
+/**
+ * What a compaction still has to summarize once a copy's summary stands for its beginning: the compaction's messages
+ * (its history, then its turn prefix) must begin with the copy's messages, every one, in order; what follows them is
+ * left. Null when they do not (the copy is of another stretch, or a message in it changed place).
+ */
+export function afterCopy(keys: readonly string[], history: readonly unknown[], prefix: readonly unknown[]): { history: unknown[]; prefix: unknown[] } | null {
+  const all = [...history, ...prefix];
+  if (!keys.length || all.length < keys.length) return null;
+  for (let i = 0; i < keys.length; i += 1) if (messageKey(all[i]) !== keys[i]) return null;
+  const n = keys.length;
+  return n <= history.length ? { history: history.slice(n), prefix: [...prefix] } : { history: [], prefix: prefix.slice(n - history.length) };
+}
+
+/** Two providers' usages added, field by field (a summary made of the copy's and the rest's). */
+function addUsage<U>(a: U | undefined, b: U | undefined): U | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const sum = (x: unknown, y: unknown): unknown => {
+    if (typeof x === "number" && typeof y === "number") return x + y;
+    if (x && y && typeof x === "object" && typeof y === "object") return Object.fromEntries([...new Set([...Object.keys(x), ...Object.keys(y)])].map((k) => [k, sum((x as Record<string, unknown>)[k], (y as Record<string, unknown>)[k])]));
+    return x ?? y;
+  };
+  return sum(a, b) as U;
+}
+
 export type TemplateValues = Record<string, string | number>;
 
 /** Replace `{{key}}` placeholders; unknown ones are left as they are. */
@@ -491,9 +574,11 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
   const lines = [
     `[self-compact · handoff] cycle ${cycle} · ${who}.`,
     `Your context was just compacted (${reason}). SWARM.md is unchanged; re-read it only if the summary above leaves the goal unclear.`,
-    ...(facts.unknown
-      ? ["Live claims, unread posts, the ledger, the sentinel and spend: unknown (the hub could not be reached when this was written). Call inbox and check done/SWARM_DONE before acting."]
-      : [`Live claims: ${claims}.`, `Unread posts: ${unread}`, `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`]),
+    ...(facts.pending
+      ? [`Live claims, unread posts, the ledger, the sentinel, spend and the lead register: being read from the hub; they follow in a message of their own within ${Math.round(HANDOFF_FACTS_MS / 1000)} seconds. Go on from your note meanwhile, and call inbox before you act on a post.`]
+      : facts.unknown
+        ? ["Live claims, unread posts, the ledger, the sentinel and spend: unknown (the hub could not be reached when this was written). Call inbox and check done/SWARM_DONE before acting."]
+        : [`Live claims: ${claims}.`, `Unread posts: ${unread}`, `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`]),
     // The cap rule is an order and is never cut: the lead register gives way to it.
     ...(facts.capHit ? [facts.capHit] : []),
     ...(facts.forged ? [cutTo(facts.forged, 240, "tools lists them")] : []),
@@ -517,6 +602,21 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
   const tail = lines.pop() as string;
   lines.push(...leads, ...(facts.skills ? [facts.skills] : []), tail, last);
   return lines.join("\n");
+}
+
+/**
+ * The facts a hand-off note went without (HANDOFF_FACTS_TYPE), when they come or as unknown past HANDOFF_FACTS_MS: the
+ * same lines the header carries when they are there in time, bounded the same way.
+ */
+export function handoffFactsMessage(agentId: string, cycle: number, facts: HandoffFacts): string {
+  const header = handoffHeader(agentId, cycle, { ...facts, pending: false }, false, "facts");
+  // The header's facts, cap rule, forged tools, lead register and skills lines, without what it says about the compaction itself.
+  const lines = header.split("\n");
+  const from = lines.findIndex((l) => l.startsWith("Live claims"));
+  const to = lines.findIndex((l) => l.startsWith("This message is the harness, not a person"));
+  const body = lines.slice(from < 0 ? 2 : from, to < 0 ? lines.length - 1 : to);
+  const tail = facts.stopping ? "The swarm is ending, as the lines above say: do what they say and start nothing new." : "This message is the harness, not a person: do not answer it. Go on from your note's NEXT ACTION.";
+  return [`[self-compact · handoff facts] cycle ${cycle} · ${agentId}: what the harness read for the hand-off note you were given just now.`, ...body, tail].join("\n");
 }
 
 function fmt(n: number): string {
@@ -578,6 +678,20 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     configTold: boolean;
     /** Where the summary call goes, decided with the thresholds and said on the config row. */
     summaryModel?: SummaryModel;
+    /** The summary begun on a copy of the conversation at the notice line, for this epoch's compaction (C3). */
+    pre?: PreSummary;
+  };
+  type PreSummary = {
+    epoch: number;
+    status: "running" | "ready" | "failed";
+    keys: string[];
+    startedAt: number;
+    endedAt?: number;
+    summary?: string;
+    usage?: unknown;
+    error?: string;
+    controller: AbortController;
+    done: Promise<void>;
   };
   const R: Runtime = {
     usage: { tokens: null, percent: null, cachedTokens: 0, window: 0 },
@@ -821,19 +935,35 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       }
       return;
     }
-    const facts = await factsWithin(() => deps.handoffFacts(ctx.cwd, agentId()), deps.handoffFactsMs ?? HANDOFF_FACTS_MS);
-    const header = handoffHeader(agentId(), R.state.cycle, facts, hadNote, reason);
+    // The note goes at once: the facts are waited for HANDOFF_FACTS_GRACE_MS, and past it the note goes with the facts
+    // marked as coming, and they follow in a message of their own when the hub answers, or as unknown at HANDOFF_FACTS_MS.
+    const cycle = R.state.cycle;
+    const epoch = R.epoch;
+    const read = deps.handoffFacts(ctx.cwd, agentId());
+    read.catch(() => undefined);
+    const grace = Math.min(deps.handoffFactsGraceMs ?? HANDOFF_FACTS_GRACE_MS, deps.handoffFactsMs ?? HANDOFF_FACTS_MS);
+    const late = Symbol("late");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const quick = await Promise.race([read.catch(() => ({ claims: [], unread: {}, ledgerTotal: 0, ledgerMine: 0, sentinel: false, spentUsd: 0, unknown: true }) as HandoffFacts), new Promise<typeof late>((r) => (timer = setTimeout(() => r(late), grace)))]);
+    if (timer) clearTimeout(timer);
+    const facts: HandoffFacts = quick === late ? { claims: [], unread: {}, ledgerTotal: 0, ledgerMine: 0, sentinel: false, spentUsd: 0, pending: true } : quick;
+    const header = handoffHeader(agentId(), cycle, facts, hadNote, reason);
     const content = hadNote && h ? `${header}\n${h.note}` : header;
-    const details = { id: h?.id, cycle: R.state.cycle, note: hadNote ? h?.note : undefined, reason, facts };
-    try {
-      if (hadNote || ctx.isIdle()) {
-        pi.sendMessage({ customType: HANDOFF_TYPE, content, display: true, details }, { triggerTurn: true });
-      } else {
-        pi.sendMessage({ customType: HANDOFF_TYPE, content, display: true, details }, { triggerTurn: true, deliverAs: "steer" });
+    const details = { id: h?.id, cycle, note: hadNote ? h?.note : undefined, reason, facts };
+    const send = (customType: string, text: string, more: Record<string, unknown>) => {
+      try {
+        if ((customType === HANDOFF_TYPE && hadNote) || ctx.isIdle()) pi.sendMessage({ customType, content: text, display: true, details: more }, { triggerTurn: true });
+        else pi.sendMessage({ customType, content: text, display: true, details: more }, { triggerTurn: true, deliverAs: "steer" });
+      } catch {
+        // a dead session cannot take a message; the note is recovered on the next start
       }
-    } catch {
-      // a dead session cannot take a message; the note is recovered on the next start
-    }
+    };
+    send(HANDOFF_TYPE, content, details);
+    if (quick !== late) return;
+    const rest = Math.max(0, (deps.handoffFactsMs ?? HANDOFF_FACTS_MS) - grace);
+    const later = await factsWithin(() => read, rest);
+    if (!R.alive || epoch !== R.epoch) return;
+    send(HANDOFF_FACTS_TYPE, handoffFactsMessage(agentId(), cycle, later), { id: h?.id, cycle, facts: later });
   }
 
   /**
@@ -1039,6 +1169,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     R.alive = false;
     R.epoch += 1;
     clearTimers();
+    R.pre?.controller.abort();
   });
 
   pi.on("model_select", async (_event, ctx) => {
@@ -1049,6 +1180,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
   pi.on("context", async (event, ctx) => {
     await trackLevel(ctx);
     const messages = event.messages.filter((message) => !(message.role === "custom" && (message as { customType?: string }).customType === GUIDANCE_TYPE));
+    preSummarize(ctx, messages);
     const text = guidanceText(ctx);
     if (text) messages.push(guidanceMessage(text));
     return { messages };
@@ -1100,11 +1232,12 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
    * `summaryMaxChars` of text or `summaryAttemptMs` of time it is stopped,
    * and what it wrote is kept whole under tool-output/ (SummaryStopped).
    */
-  async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, prompt: LoadedPrompt) {
+  type SummaryInput = Pick<SessionBeforeCompactEvent["preparation"], "messagesToSummarize" | "turnPrefixMessages" | "previousSummary"> & { signal: AbortSignal; customInstructions?: string };
+  async function generateSummary(event: SummaryInput, ctx: ExtensionContext, prompt: LoadedPrompt) {
     const chosen = R.summaryModel ?? summaryModelFor(ctx);
     const model = chosen.model;
     if (!model) throw new Error("no model available for the compaction summary");
-    const { messagesToSummarize, turnPrefixMessages, previousSummary } = event.preparation;
+    const { messagesToSummarize, turnPrefixMessages, previousSummary } = event;
     // Method notes the seat read are named and sized in the input, not quoted: Pi would cut each to 2,000 characters.
     const shaped = deps.summaryInput?.(messagesToSummarize, turnPrefixMessages);
     const historyMessages = (shaped?.history ?? messagesToSummarize) as typeof messagesToSummarize;
@@ -1190,6 +1323,58 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     return { summary, usage: response.usage, truncated, model: chosen.name, modelSource: chosen.source };
   }
 
+  /**
+   * The summary begun on a copy at the notice line (C3). A compaction's summary was the longest part of a hand-off: the
+   * seat waited for a summary of everything since its last compaction, made only once it was at the compact line. From
+   * the notice line on, what a compaction would summarize then (summaryCopy) is summarized in the background while the
+   * seat works; the compaction then summarizes only what came after the copy, on top of the copy's summary (afterCopy),
+   * or nothing at all when nothing did. Once an epoch; a copy the compaction does not begin with is not used.
+   */
+  function preSummarize(ctx: ExtensionContext, messages: readonly unknown[]) {
+    if (!(deps.preSummary ?? !/^(0|off|false|no)$/i.test((process.env.SWARM_COMPACT_PRESUMMARY ?? "").trim())) || inert() || !R.thresholds || !R.alive) return;
+    if (LEVEL_ORDER[R.level] < LEVEL_ORDER.notice) return;
+    if ((R.pre && R.pre.epoch === R.epoch) || R.compactionInFlight || activeHandoff()) return;
+    let copy: ReturnType<typeof summaryCopy>;
+    try {
+      copy = summaryCopy(messages, keepRecent(ctx), estimateTokens as (m: never) => number);
+    } catch {
+      copy = null;
+    }
+    if (!copy) return;
+    const controller = new AbortController();
+    const pre: PreSummary = { epoch: R.epoch, status: "running", keys: copy.keys, startedAt: Date.now(), controller, done: Promise.resolve() };
+    R.pre = pre;
+    const input = { messagesToSummarize: copy.messages as SummaryInput["messagesToSummarize"], turnPrefixMessages: [] as SummaryInput["turnPrefixMessages"], previousSummary: copy.previousSummary, signal: controller.signal };
+    pre.done = (async () => {
+      // A summary calls the provider: not while the run is paused.
+      const held = deps.paused ? await deps.paused(ctx.cwd).catch(() => null) : null;
+      if (held) throw new Error(`the run is paused (${held.reason})`);
+      const made = await generateSummary(input, ctx, loadPrompt("summary", deps.promptsDir, deps.summaryPromptPath));
+      pre.summary = made.summary;
+      pre.usage = made.usage;
+      pre.status = "ready";
+    })()
+      .catch((error) => {
+        pre.status = "failed";
+        pre.error = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        pre.endedAt = Date.now();
+      });
+  }
+
+  /** This epoch's copy summary, waited for while it runs (it is the larger part of the compaction's work), unless the compaction is stopped first. */
+  async function preFor(signal: AbortSignal): Promise<PreSummary | undefined> {
+    const pre = R.pre;
+    if (!pre || pre.epoch !== R.epoch) return undefined;
+    if (pre.status === "running") {
+      let onAbort: () => void = () => undefined;
+      await Promise.race([pre.done, new Promise<void>((r) => { onAbort = () => r(); signal.addEventListener("abort", onAbort, { once: true }); })]);
+      signal.removeEventListener("abort", onAbort);
+    }
+    return pre;
+  }
+
   pi.on("session_before_compact", async (event, ctx) => {
     R.compactionReason = event.reason;
     R.lastCompactionError = undefined;
@@ -1209,6 +1394,18 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       return undefined;
     }
     const { fileOps, firstKeptEntryId, tokensBefore } = event.preparation;
+    // The copy's summary, when the compaction's messages begin with the copy: only what came after it is summarized.
+    const pre = await preFor(event.signal);
+    let input: SummaryInput = { messagesToSummarize: event.preparation.messagesToSummarize, turnPrefixMessages: event.preparation.turnPrefixMessages, previousSummary: event.preparation.previousSummary, signal: event.signal, customInstructions: event.customInstructions };
+    const rest = pre?.status === "ready" && pre.summary ? afterCopy(pre.keys, input.messagesToSummarize, input.turnPrefixMessages) : null;
+    if (rest && pre?.summary) input = { ...input, messagesToSummarize: rest.history as SummaryInput["messagesToSummarize"], turnPrefixMessages: rest.prefix as SummaryInput["turnPrefixMessages"], previousSummary: pre.summary };
+    const preSummary = pre
+      ? rest
+        ? { used: true, covered: pre.keys.length, after: rest.history.length + rest.prefix.length, ready_ms: (pre.endedAt ?? Date.now()) - pre.startedAt }
+        : { used: false, reason: pre.status === "ready" ? "the compaction does not begin with the copy" : pre.status === "failed" ? `the copy's summary failed: ${pre.error ?? "unknown"}` : "the copy's summary had not finished" }
+      : undefined;
+    // What the copy's summary cost is the compaction's cost, used or not (a compaction that fails leaves no entry to count it twice).
+    const preUsage = pre?.usage;
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
       if (event.signal.aborted) return { cancel: true };
@@ -1220,7 +1417,12 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
         return { cancel: true };
       }
       try {
-        const { summary, usage, truncated, model, modelSource } = await generateSummary(event, ctx, prompt);
+        // Nothing came after the copy: its summary is the compaction's, with no call.
+        const { summary, usage: own, truncated, model, modelSource } =
+          rest && pre?.summary && !input.messagesToSummarize.length && !input.turnPrefixMessages.length
+            ? { summary: pre.summary, usage: undefined, truncated: false, model: (R.summaryModel ?? summaryModelFor(ctx)).name, modelSource: (R.summaryModel ?? summaryModelFor(ctx)).source }
+            : await generateSummary(input, ctx, prompt);
+        const usage = addUsage(own as unknown, preUsage) as typeof own;
         return {
           compaction: {
             summary,
@@ -1231,7 +1433,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
               readFiles: [...fileOps.read],
               modifiedFiles: [...new Set([...fileOps.written, ...fileOps.edited])],
               handoffId: h?.id,
-              selfCompact: { cycle: R.state.cycle + (h ? 1 : 0), reason: event.reason, promptSource: prompt.source, noteChars: h?.note.length ?? 0, truncatedInput: truncated, attempt, summaryModel: model, summaryModelSource: modelSource },
+              selfCompact: { cycle: R.state.cycle + (h ? 1 : 0), reason: event.reason, promptSource: prompt.source, noteChars: h?.note.length ?? 0, truncatedInput: truncated, attempt, summaryModel: model, summaryModelSource: modelSource, ...(preSummary ? { preSummary } : {}) },
             },
           },
         };
@@ -1256,13 +1458,14 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
   });
 
   pi.on("session_compact", async (event, ctx) => {
+    if (R.pre?.status === "running") R.pre.controller.abort();
     R.epoch += 1;
     R.announcedLevel = "idle";
     R.compactionInFlight = false;
     R.stalledSeq = undefined;
     clearBound();
     const h = handoff();
-    const entry = event.compactionEntry as { tokensBefore?: number; summary?: string; usage?: { totalTokens?: number; cost?: { total?: number } }; details?: { selfCompact?: { summaryModel?: string | null; summaryModelSource?: string } } };
+    const entry = event.compactionEntry as { tokensBefore?: number; summary?: string; usage?: { totalTokens?: number; cost?: { total?: number } }; details?: { selfCompact?: { summaryModel?: string | null; summaryModelSource?: string; preSummary?: unknown } } };
     const summaryModel = entry.details?.selfCompact?.summaryModel ?? null;
     const summaryModelSource = entry.details?.selfCompact?.summaryModelSource ?? (event.fromExtension ? null : "pi-summary");
     const hadNote = Boolean(h && h.status !== "done");
@@ -1285,6 +1488,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       from_extension: event.fromExtension,
       cycle: R.state.cycle,
       note_chars: hadNote ? h?.note.length ?? 0 : 0,
+      ...(entry.details?.selfCompact?.preSummary ? { pre_summary: entry.details.selfCompact.preSummary } : {}),
     });
     void deliverHandoff(ctx, `${event.reason} compaction`, hadNote);
   });
