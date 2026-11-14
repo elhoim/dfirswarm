@@ -2235,7 +2235,8 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
         }
         const key = `lead:${lead || about.slice(0, 80)}`;
         if (cardsEver.has(key)) return undefined;
-        const notes = notesForText(await packIndexes(), about).filter((x) => !ledger.get(x.ref) && !cardsHeld.has(x.ref));
+        // The ledger keys a note by pack:id (SkillLedger.key); its ref is the bare id where one pack carries it.
+        const notes = notesForText(await packIndexes(), about).filter((x) => !ledger.get(SkillLedger.key(x.pack, x.id)) && !cardsHeld.has(x.ref));
         if (!notes.length) return undefined;
         cardsEver.add(key);
         let words = `Notes of this run's packs that fit this lead (each is a page of method: load the one you need with skill(id) before the work, not after): ${notes.map((x) => `${x.ref}${x.when ? ` (${x.when.length > 110 ? `${x.when.slice(0, 109)}\u2026` : x.when})` : ""}`).join("; ")}.`;

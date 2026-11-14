@@ -862,6 +862,25 @@ test("a lead opened or claimed names the notes that fit it after the result, onc
   }
 });
 
+test("a lead names no note the seat already holds, whatever pack carries it: the ledger is asked by pack:id (D8)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    for (const cards of ["on", "inject"]) {
+      const seat = await cardSeat([base], { cards });
+      // The seat loads the note itself; a lead about its subject then names none (on) and injects none (inject).
+      await seat.tools.get("skill")!.execute("c1", { id: "timeline/partition" }, undefined, undefined, { cwd: seat.sandbox });
+      const out = await seat.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}');
+      assert.equal(out, null, `${cards}: ${out}`);
+      // A seat that does not hold it is told of it.
+      const other = await cardSeat([base], { cards });
+      assert.match((await other.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}'))!, /timeline\/partition/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--skill-cards inject: a claimed lead comes back with the rules of the notes that fit it, which are then not shown again with their tools", async () => {
   const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
   try {
