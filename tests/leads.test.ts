@@ -537,7 +537,27 @@ test("D5: a holder 15 minutes in one call has its lead marked and offered to the
   await mkdir(join(S, "store", "jobs", "j000009"), { recursive: true });
   await writeFile(join(S, "store", "jobs", "j000009", "job.json"), JSON.stringify({ id: "j000009", state: "running", requester: { agent: "a2" }, spec: { kind: "command", command: "x" } }));
   const busy = ok(await L.seatStallLeads(S, "a2", "call", 30 * 60_000));
-  assert.deepEqual([busy.held, busy.marked, busy.offered, busy.why], [1, [], [], "a2 has a job of its own still to finish"]);
+  assert.deepEqual([busy.held, busy.marked, busy.offered, busy.why], [1, [], [], "a2 has a job of its own, or one it joined, still to finish"]);
+});
+
+test("D5: a seat waiting on a job it was joined to (the same call as a peer's) keeps its leads, as with a job of its own", async () => {
+  const { S, a0 } = await run(["a0", "a1", "a2"]);
+  ok(await L.openLead(a0, { title: "Extract the share", why: "question 3", answers: ["3"], take: true }));
+  // a1's job runs; a0 asked for the same call and was joined to it: the job service wrote job_deduplicated, and a0 has no job of its own.
+  await mkdir(join(S, "store", "jobs", "j000011"), { recursive: true });
+  await writeFile(join(S, "store", "jobs", "j000011", "job.json"), JSON.stringify({ id: "j000011", state: "running", requester: { agent: "a1" }, spec: { kind: "tool", tool: "extract" } }));
+  await writeFile(join(S, "store", "journal.jsonl"), `${JSON.stringify({ type: "job_accepted", job: "j000011", requester: { agent: "a1" } })}\n${JSON.stringify({ type: "job_deduplicated", job: "j000011", by: { agent: "a0" }, kind: "tool", tool: "extract", notify: true })}\n`);
+  const jobs = await L.readJobs(S);
+  assert.deepEqual(jobs.find((j) => j.id === "j000011")?.joined, ["a0"]);
+  assert.equal(L.seatJobOpen(jobs[0]!, "a0"), true);
+  assert.equal(L.seatJobOpen(jobs[0]!, "a2"), false);
+  const kept = ok(await L.seatStallLeads(S, "a0", "silent", 30 * 60_000));
+  assert.deepEqual([kept.held, kept.released, kept.why], [1, [], "a0 has a job of its own, or one it joined, still to finish"]);
+  assert.equal((await L.holderLiveness(S, "a0", jobs, new Map(), Date.now())).stale, false, "a joined job keeps its holder live");
+  assert.equal((await L.holderLiveness(S, "a2", jobs, new Map(), Date.now())).stale, true, "a seat that asked for nothing is not");
+  // Once the job is committed, the seat's silence counts again.
+  await writeFile(join(S, "store", "jobs", "j000011", "job.json"), JSON.stringify({ id: "j000011", state: "committed", status: "ok", requester: { agent: "a1" }, spec: { kind: "tool", tool: "extract" } }));
+  assert.deepEqual(ok(await L.seatStallLeads(S, "a0", "silent", 30 * 60_000)).released, ["L-1"]);
 });
 
 test("D5: a holder silent 15 minutes has its leads freed and is told when it is back; a dead seat's are freed at once, its jobs or not", async () => {

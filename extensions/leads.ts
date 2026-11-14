@@ -943,7 +943,8 @@ export function goalQuestionsIn(text: string, readBrief: (path: string) => strin
 
 // --- jobs ---------------------------------------------------------------------------------------
 
-export type JobFacts = { id: string; agent: string; kind: string; state: string; status?: string; command?: string; tool?: string; finished_at?: string };
+/** A job as the registers read it; `joined`, on a job still to finish, the seats that asked for the same call and were joined to it (job_deduplicated): each waits on it as on its own. */
+export type JobFacts = { id: string; agent: string; kind: string; state: string; status?: string; command?: string; tool?: string; finished_at?: string; joined?: string[] };
 
 const terminalJobs = new Map<string, JobFacts>();
 
@@ -952,6 +953,7 @@ export async function readJobs(sandboxRoot: string): Promise<JobFacts[]> {
   const dir = join(sandboxRoot, "store", "jobs");
   const names = await readdir(dir).catch(() => [] as string[]);
   const out: JobFacts[] = [];
+  let joiners: Map<string, Set<string>> | null = null;
   for (const id of names.sort()) {
     if (!/^j\d{6,}$/.test(id)) continue;
     const key = `${resolve(sandboxRoot)}\u0000${id}`;
@@ -975,6 +977,11 @@ export async function readJobs(sandboxRoot: string): Promise<JobFacts[]> {
         ...(j.finished_at ? { finished_at: j.finished_at } : {}),
       };
       if (facts.state === "committed" || facts.state === "failed" || facts.state === "cancelled") terminalJobs.set(key, facts);
+      else {
+        joiners ??= await jobJoiners(sandboxRoot).catch(() => new Map<string, Set<string>>());
+        const joined = joiners.get(id);
+        if (joined?.size) facts.joined = [...joined].filter((a) => a !== facts.agent).sort();
+      }
       out.push(facts);
     } catch {
       // Not a record: skipped.
@@ -993,20 +1000,39 @@ export function jobOpen(j: JobFacts): boolean {
   return ["accepted", "running", "finished", "fenced"].includes(j.state);
 }
 
-type Reads = { offset: number; returned: Map<string, Map<string, Array<[number, number]>>> };
+/**
+ * Whether a job still to finish is a seat's to wait on: one it asked for, or one it was joined to when it asked for
+ * the same call (job_deduplicated). A seat waiting on a job it joined had no job of its own, and could lose its leads
+ * after its silence while it waited.
+ */
+export function seatJobOpen(j: JobFacts, agent: string): boolean {
+  return jobOpen(j) && (j.agent === agent || (j.joined ?? []).includes(agent));
+}
+
+type Reads = { offset: number; returned: Map<string, Map<string, Array<[number, number]>>>; joined: Map<string, Set<string>> };
 const readsCache = new Map<string, Reads>();
+
+/** The seats joined to each job (the store journal's job_deduplicated lines), read incrementally with stdoutReads. */
+export async function jobJoiners(sandboxRoot: string): Promise<Map<string, Set<string>>> {
+  return (await journalReads(sandboxRoot)).joined;
+}
 
 /**
  * Which bytes of each job's stdout each agent was handed (the store journal's
  * job_returned lines), read incrementally.
  */
 export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<string, Array<[number, number]>>>> {
+  return (await journalReads(sandboxRoot)).returned;
+}
+
+/** The store journal's lines the registers read (job_returned, job_deduplicated), from where the last read ended. */
+async function journalReads(sandboxRoot: string): Promise<Reads> {
   const path = join(sandboxRoot, "store", "journal.jsonl");
   const key = resolve(sandboxRoot);
   let c = readsCache.get(key);
   const size = await stat(path).then((s) => s.size).catch(() => 0);
   if (!c || size < c.offset) {
-    c = { offset: 0, returned: new Map() };
+    c = { offset: 0, returned: new Map(), joined: new Map() };
     readsCache.set(key, c);
   }
   if (size > c.offset) {
@@ -1019,6 +1045,16 @@ export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<
         const end = text.lastIndexOf("\n");
         if (end >= 0) {
           for (const line of text.slice(0, end).split("\n")) {
+            if (line.includes('"job_deduplicated"')) {
+              try {
+                const l = JSON.parse(line) as { type?: string; job?: string; by?: { agent?: string } | string };
+                const by = typeof l.by === "string" ? l.by : l.by?.agent;
+                if (l.type === "job_deduplicated" && l.job && by) c.joined.set(l.job, (c.joined.get(l.job) ?? new Set<string>()).add(by));
+              } catch {
+                // A torn line: the journal's own check names it.
+              }
+              continue;
+            }
             if (!line.includes('"job_returned"')) continue;
             try {
               const l = JSON.parse(line) as { type?: string; job?: string; to?: string; stdout_offset?: number; stdout_bytes?: number };
@@ -1039,7 +1075,7 @@ export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<
       }
     }
   }
-  return c.returned;
+  return c;
 }
 
 /** How many bytes of a job's stdout an agent was not handed, of `total`. */
@@ -1200,7 +1236,7 @@ export async function holderLiveness(sandboxRoot: string, holder: string, jobs: 
   const last = Math.max(row?.last ?? 0, floor);
   const idle = last ? Math.round((now - last) / 1000) : Math.round(leadStaleMs() / 1000);
   const lastIso = last ? new Date(last).toISOString() : null;
-  if (jobs.some((j) => j.agent === holder && jobOpen(j))) return { stale: false, why: `${holder} has a job still running`, last_activity: lastIso, idle_seconds: idle };
+  if (jobs.some((j) => seatJobOpen(j, holder))) return { stale: false, why: `${holder} has a job still running`, last_activity: lastIso, idle_seconds: idle };
   if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) return { stale: false, why: `${holder} is compacting its context`, last_activity: lastIso, idle_seconds: idle };
   if (last && now - last < leadStaleMs()) return { stale: false, why: `${holder} worked ${idle} s ago`, last_activity: lastIso, idle_seconds: idle };
   return { stale: true, why: last ? `${holder} has done nothing for ${Math.round(idle / 60)} min, with no job running and no compaction under way` : `${holder} has done nothing in the last ${Math.round(leadStaleMs() / 60_000)} min`, last_activity: lastIso, idle_seconds: idle };
@@ -1242,7 +1278,7 @@ export async function idleSeats(sandboxRoot: string, s: LeadsState, v: LedgerVie
     // it keeps them, and takes other work meanwhile.
     const holds = [...s.leads.values()].some((l) => l.holder === agent && !l.closed && leadStatus(l, s, v) !== "blocked");
     if (holds) continue;
-    if (jobs.some((j) => j.agent === agent && jobOpen(j))) continue;
+    if (jobs.some((j) => seatJobOpen(j, agent))) continue;
     // One offer at a time, across both registers: a seat something is offered to now is not offered more.
     if (offered.has(agent)) continue;
     out.push({ agent, since });
@@ -1285,7 +1321,7 @@ export async function seatsWorkingLine(sandboxRoot: string, snap: LeadsSnapshot,
   for (const id of ids) {
     const mark = (["done", "dead"] as const).find((m) => existsSync(join(sandboxRoot, "done", "agents", `${id}.${m}`)));
     const row = act.get(id);
-    const job = snap.jobs.some((j) => j.agent === id && jobOpen(j));
+    const job = snap.jobs.some((j) => seatJobOpen(j, id));
     if (mark) not.push(`${id} ${mark === "done" ? "done" : "marked dead"}`);
     else if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) not.push(`${id} compacting`);
     else if ((row?.last && now - row.last < leadStaleMs()) || job) working += 1;
@@ -1401,7 +1437,7 @@ export async function seatStallLeads(sandboxRoot: string, agent: string, kind: S
       const held = [...snap.state.leads.values()].filter((l) => l.holder === agent && !l.closed);
       const none = { ok: true as const, held: held.length, offered: [], marked: [], released: [], waiting: [] };
       if (!held.length) return { append: [], result: { ...none, why: `${agent} holds no open lead` } };
-      if (kind !== "dead" && snap.jobs.some((j) => j.agent === agent && jobOpen(j))) return { append: [], result: { ...none, why: `${agent} has a job of its own still to finish` } };
+      if (kind !== "dead" && snap.jobs.some((j) => seatJobOpen(j, agent))) return { append: [], result: { ...none, why: `${agent} has a job of its own, or one it joined, still to finish` } };
       const append: LeadDraft[] = [];
       if (kind === "silent" || kind === "dead") {
         const why = kind === "dead" ? `${agent} was recorded dead (its link to the hub stayed down through its relaunches): the harness freed its leads` : `${agent} was silent ${minutes} min (its turn ended or its link is down, no job of its own running): the harness freed its leads`;
