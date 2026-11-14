@@ -437,7 +437,7 @@ Ledger (only when `record` is in your tool list)
   its `summary` or `narrative`, written from the ledger, not from memory. For a question, `value`
   is the asked string alone, in the format the question asks: its first line is what is graded,
   and what qualifies it goes in `qualifier` (the rules of value, qualifier, candidates and carriers
-  are `record`'s and `record_answer`'s).
+  are in `record`'s description, and `record_answer`'s when your tool list has it).
   `reasoning` says how the entries lead to it, citing `E-<seq>` for every claim; for a question also
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
   (the limitation entries that bound it), `alternatives_open` and `would_change`. The run records
