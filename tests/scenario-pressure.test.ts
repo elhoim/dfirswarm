@@ -7,6 +7,14 @@
  * restarted hub adds answering every live seat at once, the largest answer
  * a seat gets, and the time from the resumed seal to the job's output
  * resolving. Each piece has its own test elsewhere; this is them together.
+ *
+ * The answers are measured twice: as each source makes them (the digest,
+ * the finish, the inbox page, the lead register: each bounded where it is
+ * made, so none needs the wall here) and as the wall (reply-bound.ts) sends
+ * them. One answer is past the wall on purpose (a seat's whole inbox, the
+ * dead seat's backlog in it): it is sent cut, within the wall, and the file
+ * it names holds the whole. The dead seat's lead is freed for the others as
+ * the watchdog frees it (leads-cli.ts seat-stall ... dead).
  * Nothing here reads runs/.
  */
 import assert from "node:assert/strict";
@@ -17,6 +25,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../extensions/protocol.ts";
+import * as L from "../extensions/leads.ts";
 import * as SW from "../extensions/store-sweep.ts";
 import { resealMoved, resolveRef, sealDirOf, storePaths } from "../scripts/evidence-store.ts";
 import { coverage, ok, planned, rec, run } from "./negative-bar-fixture.ts";
@@ -70,13 +79,21 @@ test(`a store of ${OBJECTS} objects over its sweep's budget, a seal killed midwa
   assert.equal(sw.state, "partial", "the sweep ran past its budget");
   assert.ok(SW.unsearchedTotal(sw) >= OBJECTS, "every object is named unsearched, in its file");
 
-  // 2. A seat dies holding a lead and a claim: marked dead as the reaper marks it, its claims let go.
-  await planned(a3, "3");
+  // 2. A seat dies holding a lead and a claim, with a backlog of its posts in every inbox: marked dead as the watchdog marks it, its
+  // claims let go, and its lead freed for the others at once (idle-nudge.sh lead_stall_act ... dead).
+  const deadLead = await planned(a3, "3");
   assert.equal((await P.claimFile(a3, "work/report.md", { reason: "drafting the timeline" })).ok, true);
+  for (let i = 0; i < 120; i++) await P.postMessage(a3, { tag: "result", body: `timeline draft ${i}: ${"t".repeat(3000)}` });
   await mkdir(join(S, "done", "agents"), { recursive: true });
   await writeFile(P.agentDeadPath(S, "a3"), `---\nby: reaper\nagent: a3\nreason: stall\nat: ${new Date().toISOString()}\n---\n`);
   await P.releaseAllOwned(a3);
   assert.ok(!(await P.listClaims(S)).some((c) => c.owner === "a3"), "the dead seat's claim is let go");
+  assert.equal((await L.leadsSnapshot(S)).state.leads.get(deadLead)?.holder, "a3", "until the watchdog acts, the dead seat holds its lead");
+  const stall = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "leads-cli.ts"), "seat-stall", S, "a3", "dead", "1200"], { encoding: "utf8" });
+  assert.equal(stall.status, 0, stall.stderr + stall.stdout);
+  assert.deepEqual((JSON.parse(stall.stdout) as { released: string[] }).released, [deadLead], "the watchdog frees the dead seat's lead");
+  const freed = (await L.leadsSnapshot(S)).state.leads.get(deadLead)!;
+  assert.ok(!freed.holder && !freed.closed, `the lead is open again for any seat (holder ${freed.holder}, closed ${JSON.stringify(freed.closed)})`);
   await P.postMessage(a1, { tag: "result", body: "a3 went silent while drafting the timeline" });
 
   // 3. A seal killed three quarters of the way, and resumed: the job's output resolves after it.
@@ -110,13 +127,28 @@ test(`a store of ${OBJECTS} objects over its sweep's budget, a seal killed midwa
     let peak = h0;
     const watch = setInterval(() => { peak = Math.max(peak, process.memoryUsage().heapUsed); }, 2);
     const sizes = {};
-    const keep = async (text) => ({ path: "kept", bytes: text.length, sha256: "-" });
+    const raws = {};
+    const cuts = {};
+    const { createHash } = await import("node:crypto");
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    let kept = 0;
+    // As the hub keeps an answer past the wall: whole, in a file of the seat's own kept outputs, named in the answer.
+    const keep = async (text) => {
+      const rel = "tool-output/hub/answer-" + (++kept) + ".text.log";
+      await mkdir(join(S, "tool-output", "hub"), { recursive: true });
+      await writeFile(join(S, rel), text);
+      return { path: rel, bytes: Buffer.byteLength(text), sha256: createHash("sha256").update(text).digest("hex") };
+    };
     const answer = async (fn, p) => {
       const raw = await p.then((result) => ({ ok: true, result }), (err) => ({ ok: false, error: String(err && err.message || err) }));
-      const { answer } = await boundRpcAnswer(fn, raw, keep);
+      const rawBytes = Buffer.byteLength(JSON.stringify(raw));
+      const { answer, cut } = await boundRpcAnswer(fn.split("(")[0], raw, keep);
       const n = Buffer.byteLength(JSON.stringify(answer));
       sizes[fn] = Math.max(sizes[fn] ?? 0, n);
-      return { fn, raw: Buffer.byteLength(JSON.stringify(raw)), n };
+      raws[fn] = Math.max(raws[fn] ?? 0, rawBytes);
+      if (cut) cuts[fn] = { raw: rawBytes, sha256: createHash("sha256").update(JSON.stringify(raw)).digest("hex"), kept: cut.kept, answer_cut: answer.result && answer.result.answer_cut };
+      return { fn, raw: rawBytes, n };
     };
     const t0 = Date.now();
     const seats = ["a0", "a1", "a2", "a0", "a1", "a2", "a0", "a1"];
@@ -128,23 +160,44 @@ test(`a store of ${OBJECTS} objects over its sweep's budget, a seal killed midwa
         answer("readInbox", P.readInbox(ctx)),
         answer("finishAct", F.finishAct(ctx, { action: "status" })),
         answer("leadsView", L.leadsView(ctx, {})),
+        // A seat that asks for its whole inbox, unpaged: the dead seat's backlog makes it past the wall.
+        answer("readInbox(whole)", P.readInbox(ctx, { pageChars: 0, markSeen: false })),
       ]);
     }));
     clearInterval(watch);
     peak = Math.max(peak, process.memoryUsage().heapUsed);
     gc();
     const h1 = process.memoryUsage().heapUsed;
-    console.log(JSON.stringify({ h0, h1, peak, ms: Date.now() - t0, sizes }));
+    console.log(JSON.stringify({ h0, h1, peak, ms: Date.now() - t0, sizes, raws, cuts }));
   `;
   const out = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--expose-gc", "--input-type=module", "-e", child, S], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   assert.equal(out.status, 0, out.stderr);
-  const m = JSON.parse(out.stdout.trim().split("\n").at(-1)!) as { h0: number; h1: number; peak: number; ms: number; sizes: Record<string, number> };
+  type Cut = { raw: number; sha256: string; kept?: string; answer_cut?: { kept?: string; bytes: number; note: string } };
+  const m = JSON.parse(out.stdout.trim().split("\n").at(-1)!) as { h0: number; h1: number; peak: number; ms: number; sizes: Record<string, number>; raws: Record<string, number>; cuts: Record<string, Cut> };
+  const WALL = 256 * 1024;
   const largest = Math.max(...Object.values(m.sizes));
   const peakMb = (m.peak - m.h0) / 2 ** 20;
   const keptMb = (m.h1 - m.h0) / 2 ** 20;
-  assert.ok(largest <= 256 * 1024, `the largest answer is ${largest} bytes: ${JSON.stringify(m.sizes)}`);
+  // Each source is bounded where it is made: with 20,000 objects unsearched, a dead seat and its backlog, none of them needs the wall.
+  for (const fn of ["waitForSwarmChange", "leadsDigest", "readInbox", "finishAct", "leadsView"]) {
+    assert.ok(m.raws[fn]! <= WALL, `${fn} is ${m.raws[fn]} bytes as its source makes it, past the wall: ${JSON.stringify(m.raws)}`);
+    assert.equal(m.cuts[fn], undefined, `${fn} was not cut`);
+  }
+  // An answer past the wall is cut to it, and the file it names keeps the whole.
+  const whole = m.cuts["readInbox(whole)"];
+  assert.ok(m.raws["readInbox(whole)"]! > WALL && whole, `the whole inbox is ${m.raws["readInbox(whole)"]} bytes before the wall`);
+  assert.ok(m.sizes["readInbox(whole)"]! <= WALL);
+  assert.ok(whole.kept && whole.answer_cut?.kept === whole.kept && whole.answer_cut.bytes === whole.raw, JSON.stringify(whole.answer_cut));
+  const keptText = await readFile(join(S, whole.kept));
+  assert.equal(sha(keptText), whole.sha256, "the kept file is the whole answer");
+  assert.ok((JSON.parse(keptText.toString("utf8")) as { result: { posts: unknown[] } }).result.posts.length >= 121, "every post of the backlog is in it");
+  // What every seat is sent, the cut answer included, is within the wall.
+  assert.ok(largest <= WALL, `the largest answer is ${largest} bytes: ${JSON.stringify(m.sizes)}`);
+  // The dead seat's lead is offered to the live seats: open and unheld in their digest.
+  const digest = (await L.leadsDigest({ sandboxRoot: S, agentId: "a0" }, { mark: false })).text;
+  assert.match(digest, new RegExp(`Open, unheld, by priority: [^\\n]*${deadLead}\\b`), digest);
   assert.ok(peakMb < 100, `answering every seat at once took ${peakMb.toFixed(1)} MB more heap at its peak`);
   assert.ok(keptMb < 50, `and left ${keptMb.toFixed(1)} MB more heap`);
-  t.diagnostic(`answers: ${JSON.stringify(m.sizes)}`);
-  process.stdout.write(`# ${OBJECTS} objects over budget, a seal of ${FILES} files killed at ${stopAt} and resumed (${again.seal.hashed} hashed again), a dead seat: largest record ${recordBytes} B, sweep line ${sweepBytes} B; job delivered ${deliveryMs.toFixed(0)} ms after the resume; a restarted hub answered 40 calls in ${m.ms} ms, heap +${peakMb.toFixed(1)} MB at the peak, +${keptMb.toFixed(1)} MB kept; largest answer ${largest} B\n`);
+  t.diagnostic(`answers as made: ${JSON.stringify(m.raws)}; as sent: ${JSON.stringify(m.sizes)}`);
+  process.stdout.write(`# ${OBJECTS} objects over budget, a seal of ${FILES} files killed at ${stopAt} and resumed (${again.seal.hashed} hashed again), a dead seat: largest record ${recordBytes} B, sweep line ${sweepBytes} B; job delivered ${deliveryMs.toFixed(0)} ms after the resume; a restarted hub answered 48 calls in ${m.ms} ms, heap +${peakMb.toFixed(1)} MB at the peak, +${keptMb.toFixed(1)} MB kept; largest answer ${largest} B\n`);
 });
