@@ -589,8 +589,16 @@ export const SEALERS = 2;
 /** A tree of more files or bytes than this is a large seal: at most all sealers but one hold such trees. Counted by a bounded walk, never the whole tree. */
 export const SEAL_LARGE_FILES = 2000;
 export const SEAL_LARGE_BYTES = 256 * 1024 * 1024;
-/** The part of the derived catalogue's generations kept for what a user made or kept (derivedRank below 1), whenever it is offered. */
-export const DERIVED_RESERVE = 0.2;
+/**
+ * The part of the derived catalogue's generations kept for what a user made
+ * or kept (derivedRank below 1), whenever it is offered: anything else gets
+ * the rest and no more. A fifth was kept before, and on a run whose first
+ * committed tree was a prefix of Program Files (E0) four fifths of the
+ * ceiling went to a vendor's files before the profile's Temp and Downloads
+ * were offered; the plan holds the lane to 30 of 50 for a user's objects
+ * (tests/job-stages.test.ts replays such a run on a synthetic tree).
+ */
+export const DERIVED_RESERVE = 0.6;
 
 const JOB_ID = /^j\d{6}$/;
 export const TIMEOUT_MAX_SECONDS = 4 * 3600;
@@ -2784,8 +2792,12 @@ export class JobService {
       await this.derivedMayRun();
       return;
     }
-    const m = await readManifest(join(storePaths(this.S).jobs, job.id, "manifest.json"));
-    if (!m || !m.manifest.files.length) return;
+    // The manifest's index (manifest-index.ts), read as a stream a piece at a
+    // time, never the manifest whole: a tree of 201,202 files has a manifest
+    // of 60 MB, and parsing it held the hub's thread. An index that is not
+    // there yet is made in a thread of its own (evidence-store.ts manifestOf).
+    const m = await manifestOf(join(storePaths(this.S).jobs, job.id, "manifest.json")).catch(() => null);
+    if (!m || !m.head.totals.files) return;
     const reach = Math.min(Math.max(0, ...derived.flatMap((r) => (r.magic ?? []).map((g) => g.offset + g.bytes.length))), 1 << 20);
     const out = join(storePaths(this.S).jobs, job.id, "out");
     const inputsSha = await this.inputShas();
@@ -2794,14 +2806,15 @@ export class JobService {
     const seen = new Set<string>();
     let filtered = 0;
     let n = 0;
-    for (const f of m.manifest.files) {
+    for await (const rows of m.files()) for (const f of rows) {
       // In the background: the loop is given back every so many files, and a stop ends it (recovery offers the job again).
       n += 1;
       if (n % 500 === 0) {
         await new Promise<void>((res) => setImmediate(res));
         if (this.stopping) return;
       }
-      const name = Buffer.from(f.path_b64, "base64").toString("utf8");
+      // The name's own bytes where the shown path is not them (a backslash, a byte that is not UTF-8).
+      const name = f.path_b64 === undefined ? f.path : Buffer.from(f.path_b64, "base64").toString("utf8");
       const head = async (): Promise<Buffer> => {
         if (!reach) return Buffer.alloc(0);
         this.counters.offer_file_opens += 1;
@@ -2913,10 +2926,11 @@ export class JobService {
     }
     for (const id of ids) {
       if (this.importShaSeen.has(id)) continue;
-      const found = await readManifest(join(dir, id, "manifest.json")).catch(() => null);
+      // From the import's index, as a stream, like the job's own (offerFrom): never a manifest whole in the hub's thread.
+      const found = await manifestOf(join(dir, id, "manifest.json")).catch(() => null);
       if (!found) continue;
       this.importShaSeen.add(id);
-      for (const f of found.manifest.files) if (!m.has(f.sha256)) m.set(f.sha256, `import:${id}/${Buffer.from(f.path_b64, "base64").toString("utf8")}`);
+      for await (const rows of found.files()) for (const f of rows) if (!m.has(f.sha256)) m.set(f.sha256, `import:${id}/${f.path_b64 === undefined ? f.path : Buffer.from(f.path_b64, "base64").toString("utf8")}`);
     }
     return m;
   }
@@ -2990,10 +3004,7 @@ export class JobService {
    * made: the lane runs one job at a time to its end, and each start asks.
    */
   private derivedRoomFor(rank: number): boolean {
-    const L = this.limits();
-    const made = this.derivedMade();
-    if (made >= L.generationsMax) return false;
-    return rank < 1 || made < L.generationsMax - this.derivedReserve();
+    return derivedRoom(rank, this.derivedMade(), this.limits().generationsMax, this.derivedReserve());
   }
 
   /** A queued job of the lane, cancelled on the record with why. */
@@ -3035,18 +3046,7 @@ export class JobService {
     this.draining = true;
     try {
       const L = this.limits();
-      const ranks = new Map(this.derivedPending.map((c) => [c, this.rankOf(c)]));
-      this.derivedPending.sort((a, b) => ranks.get(a)! - ranks.get(b)! || b.bytes - a.bytes);
-      const userOnly = !this.derivedRoomFor(1);
-      const take: Candidate[] = [];
-      let pairs = 0;
-      while (this.derivedPending.length && (pairs === 0 || pairs + this.derivedPending[0].recipes.length <= L.pairsPerPass) && take.length < DETECT_FILES_MAX) {
-        // Sorted by rank: the first that is not a user's ends the pass when only the kept part is left.
-        if (userOnly && ranks.get(this.derivedPending[0])! >= 1) break;
-        const c = this.derivedPending.shift()!;
-        take.push(c);
-        pairs += c.recipes.length;
-      }
+      const { take, userOnly } = derivedPass(this.derivedPending, (c) => this.rankOf(c), { made: this.derivedMade(), max: L.generationsMax, reserve: this.derivedReserve(), pairsPerPass: L.pairsPerPass });
       if (!take.length) {
         if (userOnly && this.derivedPending.length && !this.derivedSaid.has("derived_reserved:generations")) {
           this.derivedSaid.add("derived_reserved:generations");
@@ -3788,6 +3788,41 @@ export function programLines(ids: readonly string[], importsDir: string): string
 }
 
 /**
+ * Whether the derived lane may still spend a generation on an object of this
+ * rank (derivedRank), `made` of the ceiling `max` being made and `reserve`
+ * of it kept for what a user made or kept: anything while the unreserved
+ * part lasts, then only a user's objects (rank below 1), up to the ceiling.
+ */
+export function derivedRoom(rank: number, made: number, max: number, reserve: number): boolean {
+  if (made >= max) return false;
+  return rank < 1 || made < max - reserve;
+}
+
+/**
+ * What one derived pass takes of what waits: `pending` sorted in place, a
+ * user's objects first and a vendor's last (`rank`), the largest first
+ * within each, and taken from its head up to the pass's pairs (always one
+ * object at least) and DETECT_FILES_MAX objects. Once only the kept part of
+ * the ceiling is left (`userOnly`), the first object that is not a user's
+ * ends the pass. What is taken is removed from `pending`.
+ */
+export function derivedPass<C extends { bytes: number; recipes: readonly string[] }>(pending: C[], rank: (c: C) => number, o: { made: number; max: number; reserve: number; pairsPerPass: number }): { take: C[]; userOnly: boolean } {
+  const ranks = new Map(pending.map((c) => [c, rank(c)]));
+  pending.sort((a, b) => ranks.get(a)! - ranks.get(b)! || b.bytes - a.bytes);
+  const userOnly = !derivedRoom(1, o.made, o.max, o.reserve);
+  const take: C[] = [];
+  let pairs = 0;
+  while (pending.length && (pairs === 0 || pairs + pending[0].recipes.length <= o.pairsPerPass) && take.length < DETECT_FILES_MAX) {
+    // Sorted by rank: the first that is not a user's ends the pass when only the kept part is left.
+    if (userOnly && ranks.get(pending[0])! >= 1) break;
+    const c = pending.shift()!;
+    take.push(c);
+    pairs += c.recipes.length;
+  }
+  return { take, userOnly };
+}
+
+/**
  * Where a derived object stands in the derived catalogue's queue, lowest
  * first. Words of the path only: no file is read.
  *
@@ -3823,9 +3858,14 @@ export function derivedRank(path: string, o: { picked?: boolean } = {}): number 
   const kept = /\/(users|home|documents and settings)\/[^/]+\/(desktop|documents|my documents|downloads|pictures|videos|music|onedrive[^/]*|dropbox|appdata\/local\/temp|local settings\/temp)\//.test(p) || /\/(users\/public|windows\/temp|\$recycle\.bin|tmp|var\/tmp|dev\/shm)\//.test(p);
   if (kept) return CASE_FILE.test(p) ? 0 : 0.5;
   if (/\/(program files( \(x86\))?|programdata|windows|winsxs|\$windows\.~bt|system volume information|usr|lib|lib64|opt|snap)\//.test(p) || /\.(so(\.\d+)*|dll|mui|cat|manifest)$/.test(p)) return 2;
+  // A program or a script outside the vendors' roots and the runtimes, wherever it sits (a profile's AppData, a folder at the root).
+  if (RUNNABLE.test(p)) return 0;
   if (/\/(users|home|documents and settings)\/[^/]+\//.test(p)) return 0.5;
   return 1;
 }
+
+/** A program or a script, by its name's ending (a library is a vendor's or a runtime's: .dll and .so rank with them). */
+const RUNNABLE = /\.(exe|scr|com|pif|cpl|msi|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|jar|elf|apk)$/;
 
 /** A program, a script, a document, a mail, an archive or an image of a disk, by its name's ending. */
 const CASE_FILE = /\.(exe|dll|scr|com|pif|cpl|sys|msi|msix|appx|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|lnk|url|jar|py|sh|elf|bin|apk|dmg|pkg|deb|rpm|doc[xm]?|dot[xm]?|xls[xmb]?|xlt[xm]?|ppt[xm]?|pps[xm]?|rtf|pdf|one|odt|ods|odp|csv|txt|eml|msg|pst|ost|mbox|zip|7z|rar|tar|gz|tgz|bz2|xz|cab|iso|img|vhdx?|vmdk|ova|e01|ad1|kdbx|sqlite|db)$/;
