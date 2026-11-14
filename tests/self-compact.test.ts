@@ -573,11 +573,12 @@ async function rig(o: { facts: () => Promise<import("../extensions/self-compact.
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => Promise<unknown>>>();
   const sent: Array<{ at: number; customType: string; content: string; options: Record<string, unknown> | undefined }> = [];
   const prompts: string[] = [];
+  const appended: Array<{ type: "custom"; customType: string; data: unknown }> = [];
   const replies = [...(o.summaries ?? [])];
   const pi = {
     on: (e: string, h: (e: unknown, c: unknown) => Promise<unknown>) => handlers.set(e, [...(handlers.get(e) ?? []), h]),
     registerTool: () => undefined,
-    appendEntry: () => undefined,
+    appendEntry: (customType: string, data: unknown) => void appended.push({ type: "custom", customType, data }),
     sendMessage: (m: { customType: string; content: string }, options?: Record<string, unknown>) => sent.push({ at: Date.now(), customType: m.customType, content: m.content, options }),
   };
   const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
@@ -624,7 +625,7 @@ async function rig(o: { facts: () => Promise<import("../extensions/self-compact.
   const withReadyNote = (note: string) => {
     branch = [{ type: "custom", customType: STATE, data: { version: 1, cycle: 1, locked: false, handoff: { id: "h1", note, status: "ready", attempts: 0, savedAt: 0 } } }];
   };
-  return { fire, sent, prompts, ctx, withReadyNote, usage };
+  return { fire, sent, prompts, ctx, withReadyNote, usage, appended };
 }
 
 const known = { claims: ["work/a0/x.md"], unread: { main: 2 }, ledgerTotal: 9, ledgerMine: 3, sentinel: false, spentUsd: 1.5 };
@@ -750,7 +751,17 @@ test("the summary starts on a copy at the notice line, and the compaction summar
   assert.ok(!r.prompts[1]!.includes(`m0 ${"x".repeat(20)}`), "what the copy covered is not sent again");
   assert.equal(out.compaction.summary, "WHOLE SUMMARY");
   assert.deepEqual([out.compaction.details.selfCompact.preSummary.used, out.compaction.details.selfCompact.preSummary.covered, out.compaction.details.selfCompact.preSummary.after], [true, covered.messages.length, after.length]);
-  assert.equal(out.compaction.usage.totalTokens, 2 * r.usage.totalTokens, "the copy's summary is counted in the compaction's cost");
+  // The copy's summary was recorded when its call ended, once; the compaction carries only its own call.
+  const { PRESUMMARY_USAGE_TYPE } = await import("../extensions/self-compact.ts");
+  const { usageFromSessionEntries } = await import("../extensions/protocol-core.ts");
+  const records = r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE);
+  assert.equal(records.length, 1);
+  assert.equal((records[0]!.data as { usage: { totalTokens: number } }).usage.totalTokens, r.usage.totalTokens);
+  assert.equal(out.compaction.usage.totalTokens, r.usage.totalTokens, "the compaction does not count the copy's summary again");
+  const counted = usageFromSessionEntries([...r.appended, { type: "compaction", usage: out.compaction.usage }]);
+  assert.equal(counted.compaction_usd, 2 * r.usage.cost.total, "both calls are compaction cost, each once");
+  assert.equal(counted.spent_usd, 2 * r.usage.cost.total);
+  assert.equal(counted.compactions, 1);
 
   // Nothing came after the copy: its summary is the compaction's, with no call at all.
   const again = await rig({ facts: async () => known, tokens: 45_000, summaries: ["ONLY SUMMARY"], dir });
@@ -763,6 +774,38 @@ test("the summary starts on a copy at the notice line, and the compaction summar
   assert.equal(direct.compaction.summary, "ONLY SUMMARY");
   assert.equal(again.prompts.length, 1, "no second call");
   assert.ok(Date.now() - t0 < 100, "and no wait");
+});
+
+test("the copy's summary is counted when its call ends: a run that ends before the compaction, or a cancelled compaction, still pays for it (D4)", async () => {
+  const { PRESUMMARY_USAGE_TYPE } = await import("../extensions/self-compact.ts");
+  const { usageFromSessionEntries } = await import("../extensions/protocol-core.ts");
+  const msg = (role: string, i: number) => ({ role, timestamp: 1000 + i, content: [{ type: "text", text: `m${i} ${"x".repeat(400)}` }], ...(role === "toolResult" ? { toolCallId: `c${i}`, toolName: "bash" } : {}) });
+  const convo = Array.from({ length: 30 }, (_, i) => msg(i % 3 === 0 ? "user" : i % 3 === 1 ? "assistant" : "toolResult", i));
+  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "presum-usage-"));
+  await mkdir(join(dir, ".pi"), { recursive: true });
+  await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 1000 } }));
+  // The seat crosses the notice line and the copy is summarized; the run ends there, before any compaction.
+  const r = await rig({ facts: async () => known, tokens: 45_000, summaries: ["COPY SUMMARY"], dir });
+  await r.fire("session_start", { type: "session_start", reason: "startup" });
+  await r.fire("context", { type: "context", messages: convo.slice(0, 22) });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(r.prompts.length, 1);
+  const records = r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE);
+  assert.equal(records.length, 1, "recorded once, when the call ended");
+  const ended = usageFromSessionEntries(r.appended);
+  assert.equal(ended.compaction_usd, r.usage.cost.total, "the budget counts it with no compaction entry");
+  assert.equal(ended.spent_usd, r.usage.cost.total);
+  assert.equal(ended.compactions ?? 0, 0, "it is not a compaction");
+  // A compaction that is cancelled leaves no entry: the copy's cost stands, counted once.
+  const stop = new AbortController();
+  stop.abort();
+  const preparation = { messagesToSummarize: convo.slice(0, 28), turnPrefixMessages: [], previousSummary: undefined, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, firstKeptEntryId: "e28", tokensBefore: 60_000 };
+  const out = (await r.fire("session_before_compact", { type: "session_before_compact", reason: "threshold", preparation, signal: stop.signal })) as { cancel?: boolean } | undefined;
+  assert.ok(!out || out.cancel, JSON.stringify(out));
+  assert.equal(r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE).length, 1, "not recorded again");
+  assert.equal(usageFromSessionEntries(r.appended).compaction_usd, r.usage.cost.total);
 });
 
 const estimateFor = (m: never) => {

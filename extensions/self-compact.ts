@@ -56,6 +56,13 @@ export const HANDOFF_TYPE = "self-compact-handoff";
 export const GUIDANCE_TYPE = "self-compact-guidance";
 /** customType of the state snapshot entries (never sent to the model). */
 export const STATE_TYPE = "self-compact-state";
+/**
+ * customType of the entry that records what the summary begun on a copy at the notice line cost, written once when its
+ * call ends (never sent to the model). The budget counts it as compaction cost (protocol-core.ts usageFromSessionEntries),
+ * so a run that ends before the compaction, Pi's own summarizer, or a cancelled compaction does not lose it; the
+ * compaction that uses the copy does not count it again.
+ */
+export const PRESUMMARY_USAGE_TYPE = "self-compact-presummary-usage";
 export const NOTE_MAX_CHARS = 24_000;
 /** What a locked agent may still call: the hand-off, its own gauge, and the exit. */
 export const LOCK_ALLOWED_TOOLS = new Set([SELF_COMPACT_TOOL, "budget", "done"]);
@@ -810,6 +817,8 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     endedAt?: number;
     summary?: string;
     usage?: unknown;
+    /** Its usage is in the session (PRESUMMARY_USAGE_TYPE): the compaction does not count it again. */
+    recorded?: boolean;
     error?: string;
     controller: AbortController;
     done: Promise<void>;
@@ -1480,6 +1489,15 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       const made = await generateSummary(input, ctx, loadPrompt("summary", deps.promptsDir, deps.summaryPromptPath));
       pre.summary = made.summary;
       pre.usage = made.usage;
+      // What it cost is recorded now, once, whatever becomes of the compaction it was made for.
+      if (made.usage) {
+        try {
+          pi.appendEntry(PRESUMMARY_USAGE_TYPE, { version: 1, epoch: pre.epoch, model: made.model, usage: made.usage });
+          pre.recorded = true;
+        } catch {
+          // a session that takes no entry: the compaction that uses the copy counts it, as before
+        }
+      }
       pre.status = "ready";
     })()
       .catch((error) => {
@@ -1532,8 +1550,9 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
         ? { used: true, covered: pre.keys.length, after: rest.history.length + rest.prefix.length, ready_ms: (pre.endedAt ?? Date.now()) - pre.startedAt }
         : { used: false, reason: pre.status === "ready" ? "the compaction does not begin with the copy" : pre.status === "failed" ? `the copy's summary failed: ${pre.error ?? "unknown"}` : "the copy's summary had not finished" }
       : undefined;
-    // What the copy's summary cost is the compaction's cost, used or not (a compaction that fails leaves no entry to count it twice).
-    const preUsage = pre?.usage;
+    // What the copy's summary cost was recorded when its call ended (PRESUMMARY_USAGE_TYPE) and is not counted again here;
+    // only when that record could not be written is it the compaction's (a compaction that fails leaves no entry to count it twice).
+    const preUsage = pre && !pre.recorded ? pre.usage : undefined;
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
       if (event.signal.aborted) return { cancel: true };
