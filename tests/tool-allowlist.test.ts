@@ -45,3 +45,22 @@ test("every tool the extension registers is one swarm.sh names for Pi", async ()
   const missing = tools.filter((t) => !named.has(t));
   assert.deepEqual(missing, [], `registered but never given to Pi: ${missing.join(", ")}`);
 });
+
+test("publish_file says in its description how large a file a microVM publishes, the limit the hub link refuses past", async () => {
+  const { default: extension } = await import("../extensions/agent-swarm.ts");
+  const { PUBLISH_MAX_BYTES } = await import("../extensions/board.ts");
+  const tools = new Map<string, { description?: string }>();
+  const base: Record<string, unknown> = { registerTool: (t: { name: string; description?: string }) => tools.set(t.name, t) };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  process.env.AGENT_ID = "a0";
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_ID;
+    else process.env.AGENT_ID = saved;
+  }
+  const description = tools.get("publish_file")?.description ?? "";
+  assert.equal(PUBLISH_MAX_BYTES, 32 * 1024 * 1024);
+  assert.match(description, /up to 32 MiB \(33,554,432 bytes\) is published; a larger one is refused: leave it in your own directory and name its path in the report/);
+});

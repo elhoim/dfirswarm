@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commandNames, extensionOf, freshCoverage, HINT_REPEAT_MS, HINT_TOOLS_MAX, libraryHint, matchTool, oneLine, shortHint } from "../scripts/library-hint.ts";
+import { commandNames, compactionCycle, extensionOf, forgetHintMemory, freshCoverage, HINT_MEMORY_FILE, HINT_REPEAT_MS, HINT_TOOLS_MAX, libraryHint, matchTool, oneLine, shortHint } from "../scripts/library-hint.ts";
 import { resolveScope } from "../scripts/job-scope.ts";
 import { boardTable } from "../scripts/vm-hub.ts";
 import { JobService } from "../scripts/job-service.ts";
@@ -101,6 +101,46 @@ test("the hub's admission answer carries the hint for a command job that declare
   await svc.stop("test over");
 });
 
+test("a seat is told of a tool once a compaction cycle, and a hub that restarts remembers what it told", async () => {
+  const S = rig();
+  const hubDir = mkdtempSync(join(tmpdir(), "libhint-hub-"));
+  const svc = new JobService({
+    sandbox: S, run: "s000000", image: "img:test", workers: 2, workerCpus: 1, workerMemoryMib: 512, allowHosts: [], openNet: false,
+    packDirs: [join(ROOT, "packs", "computer-forensics-base")], forging: false, minFreeMb: 1,
+    runWorker: localWorker(), destroyWorker: async () => ({ ok: true }), notify: async () => undefined, identity: async (a) => ({ name: a }),
+  });
+  const hub = () => {
+    const table = boardTable({ sandbox: S, settle: async () => undefined, wrote: () => undefined, ids: ["a1", "a2"], jobs: () => svc, dir: hubDir });
+    return (who: string, n: number) =>
+      (table as Record<string, (w: string, a: unknown[], s: AbortSignal) => Promise<unknown>>).jobSubmit(who, [S, { command: `sqlite3 inputs/phone/sms.db .tables > "$OUT/t${n}.txt"`, inputs: ["input:phone/sms.db"] }], new AbortController().signal) as Promise<Record<string, any>>;
+  };
+  // A seat's cycle is its count of compactions, as the hub folds its reports into budget.json.
+  const compacted = (counts: Record<string, number>) => writeFileSync(join(S, "budget.json"), JSON.stringify({ agents: Object.fromEntries(Object.entries(counts).map(([w, n]) => [w, { compactions: n }])) }));
+  const told = (r: Record<string, any>) => (r.library?.tools ?? []).map((t: { tool: string }) => t.tool);
+  await svc.start();
+  try {
+    forgetHintMemory();
+    let submit = hub();
+    assert.deepEqual(told(await submit("a1", 1)), ["sqlite_reader"]);
+    assert.deepEqual(told(await submit("a1", 2)), [], "not again in the same cycle");
+    assert.deepEqual(told(await submit("a2", 3)), ["sqlite_reader"], "another seat is told for itself");
+    // The hub restarts (its keeper brings it back in the same directory): what it told is not told again.
+    forgetHintMemory();
+    submit = hub();
+    assert.deepEqual(told(await submit("a1", 4)), [], "a restarted hub does not tell the seat again");
+    assert.ok(JSON.parse(readFileSync(join(hubDir, HINT_MEMORY_FILE), "utf8")).seats.a1.sqlite_reader === 0, "kept in the hub's directory with the cycle it was told in");
+    // a1 compacted: the hint left its context with the rest, and it is told again, once.
+    compacted({ a1: 1 });
+    assert.deepEqual(told(await submit("a1", 5)), ["sqlite_reader"], "told again after a compaction");
+    assert.deepEqual(told(await submit("a1", 6)), [], "once in the new cycle");
+    assert.deepEqual(told(await submit("a2", 7)), [], "a seat that did not compact is not told again");
+    assert.equal(await compactionCycle(S, "a1"), 1);
+    assert.equal(await compactionCycle(S, "nobody"), 0);
+  } finally {
+    await svc.stop("test over");
+  }
+});
+
 test("the library's manifests say what they read, in a form the hint can use", () => {
   const LIB = join(ROOT, "tool-library");
   const withUse = [];
@@ -150,20 +190,22 @@ test("the hint is bounded and reuses the cached manifest across admissions, and 
   assert.ok(past === null || past.tools.length === 0);
 });
 
-test("the hint an answer carries: at most three tools, one line each, no description-only match, not repeated to a seat", () => {
+test("the hint an answer carries: at most three tools, one line each, no description-only match, not repeated to a seat within a compaction cycle", () => {
   const tool = (name: string, by: "extension" | "description", n: number) => ({ tool: name, description: `Reads ${name} files. ${"More words. ".repeat(200)}`, matched: Array.from({ length: n }, (_, i) => ({ input: `input:f${i}`, by, what: ".x" })), example: "x".repeat(5000) });
   const full = { note: "n", tools: [tool("a", "extension", 1), tool("b", "extension", 9), tool("c", "description", 50), tool("d", "extension", 3), tool("e", "extension", 2)], examined: 9, of: 9 };
   const seen = new Map<string, number>();
-  const h = shortHint(full, seen, 1000)!;
+  const h = shortHint(full, seen, 0)!;
   assert.deepEqual(h.tools.map((t) => t.tool), ["b", "d", "e"], "the tools that matched the most inputs, and never the one its description alone matched");
   assert.equal(h.tools.length, HINT_TOOLS_MAX);
   assert.equal(h.more_tools, 1);
   assert.equal(h.tools[0]!.more_inputs, 8);
   assert.equal(h.tools[0]!.about, "Reads b files.");
   assert.ok(JSON.stringify(h).length < 1200);
-  assert.deepEqual(shortHint(full, seen, 2000)!.tools.map((t) => t.tool), ["a"], "what was said is not said again; the rest is");
-  assert.equal(shortHint(full, seen, 3000), null);
-  assert.equal(shortHint(full, seen, 1000 + HINT_REPEAT_MS + 1)!.tools.length, 3, "after a while it is said again");
+  assert.deepEqual(shortHint(full, seen, 0)!.tools.map((t) => t.tool), ["a"], "what was said is not said again in the cycle; the rest is");
+  assert.equal(shortHint(full, seen, 0), null);
+  assert.equal(shortHint(full, seen, 1)!.tools.length, 3, "after the seat's next compaction it is said again");
+  assert.equal(shortHint(full, seen, 1)!.tools.length, 1, "once in that cycle");
+  assert.equal(shortHint(full, seen, 1), null);
   assert.equal(shortHint({ ...full, tools: [tool("c", "description", 5)] }), null);
   assert.equal(oneLine("x".repeat(400)).length, 160);
 });

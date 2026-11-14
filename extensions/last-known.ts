@@ -9,18 +9,29 @@
  * within the deadline gives the last value it did answer with, and goes on
  * in the background so the next call has a newer one. Only a first read,
  * with nothing known yet, is waited for whole.
+ *
+ * The reads before one call share one deadline: the caller starts them
+ * together and gives each what is left of it (`read(fn, waitMs)`), so a held
+ * hub costs a call the deadline once, not once a read (three reads one after
+ * another, each with its own 1.5 s, held a call 4.5 s). And a read that has
+ * already outlived a deadline is not waited on again while it is still in
+ * flight: the hub is known to be slow, and every call until it answers goes
+ * out at once on the last value.
  */
-export type LastKnown<T> = { read(fn: () => Promise<T>): Promise<T>; age(): number | null; stale(): number };
+export type LastKnown<T> = { read(fn: () => Promise<T>, waitMs?: number): Promise<T>; age(): number | null; stale(): number };
 
 export function lastKnown<T>(deadlineMs: number, now: () => number = Date.now): LastKnown<T> {
   let known: { value: T; at: number } | null = null;
   let flying: Promise<void> | null = null;
+  /** The read in flight has outlived a deadline already. */
+  let late = false;
   let failed: unknown = null;
   let staleServed = 0;
   return {
-    async read(fn) {
+    async read(fn, waitMs = deadlineMs) {
       if (!flying) {
         failed = null;
+        late = false;
         flying = fn()
           .then((value) => {
             known = { value, at: now() };
@@ -38,10 +49,17 @@ export function lastKnown<T>(deadlineMs: number, now: () => number = Date.now): 
         if (known) return (known as { value: T }).value;
         throw failed ?? new Error("read failed");
       }
+      if (late || waitMs <= 0) {
+        staleServed += 1;
+        return known.value;
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const inTime = await Promise.race([mine.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), deadlineMs)))]);
+      const inTime = await Promise.race([mine.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), waitMs)))]);
       if (timer) clearTimeout(timer);
-      if (!inTime) staleServed += 1;
+      if (!inTime) {
+        staleServed += 1;
+        if (flying === mine) late = true;
+      }
       return known.value;
     },
     age: () => (known ? now() - known.at : null),

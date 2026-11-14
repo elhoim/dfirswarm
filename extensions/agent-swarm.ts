@@ -219,12 +219,13 @@ import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
 import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
-import { cropPng, pngForModel } from "./png-scale.ts";
+import { cropPng, scaleReadImages } from "./png-scale.ts";
+import { PUBLISH_MAX_BYTES } from "./board.ts";
 import { coerceArgs } from "./forged-args.ts";
 import { sightedFormats, sightedLine, sightingDigest, type OpenQuestion } from "./sighting.ts";
 
 /** How long a read made before a model call may take before the call goes out on the last known value. */
-const PRECALL_DEADLINE_MS = 1500;
+export const PRECALL_DEADLINE_MS = 1500;
 
 type ToolCtx = { cwd: string };
 
@@ -409,18 +410,40 @@ export function jobRunShape(p: { command?: unknown; tool?: unknown; args?: unkno
 
 /**
  * A shell command that waits on a job by sleeping in a loop over the store or a job's files: 42 such loops cost one run
- * 117 seat-minutes. job_status waits for a job, and `wait` wakes on its result post. Returns why it is refused, or null.
+ * 117 seat-minutes. job_status waits for a job, and `wait` wakes on its result post. Returns why it is refused, with the
+ * job_status call to send instead for each job the loop names (at most three), or null.
  */
 export function sleepLoopOverJobs(command: unknown): string | null {
   const c = typeof command === "string" ? command : "";
   if (!/\b(while|until|for)\b[\s\S]*\bsleep\s+\d/.test(c)) return null;
   if (!/store\/jobs\/|job_status|\bj\d{6}\b/.test(c)) return null;
-  return "this command sleeps in a loop to wait on a job. Do not poll from the shell: job_status(job_id, wait_seconds: 100) waits for it and says why it waits (queued behind what, or finished and being sealed), and wait wakes on the post tagged result that says it is done. Meanwhile take other work";
+  const ids = [...new Set(c.match(/\bj\d{6,}\b/g) ?? [])].slice(0, 3);
+  const calls = (ids.length ? ids : ["<the job's id>"]).map((id) => `job_status(${JSON.stringify({ job_id: id, wait_seconds: 100 })})`);
+  return `this command sleeps in a loop to wait on a job. Do not poll from the shell: send ${calls.join(" and ")} instead. It waits for the job and says why it waits (queued behind what, or finished and being sealed), and wait wakes on the post tagged result that says it is done. Meanwhile take other work`;
 }
 
-export function shellTimeoutNote(l: ShellLimit): string {
+/** The most of a command a ready job_run call carries whole; a longer one is named by its length. */
+export const READY_COMMAND_MAX = 4000;
+/** A job's own limit, as job_run takes it (default 900, at most 14400). */
+const JOB_TIMEOUT_DEFAULT_S = 900;
+const JOB_TIMEOUT_MAX_S = 14_400;
+
+/**
+ * The job_run call that runs a shell call stopped at its limit as a job: the same command, and a limit of its own (the
+ * time the call asked for when that was over the shell's most, else a job's default). A command longer than
+ * READY_COMMAND_MAX is named by its length rather than repeated.
+ */
+export function readyJobRun(command: unknown, l: ShellLimit): string {
+  const c = typeof command === "string" ? command.trim() : "";
+  const timeout = l.why === "capped" && l.asked ? Math.min(Math.ceil(l.asked), JOB_TIMEOUT_MAX_S) : JOB_TIMEOUT_DEFAULT_S;
+  if (!c) return `job_run(${JSON.stringify({ command: "<the same command>", timeout_seconds: timeout })})`;
+  if (c.length > READY_COMMAND_MAX) return `job_run({"command": <the same command, ${c.length} characters>, "timeout_seconds": ${timeout}})`;
+  return `job_run(${JSON.stringify({ command: c, timeout_seconds: timeout })})`;
+}
+
+export function shellTimeoutNote(l: ShellLimit, command?: unknown): string {
   const was = l.why === "capped" ? `the ${l.asked} s it asked for is over the harness's limit of ${l.seconds} s for one shell call in your VM` : `a shell call in your VM that names no timeout has the harness's limit of ${l.seconds} s`;
-  return `The call was stopped at its limit: ${was}. Run longer work as a job (job_run with the same command, and timeout_seconds for what it needs): it has a limit of its own, its output is kept in the store and can be cited, and you go on working while it runs (job_status, or wait for its post). A call that must run in your own VM for longer names its own timeout, up to ${SHELL_TIMEOUT_MAX_S} s.`;
+  return `The call was stopped at its limit: ${was}. Run longer work as a job (job_run with the same command, and timeout_seconds for what it needs): it has a limit of its own, its output is kept in the store and can be cited, and you go on working while it runs (job_status, or wait for its post). Ready to send: ${readyJobRun(command, l)}. A job runs from the run's directory and writes only under $OUT: point the command's outputs there, and list what it reads in inputs to give it only that. A call that must run in your own VM for longer names its own timeout, up to ${SHELL_TIMEOUT_MAX_S} s.`;
 }
 
 /**
@@ -1566,20 +1589,25 @@ export default function (pi: ExtensionAPI) {
     if (boardSocket() && hubLost.since) return;
     const cwd = ctx.cwd;
     // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
-    // Each read has PRECALL_DEADLINE_MS: past it the call goes out on the last value the hub gave (last-known.ts), and
-    // the read goes on for the next call. A busy hub must not stand between a tool result and the model.
-    const before = await precallBudget.read(() => readBudgetLive(cwd)).catch(() => null);
+    // The reads before this call share one deadline, PRECALL_DEADLINE_MS from now: the sentinel is read beside the
+    // budget, not after it, and each read waits only what is left. Past it the call goes out on the last value the hub
+    // gave (last-known.ts), and the read goes on for the next call; a read already past a deadline is not waited on
+    // again. Three reads one after another, each with its own deadline, held a call 4.5 s while the hub was held.
+    const until = Date.now() + PRECALL_DEADLINE_MS;
+    const left = () => Math.max(0, until - Date.now());
+    const sentinelRead = precallSentinel.read(() => swarmDoneExists(cwd), left()).catch(() => false);
+    const before = await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => null);
     if (before) await enforceAllCaps(cwd, before, ctx).catch(() => undefined);
     // Read again after the caps were enforced: the check that writes the
     // pause holds the call it was made for too.
-    const budget = before ? await precallBudget.read(() => readBudgetLive(cwd)).catch(() => before) : null;
+    const budget = before ? await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => before) : null;
     // A paused run (the stop policy): this call does not go out. The turn
     // ends here and the seat stays, idle, with everything it held; the
     // operator's extension wakes it (the watchdog's prompt). In a VM this is
     // advisory: the hub prompts no paused seat, and the model gateway
     // refuses the call on the host.
     const paused = budget?.paused;
-    if (paused && !stoppedByHarness && !(await precallSentinel.read(() => swarmDoneExists(cwd)).catch(() => false))) {
+    if (paused && !stoppedByHarness && !(await sentinelRead)) {
       if (pauseHeld !== paused.at) {
         pauseHeld = paused.at;
         await logEvent(cwd, agentId, "pause_hold", { reason: paused.reason, since: paused.at }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub and the model gateway hold the brake)" : "host" }).catch(() => undefined);
@@ -1588,7 +1616,7 @@ export default function (pi: ExtensionAPI) {
       ctx.abort();
       return;
     }
-    const sentinel = !stoppedByHarness && (await precallSentinel.read(() => swarmDoneExists(cwd)).catch(() => false));
+    const sentinel = !stoppedByHarness && (await sentinelRead);
     if (!stoppedByHarness && !sentinel) return;
     precallStopped = true;
     if (sentinel) {
@@ -2201,30 +2229,23 @@ export default function (pi: ExtensionAPI) {
     const limit = callId ? shellLimits.get(callId) : undefined;
     if (callId) shellLimits.delete(callId);
     if (limit && isError && /timeout|timed out/i.test(JSON.stringify(content ?? ""))) {
-      content = [...(Array.isArray(content) ? content : []), { type: "text", text: shellTimeoutNote(limit) }];
+      content = [...(Array.isArray(content) ? content : []), { type: "text", text: shellTimeoutNote(limit, input?.command) }];
       contentChanged = true;
       if (agentId) await logEvent(ctx.cwd, agentId, "shell_timeout", { tool: name }, { ok: true, seconds: limit.seconds, why: limit.why }).catch(() => undefined);
     }
-    // An image a seat reads goes to the model at a size worth looking at (png-scale.ts): a large PNG is scaled to 1,568
-    // pixels on its long side, and the seat is told from what and where the original is. Other formats pass as they are.
-    if (name === "read" && Array.isArray(content) && process.env.SWARM_IMAGE_SCALE !== "off") {
-      const scaledNotes: string[] = [];
-      const next = content.map((part) => {
-        if (part.type !== "image" || part.mimeType !== "image/png" || typeof part.data !== "string") return part;
-        try {
-          const scaled = pngForModel(Buffer.from(part.data, "base64"));
-          if (!scaled) return part;
-          scaledNotes.push(`${scaled.from.width}x${scaled.from.height} (${scaled.from.bytes} bytes) to ${scaled.to.width}x${scaled.to.height}`);
-          return { ...part, data: scaled.data.toString("base64") };
-        } catch {
-          return part;
-        }
-      });
-      if (scaledNotes.length) {
-        const where = typeof input?.path === "string" ? ` The file itself is unchanged at ${input.path}.` : "";
-        content = [...next, { type: "text", text: `The image above was scaled down for viewing, from ${scaledNotes.join("; ")}.${where} For detail too small to read here (small text, a code, single pixels), crop the region at full size with image_crop (a PNG), or in a job for another format.` }];
+    // Every image a seat reads goes to the model at a size worth looking at (png-scale.ts): at most 1,568 pixels on its
+    // long side and 300 KB, whatever its format, under the file's own name, and the seat is told from what and where the
+    // original is. Pi's own resize stops at 2,000 pixels and 4.5 MB.
+    if (name === "read" && Array.isArray(content) && process.env.SWARM_IMAGE_SCALE !== "off" && content.some((part) => part?.type === "image")) {
+      const path = typeof input?.path === "string" ? input.path : undefined;
+      const { stat: statFile } = await import("node:fs/promises");
+      const { resolve: resolvePath } = await import("node:path");
+      const fileBytes = path ? await statFile(resolvePath(ctx.cwd, path)).then((st) => st.size).catch(() => undefined) : undefined;
+      const read = await scaleReadImages(content, { path, fileBytes }).catch(() => null);
+      if (read) {
+        content = read.content;
         contentChanged = true;
-        if (agentId) await logEvent(ctx.cwd, agentId, "image_scaled", { path: typeof input?.path === "string" ? input.path : undefined }, { ok: true, scaled: scaledNotes }).catch(() => undefined);
+        if (agentId) await logEvent(ctx.cwd, agentId, "image_scaled", { path }, { ok: read.unscaled.length === 0, scaled: read.scaled.map((x) => `${x.from.width}x${x.from.height} to ${x.to.width}x${x.to.height} (${x.to.bytes} bytes, ${x.mimeType}, ${x.via})`), ...(read.unscaled.length ? { unscaled: read.unscaled } : {}) }).catch(() => undefined);
       }
     }
     const hostSpill = details?.fullOutputPath;
@@ -2869,7 +2890,8 @@ export default function (pi: ExtensionAPI) {
     name: "publish_file",
     label: "Publish file",
     description:
-      "Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same.",
+      `Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same. ` +
+      `From a microVM a file of up to ${PUBLISH_MAX_BYTES / (1024 * 1024)} MiB (${PUBLISH_MAX_BYTES.toLocaleString("en-US")} bytes) is published; a larger one is refused: leave it in your own directory and name its path in the report.`,
     promptSnippet: "Publish a file of your own into the shared work/ (claimed and recorded for you)",
     promptGuidelines: ["Write a shared deliverable under work/<your id>/ first, then publish_file it. To change a shared file, copy it into your directory, edit, publish."],
     parameters: Type.Object({
@@ -3036,7 +3058,7 @@ export default function (pi: ExtensionAPI) {
     name: "image_crop",
     label: "Crop an image",
     description:
-      "A region of a PNG at its own resolution: `read` scales a large picture to 1,568 pixels on its long side, which loses small text, a code or single pixels. path is a PNG you can read (a job's output under store/jobs/<id>/out/, or your own under work/); x, y, width and height are in the original's pixels (read says the original's size when it scaled it). A region past the image is clipped to it; one larger than 1,568 x 1,568 pixels is scaled to fit, and the answer says so. Other formats, and interlaced, 16-bit or palette PNGs, are cropped in a job.",
+      "A region of a PNG at its own resolution: `read` shows a picture at most 1,568 pixels on its long side and 300 KB, which loses small text, a code or single pixels. path is a PNG you can read (a job's output under store/jobs/<id>/out/, or your own under work/); x, y, width and height are in the original's pixels (read says the original's size when it scaled it). A region past the image is clipped to it; one larger than 1,568 x 1,568 pixels is scaled to fit, and the answer says so. Any PNG (every depth, palette or not, interlaced or not); other formats are cropped in a job.",
     parameters: Type.Object({
       path: Type.String({ description: "The PNG, relative to the run's directory" }),
       x: Type.Integer({ description: "Left edge, in the original's pixels" }),

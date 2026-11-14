@@ -11,7 +11,7 @@ import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { SHELL_TIMEOUT_DEFAULT_S, SHELL_TIMEOUT_MAX_S, shellTimeout, shellTimeoutNote, sleepLoopOverJobs } from "../extensions/agent-swarm.ts";
+import { READY_COMMAND_MAX, readyJobRun, SHELL_TIMEOUT_DEFAULT_S, SHELL_TIMEOUT_MAX_S, shellTimeout, shellTimeoutNote, sleepLoopOverJobs } from "../extensions/agent-swarm.ts";
 import { initSandbox } from "../extensions/protocol.ts";
 
 const REPO = resolve(import.meta.dirname, "..");
@@ -35,15 +35,32 @@ test("the limit: the default for a call that names none, the most for one that n
 test("the default is two minutes; a shell loop that sleeps to wait on a job is refused and pointed at job_status", () => {
   assert.equal(SHELL_TIMEOUT_DEFAULT_S, 120);
   assert.match(shellTimeoutNote({ seconds: 120, why: "default" }), /job_run with the same command.*names its own timeout, up to 1800 s/);
-  for (const loop of [
-    "while ! grep -q done store/jobs/j000097/stdout.log; do sleep 30; done",
-    "for i in $(seq 1 20); do ls store/jobs/j000040/out 2>/dev/null && break; sleep 15; done",
-    "until [ -f store/jobs/j000012/manifest.json ]; do\n  sleep 5\ndone",
-    "while true; do echo waiting for j000218; sleep 60; done",
-  ]) assert.match(sleepLoopOverJobs(loop) ?? "", /job_status\(job_id, wait_seconds: 100\)/, loop);
+  for (const [loop, id] of [
+    ["while ! grep -q done store/jobs/j000097/stdout.log; do sleep 30; done", "j000097"],
+    ["for i in $(seq 1 20); do ls store/jobs/j000040/out 2>/dev/null && break; sleep 15; done", "j000040"],
+    ["until [ -f store/jobs/j000012/manifest.json ]; do\n  sleep 5\ndone", "j000012"],
+    ["while true; do echo waiting for j000218; sleep 60; done", "j000218"],
+  ] as const) assert.ok((sleepLoopOverJobs(loop) ?? "").includes(`send job_status({"job_id":"${id}","wait_seconds":100}) instead`), loop);
+  assert.match(sleepLoopOverJobs("while [ ! -s store/jobs/j000001/out/a ] || [ ! -s store/jobs/j000002/out/b ]; do sleep 10; done") ?? "", /job_status\(\{"job_id":"j000001","wait_seconds":100\}\) and job_status\(\{"job_id":"j000002","wait_seconds":100\}\)/, "each job the loop names");
+  assert.match(sleepLoopOverJobs("while ! ls store/jobs/*/out/done; do sleep 5; done") ?? "", /job_status\(\{"job_id":"<the job's id>","wait_seconds":100\}\)/, "a loop that names no job");
   for (const fine of ["sleep 2; ls work/", "for f in work/*.bin; do xxd $f | head -2; done", "while read l; do echo $l; done < store/jobs/j000001/out/list.txt", "grep -r needle store/jobs/j000003/out | head", 42, undefined]) {
     assert.equal(sleepLoopOverJobs(fine), null, String(fine));
   }
+});
+
+test("a call stopped at its limit is told the job_run call that runs it as a job, ready to send", () => {
+  const command = "python3 tools/x/run.py --in 'inputs/a b.img' > work/a0/out.txt";
+  const note = shellTimeoutNote({ seconds: 120, why: "default" }, command);
+  const ready = /Ready to send: (job_run\((.*)\))\. A job runs/.exec(note);
+  assert.ok(ready, note);
+  assert.deepEqual(JSON.parse(ready![2]!), { command, timeout_seconds: 900 }, "the same command, whole, with a job's default limit");
+  assert.match(note, /writes only under \$OUT: point the command's outputs there, and list what it reads in inputs/);
+  // A call that asked for more than the shell's most: the job gets what it asked for, up to a job's own most.
+  assert.equal(readyJobRun("sleep 1", { seconds: 1800, why: "capped", asked: 7200 }), 'job_run({"command":"sleep 1","timeout_seconds":7200})');
+  assert.equal(readyJobRun("sleep 1", { seconds: 1800, why: "capped", asked: 99999 }), 'job_run({"command":"sleep 1","timeout_seconds":14400})');
+  const long = `echo ${"x".repeat(READY_COMMAND_MAX)}`;
+  assert.equal(readyJobRun(long, { seconds: 120, why: "default" }), `job_run({"command": <the same command, ${long.length} characters>, "timeout_seconds": 900})`);
+  assert.match(shellTimeoutNote({ seconds: 120, why: "default" }), /Ready to send: job_run\(\{"command":"<the same command>","timeout_seconds":900\}\)/, "no command at hand: the form");
 });
 
 async function findLoader(): Promise<string | null> {
@@ -86,6 +103,7 @@ test("through the extension: the call's input gets the limit before it runs, and
     const outs = await fire("tool_result", { toolName: "bash", toolCallId: "c1", input: none, isError: true, content: [{ type: "text", text: `Command timed out after ${SHELL_TIMEOUT_DEFAULT_S} seconds` }] });
     const content = (outs.find((o) => o && typeof o === "object" && "content" in (o as object)) as { content: Array<{ text: string }> } | undefined)?.content ?? [];
     assert.match(content.map((c) => c.text).join("\n"), /Command timed out after 120 seconds\nThe call was stopped at its limit: a shell call in your VM that names no timeout has the harness's limit of 120 s/);
+    assert.ok(content.map((c) => c.text).join("\n").includes('Ready to send: job_run({"command":"sleep 100000","timeout_seconds":900})'), "the call's own command, as a job");
     const rows = (await readFile(join(S, "traces", "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { tool: string; result: Record<string, unknown> });
     assert.ok(rows.some((r) => r.tool === "shell_timeout" && r.result.seconds === 120 && r.result.why === "default"));
     // A call the model gave its own limit, stopped there: nothing added.

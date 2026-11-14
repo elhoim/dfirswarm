@@ -68,6 +68,12 @@ function noteFromFakeTrace(d: Dir): string {
   return turns.find((r) => r.kind === "turn" && r.plan?.toolCall?.name === "self_compact")?.plan?.toolCall?.arguments?.note_to_self ?? "";
 }
 
+/**
+ * The scripted summary failures, runaways and hangs are meant for the compaction's own attempts: with these set, no
+ * summary is begun on a copy at the notice line, which would take the first of them.
+ */
+const COMPACTION_ATTEMPTS_ONLY = { SWARM_COMPACT_PRESUMMARY: "off" };
+
 /** Notice at 40k, warning at 80k, compact at 100k on the fake's 200k window (no table row: the declared window is the ceiling). */
 const ENV = {
   AGENT_ID: "agent00",
@@ -153,8 +159,11 @@ test("lifecycle: notice, warning, lock, note, compaction with our prompt, verbat
     assert.match(result.summary ?? "", /^FAKE-SUMMARY\[You are the context-compaction summarizer for one agent in a\]/, "the summary call carried our prompt file");
     assert.ok(result.details?.handoffId, "the compaction carries the hand-off id");
     assert.equal(result.details?.selfCompact?.reason, "manual");
-    const done = rows.find((e) => e.tool === "compact_done") as { args: { via: string; reason: string }; result: { cycle: number; tokens_after: number; tokens_before: number } };
+    const done = rows.find((e) => e.tool === "compact_done") as { args: { via: string; reason: string }; result: { cycle: number; tokens_after: number; tokens_before: number; pre_summary?: { used: boolean; covered: number; after: number } } };
     assert.deepEqual([done.args.via, done.args.reason, done.result.cycle], ["self", "manual", 1]);
+    // The summary was begun on a copy at the notice line, and the compaction summarized only what came after it.
+    assert.equal(done.result.pre_summary?.used, true, JSON.stringify(done.result.pre_summary));
+    assert.ok((done.result.pre_summary?.covered ?? 0) > 0);
 
     // 5. The note came back verbatim under the header, once, and the agent continued without a user message.
     const handoffText = messageText(handoffEvent.message);
@@ -228,7 +237,7 @@ test("a failing summary falls back to Pi's own summarizer and the note still com
   }
   const d = await makeSandbox("summary-fallback");
   // Two of our attempts fail; Pi's own summary call (the third summary request) succeeds.
-  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_FAIL: "2", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, ...COMPACTION_ATTEMPTS_ONLY, SC_FAKE_SUMMARY_FAIL: "2", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
   try {
     await client.request({ type: "prompt", message: "Start the scripted work." });
     const handoff = await waitForCompletion(client);
@@ -252,7 +261,7 @@ test("when Pi's own summary fails after ours, the trace names both failures", as
   const d = await makeSandbox("summary-both-fail");
   // Every summary call fails: our two attempts, then Pi's fallback (run se064eb:
   // msb closed each one, and the trace named only ours).
-  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_FAIL: "99", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, ...COMPACTION_ATTEMPTS_ONLY, SC_FAKE_SUMMARY_FAIL: "99", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
   try {
     await client.request({ type: "prompt", message: "Start the scripted work." });
     let failed: { args: { stage: string; attempt?: number }; result: { reason: string } } | undefined;
@@ -277,7 +286,7 @@ test("a summary that runs on past its length bound is stopped, kept whole under 
   // Run sedf827: the openai-codex API sends no output limit, and two summaries
   // ran on to 128,000 output tokens. Here the first summary call streams
   // without end and ignores maxTokens; the second answers.
-  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_RUNAWAY: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, ...COMPACTION_ATTEMPTS_ONLY, SC_FAKE_SUMMARY_RUNAWAY: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
   try {
     await client.request({ type: "prompt", message: "Start the scripted work." });
     const handoff = await waitForCompletion(client);
@@ -315,7 +324,7 @@ test("a summary that never answers is stopped at its time bound, and Pi's own su
     return;
   }
   const d = await makeSandbox("summary-silent");
-  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_HANG: "2", SWARM_COMPACT_SUMMARY_SEC: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, ...COMPACTION_ATTEMPTS_ONLY, SC_FAKE_SUMMARY_HANG: "2", SWARM_COMPACT_SUMMARY_SEC: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
   try {
     await client.request({ type: "prompt", message: "Start the scripted work." });
     const handoff = await waitForCompletion(client);
