@@ -263,6 +263,7 @@ test("Pi loader: an image a seat reads reaches the model within 1,568 pixels and
     assert.ok(image, "the image is still there");
     const shown = Buffer.from(String(image!.data), "base64");
     assert.ok(shown.length <= TARGET_BYTES, `${shown.length} bytes reach the model (the file is ${png.length})`);
+    assert.equal(parts[0]!.text, `Read image file [${image!.mimeType}]`, "Pi's line names the type the model is sent");
     const size = image!.mimeType === "image/png" ? decodePng(shown) : jpegSize(shown);
     assert.ok(size && Math.max(size.width, size.height) <= LONG_SIDE_MAX);
     assert.match(parts.map((p) => String(p.text ?? "")).join("\n"), new RegExp(`The image above is work/agent00/frame\\.png, scaled for viewing .* from 1500x1100 \\(${png.length} bytes\\)`));

@@ -386,10 +386,12 @@ export async function scaleReadImages(content: readonly Part[], o: { path?: stri
   }
   if (!scaled.length && !unscaled.length) return null;
   const shown = scaled[0];
+  // Pi's own first line names the type it sent, and its size line (when it resized) the size it showed: both say what is shown now.
   const next = out.map((p) => {
-    if (p !== piNote || !shown || !pi) return p;
-    const factor = (shown.from.width / shown.to.width).toFixed(2);
-    return { ...p, text: (p.text as string).replace(PI_DIMENSIONS, `[Image: original ${shown.from.width}x${shown.from.height}, displayed at ${shown.to.width}x${shown.to.height}. Multiply coordinates by ${factor} to map to original image.]`).replace(/^Read image file \[[^\]]+\]/, `Read image file [${shown.mimeType}]`) };
+    if (!shown || p?.type !== "text" || typeof p.text !== "string") return p;
+    let text = p.text.replace(/^Read image file \[[^\]]+\]/, `Read image file [${shown.mimeType}]`);
+    if (p === piNote && pi) text = text.replace(PI_DIMENSIONS, `[Image: original ${shown.from.width}x${shown.from.height}, displayed at ${shown.to.width}x${shown.to.height}. Multiply coordinates by ${(shown.from.width / shown.to.width).toFixed(2)} to map to original image.]`);
+    return text === p.text ? p : { ...p, text };
   });
   const name = o.path ? `${o.path}` : "the file you read";
   const lines: string[] = [];
