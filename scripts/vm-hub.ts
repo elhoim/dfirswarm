@@ -76,7 +76,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import v8 from "node:v8";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -2062,11 +2062,9 @@ export class Hub {
           try {
             const fn = String(msg.fn ?? "");
             const raw = await this.callOnce(agent, fn, args, controller.signal, msg.rid);
-            // The wall behind every bounded source (extensions/reply-bound.ts): an answer past it is kept whole and named, never sent.
-            const { answer: result, cut } = await boundRpcAnswer(fn, raw, async (text) => {
-              const kept = await P.keepToolOutput(this.cfg.sandbox, P.toolOutputRel("harness", `answer-${fn}`, "text"), text);
-              return kept.write_error ? { write_error: kept.write_error } : { path: kept.path, bytes: kept.bytes, sha256: kept.sha256 };
-            });
+            // The wall behind every bounded source (extensions/reply-bound.ts): an answer past it is cut to the bound, and the
+            // whole kept among the seat's own kept outputs, which its VM reads (tool-output/<seat>/), and named.
+            const { answer: result, cut } = await boundRpcAnswer(fn, raw, (text) => keepAnswer(this.cfg.sandbox, agent, fn, text));
             if (cut) void this.refused(agent, "answer_too_large", `${cut.fn}: ${cut.bytes} bytes over ${cut.max}${cut.kept ? `, kept at ${cut.kept}` : ""}`);
             this.replyRpc(agent, socket, id, result);
           } finally {
@@ -3459,6 +3457,24 @@ export function historyQuotaBytes(env: NodeJS.ProcessEnv = process.env): number 
 export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SWARM_CUSTODY_TIMEOUT);
   return Number.isInteger(n) && n > 0 ? n : 14400;
+}
+
+/**
+ * An answer too large to send, kept whole for the seat it was for, under its
+ * own kept outputs (tool-output/<seat>/), which its VM mounts: a name with a
+ * random part, created only if nothing is there (a seat that put a link in
+ * its directory does not have the hub write through it).
+ */
+export async function keepAnswer(sandbox: string, agent: string, fn: string, text: string): Promise<{ path: string; bytes: number; sha256: string } | { write_error: string }> {
+  const rel = P.toolOutputRel(agent, `answer-${fn}`, "text");
+  const bytes = Buffer.from(text, "utf8");
+  try {
+    await mkdir(dirname(join(sandbox, rel)), { recursive: true });
+    await writeFile(join(sandbox, rel), bytes, { flag: "wx", mode: 0o644 });
+    return { path: rel, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } catch (err) {
+    return { write_error: (err as Error).message };
+  }
 }
 
 /**

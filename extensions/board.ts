@@ -29,6 +29,7 @@ import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as Q from "./questions.ts";
 import * as T from "./toolchain.ts";
+import { boundLocalAnswer } from "./reply-bound.ts";
 
 /** Where the hub listens, as the VM sees it; unset on the host. */
 export function boardSocket(env: NodeJS.ProcessEnv = process.env): string {
@@ -333,9 +334,26 @@ type AnyFn = (...args: any[]) => Promise<any>;
 function remote<F extends AnyFn>(name: string, local: F): F {
   return (async (...args: Parameters<F>) => {
     const socket = boardSocket();
-    if (!socket) return local(...args);
+    if (!socket) return boundHere(name, args, await local(...args));
     return callBoard(socket, name, args);
   }) as F;
+}
+
+/**
+ * A host run's answer, held to the wall the hub holds a VM's to
+ * (reply-bound.ts): past it, cut, and the whole kept among this seat's own
+ * kept outputs and named. The sandbox is the call's first argument (a
+ * context, or the run's directory).
+ */
+function boundHere<T>(fn: string, args: unknown[], value: T): Promise<T> {
+  const first = args[0] as { sandboxRoot?: unknown; agentId?: unknown } | string | null | undefined;
+  const sandbox = typeof first === "string" ? first : typeof first?.sandboxRoot === "string" ? first.sandboxRoot : null;
+  if (!sandbox) return Promise.resolve(value);
+  const agent = typeof first === "object" && typeof first?.agentId === "string" ? first.agentId : process.env.AGENT_ID || "unknown";
+  return boundLocalAnswer(fn, value, async (text) => {
+    const kept = await P.keepToolOutput(sandbox, P.toolOutputRel(agent, `answer-${fn}`, "text"), text);
+    return kept.write_error ? { write_error: kept.write_error } : { path: kept.path, bytes: kept.bytes, sha256: kept.sha256 };
+  });
 }
 
 /**
@@ -564,7 +582,7 @@ export const publishFile: typeof P.publishFile = async (ctx, fromRaw, toRaw, opt
 
 export const fileDiff: typeof P.fileDiff = async (sandboxRoot, rawPath, fromRef, toRef, options = {}) => {
   const socket = boardSocket();
-  if (!socket) return P.fileDiff(sandboxRoot, rawPath, fromRef, toRef, options);
+  if (!socket) return boundHere("fileDiff", [sandboxRoot], await P.fileDiff(sandboxRoot, rawPath, fromRef, toRef, options));
   // The bytes on disk go with the call whenever a side is the disk (the
   // default right side is): the hub uses them for a file in a seat's own
   // directory, which it does not open, and its own read for any other.
@@ -688,7 +706,7 @@ export const updateToolchainRecord = remote("updateToolchainRecord", T.updateToo
  */
 export const waitForSwarmChange: typeof P.waitForSwarmChange = async (ctx, options = {}) => {
   const socket = boardSocket();
-  if (!socket) return P.waitForSwarmChange(ctx, options);
+  if (!socket) return boundHere("waitForSwarmChange", [ctx], await P.waitForSwarmChange(ctx, options));
   // A function does not cross a socket: the hub checks the lead register for this seat itself.
   const { signal, extraWake: _extraWake, ...rest } = options;
   const seconds = Math.min(Math.max(1, Math.round(rest.seconds ?? 60)), P.WAIT_MAX_SECONDS);

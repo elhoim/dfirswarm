@@ -2012,9 +2012,9 @@ test("the measure of a seat's link counts the lines on that link only: a big wri
 
 test("an answer past a part's size is kept by the hub and fetched in parts, whole", async () => {
   const { hub, sandbox } = await setup();
-  // The diff shows its first 400 rows: long rows make it larger than a part.
-  const lines1 = Array.from({ length: 200 }, (_, i) => `first ${i} ${randomBytes(800).toString("hex")}`).join("\n");
-  const lines2 = Array.from({ length: 200 }, (_, i) => `second ${i} ${randomBytes(800).toString("hex")}`).join("\n");
+  // The diff shows its first 400 rows: long rows make it larger than a part, and within the answer's wall (reply-bound.ts).
+  const lines1 = Array.from({ length: 200 }, (_, i) => `first ${i} ${randomBytes(200).toString("hex")}`).join("\n");
+  const lines2 = Array.from({ length: 200 }, (_, i) => `second ${i} ${randomBytes(200).toString("hex")}`).join("\n");
   await writeFile(join(sandbox, "work", "shared.txt"), lines1);
   await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
   await writeFile(join(sandbox, "work", "shared.txt"), lines2);
@@ -2446,4 +2446,24 @@ test("every line of the hub's log says when (Plan 2, 0.13): its own, an error's,
   assert.ok(r.stderr.split("\n").filter(Boolean).every((l) => /^\d{4}-\d{2}-\d{2}T[\d:.]+Z /.test(l)), r.stderr);
   const plain = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", script], { encoding: "utf8", input: "", env: { ...process.env, SWARM_LOG_TS: "0" } });
   assert.match(plain.stderr, /^vm-hub: usage: /);
+});
+
+test("an answer past the wall reaches the seat cut to it, the whole kept among the seat's own outputs, which its VM reads, and named (Plan 2, A4)", async () => {
+  const { hub, sandbox } = await setup();
+  for (let i = 0; i < 60; i++) await postMessage({ sandboxRoot: sandbox, agentId: "a1" }, { tag: "result", body: `post ${i}: ${"q".repeat(3000)}` });
+  const was = process.env.SWARM_RPC_ANSWER_MAX_BYTES;
+  process.env.SWARM_RPC_ANSWER_MAX_BYTES = String(64 * 1024);
+  try {
+    const box = (await asVm(hub.socketFor("a0"), () => board.readInbox({ sandboxRoot: sandbox, agentId: "a0" }, { pageChars: 0 }))) as Awaited<ReturnType<typeof board.readInbox>> & { answer_cut?: { kept?: string; bytes: number; cut: string[]; note: string } };
+    assert.ok(Buffer.byteLength(JSON.stringify(box)) <= 64 * 1024, "the answer is within the wall");
+    assert.ok(box.posts.length > 0 && box.posts.length < 60, `${box.posts.length} posts answered`);
+    assert.ok(box.posts.every((p, i) => p.body === `post ${i}: ${"q".repeat(3000)}`), "the first posts, in order, each whole");
+    assert.match(box.answer_cut!.kept!, /^tool-output\/a0\/\d+-answer-readInbox-\w+\.text\.log$/, "kept among the seat's own outputs");
+    assert.match(box.answer_cut!.note, /what did not fit is cut, kept whole at tool-output\/a0\//);
+    const whole = JSON.parse(await readFile(join(sandbox, box.answer_cut!.kept!), "utf8")) as { ok: boolean; result: { posts: unknown[] } };
+    assert.equal(whole.result.posts.length, 60, "the file holds the whole answer");
+  } finally {
+    if (was === undefined) delete process.env.SWARM_RPC_ANSWER_MAX_BYTES;
+    else process.env.SWARM_RPC_ANSWER_MAX_BYTES = was;
+  }
 });
