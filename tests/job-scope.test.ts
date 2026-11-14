@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { JobService, type JobServiceOptions } from "../scripts/job-service.ts";
+import { describe, JobService, type JobServiceOptions } from "../scripts/job-service.ts";
 import { buildView, declaredScope, locate, resolveScope, SCOPE_DECLARED_MAX } from "../scripts/job-scope.ts";
 import { checkStore, initStore, storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { holdWorkerMounts, recheckWorkerMounts, type WorkerSpec } from "../scripts/vm.ts";
@@ -469,4 +469,43 @@ test("resolution alone: every kind of declaration and where it points", async ()
   const v = await buildView(r.ok ? r.objects : [], { S, root: join(`${S}.staging`, "x", "view"), projected: join(`${S}.staging`, ".projected"), guestOut: join(S, ".jobs", "j000009"), minFreeMb: 1 });
   assert.ok(v.mounts.some((m) => m.guest === join(S, "inputs") && m.host === realpathSync(join(S, "inputs")) && m.noexec), "the whole evidence bound, no-exec");
   assert.ok(existsSync(join(`${S}.staging`, "x", "view", ".jobs", "j000009")), "a mountpoint for $OUT");
+});
+
+test("a tool's manifest brings the files a given file needs into a declared scope: a hive's logs, a database's -wal and -journal, a LevelDB's directory; nothing else beside them", async () => {
+  const S = sandbox();
+  for (const d of ["inputs/config", "inputs/browser", "inputs/leveldb"]) mkdirSync(join(S, d), { recursive: true });
+  for (const [f, text] of [["config/SYSTEM", "regf"], ["config/SYSTEM.LOG1", "log1"], ["config/system.log2", "log2"], ["config/SAM", "regf"], ["config/SAM.LOG1", "log1"], ["browser/History", "sqlite"], ["browser/History-wal", "wal"], ["browser/History-journal", "journal"], ["browser/Cookies", "sqlite"], ["leveldb/CURRENT", "MANIFEST-000001"], ["leveldb/MANIFEST-000001", "m"], ["leveldb/000003.log", "l"], ["leveldb/000005.ldb", "t"]] as const) writeFileSync(join(S, "inputs", f), text);
+  listInputs(S);
+  const body = "import json,os,sys\nd=json.load(sys.stdin)\nprint(json.dumps({k: sorted(os.listdir(os.path.dirname(v))) for k, v in d.items()}))\n";
+  mkdirSync(join(S, "tools", "lister"), { recursive: true });
+  writeFileSync(join(S, "tools", "lister", "run.py"), body);
+  writeFileSync(join(S, "tools", "lister", "manifest.json"), JSON.stringify({
+    name: "lister", description: "lists", runtime: "python3", entry: "run.py", timeout_seconds: 60, by: "t", at: "t", version: 1, sha256: createHash("sha256").update(body).digest("hex"),
+    params: { hive: { type: "string", description: "The hive file." }, db: { type: "string", description: "The SQLite database." }, path: { type: "string", description: "A file of the LevelDB." } },
+    companions: [
+      { param: "hive", suffixes: [".LOG", ".LOG1", ".LOG2"], why: "the transaction logs a dirty hive needs" },
+      { param: "db", suffixes: ["-wal", "-shm", "-journal"], why: "the write-ahead log and journal the database's last writes are in" },
+      { param: "path", directory_of: ["CURRENT", "LOCK", "MANIFEST-*", "*.ldb", "*.log"], why: "a LevelDB is its whole directory" },
+      { param: 7 }, "not a rule",
+    ],
+  }));
+  const { svc } = service(S);
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "tool", tool: "lister", args: { hive: "input:config/SYSTEM", db: "input:browser/History", path: "input:leveldb/CURRENT" }, inputs: ["input:config/SYSTEM", "input:browser/History", "input:leveldb/CURRENT"] });
+  assert.ok(r.ok, !r.ok ? r.reason : "");
+  if (!r.ok) return;
+  assert.deepEqual(r.job.spec.inputs, ["input:config/SYSTEM", "input:browser/History", "input:leveldb/CURRENT", "input:config/SYSTEM.LOG1", "input:config/system.log2", "input:browser/History-journal", "input:browser/History-wal", "input:leveldb/"]);
+  assert.deepEqual(r.job.spec.companions?.map((c) => [c.param, c.add]), [["hive", ["input:config/SYSTEM.LOG1", "input:config/system.log2"]], ["db", ["input:browser/History-journal", "input:browser/History-wal"]], ["path", ["input:leveldb/"]]]);
+  const job = await until(svc, r.job.id);
+  assert.equal(job.state, "committed", job.reason);
+  // What the worker could see beside each file: its companions, and nothing else of the directory.
+  assert.deepEqual(JSON.parse(stdout(S, job.id)), { hive: ["SYSTEM", "SYSTEM.LOG1", "system.log2"], db: ["History", "History-journal", "History-wal"], path: ["000003.log", "000005.ldb", "CURRENT", "MANIFEST-000001"] });
+  assert.match(describe(job), /Its scope also holds what its tool's manifest says a file it was given needs: config\/SYSTEM\.LOG1, config\/system\.log2 beside inputs\/config\/SYSTEM \(the transaction logs a dirty hive needs\); browser\/History-journal, browser\/History-wal beside inputs\/browser\/History/);
+  // A job that reads everything needs none named.
+  const broad = await svc.submit("a1", { kind: "tool", tool: "lister", args: { hive: "input:config/SYSTEM" } });
+  assert.ok(broad.ok && broad.job.spec.companions === undefined);
+  // A hive with no log beside it: nothing is added, and the job is the one asked for.
+  const bare = await svc.submit("a1", { kind: "tool", tool: "lister", args: { hive: "input:browser/Cookies" }, inputs: ["input:browser/Cookies"] });
+  assert.ok(bare.ok && bare.job.spec.companions === undefined && bare.job.spec.inputs.length === 1);
+  await svc.stop("over");
 });

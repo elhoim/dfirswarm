@@ -36,9 +36,9 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants, statfsSync } from "node:fs";
+import { constants, lstatSync, readdirSync, statfsSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { manifestFile, manifestOf, readManifest, storePaths } from "./evidence-store.ts";
 import { elsewhereWords } from "./store-find.ts";
 import type { Mount } from "./vm.ts";
@@ -476,6 +476,105 @@ export type ViewOptions = {
   /** Files the hub writes into the view itself (a trace line being sealed): run-relative path and bytes. */
   extra?: Array<{ path: string; bytes: Buffer; ref: string }>;
 };
+
+/**
+ * A tool manifest's rule for the files a file it is given needs beside it
+ * (IMPROVEMENT-PLAN-2 E11), read by the job service when it builds a
+ * declared scope: `suffixes`, the names the file's own name takes with each
+ * ending (a hive's .LOG1 and .LOG2, a SQLite database's -wal, -shm and
+ * -journal), matched whatever their letter case; `directory_of`, name
+ * patterns (`*` any run of characters) of a file that is one part of a store
+ * kept as a whole directory (a LevelDB's CURRENT, MANIFEST-*, *.ldb): the
+ * directory that holds it. A seat declared the hive and the job read it
+ * without its logs, as clean.
+ */
+export type CompanionRule = { param: string; suffixes?: string[]; directory_of?: string[]; why?: string };
+/** What a rule brought into a job's scope: the parameter, the file it was given, and each companion as a declared reference. */
+export type Companions = { param: string; of: string; add: string[]; why: string };
+
+/** The most entries of a directory listed for a file's companions. */
+export const COMPANION_LIST_MAX = 20_000;
+
+/** A run-relative path as a declared reference: input:, job:, import:, or the agent's own path; null for anything else. */
+export function refOfPath(rel: string, dir = false): string | null {
+  const tail = dir ? "/" : "";
+  if (rel.startsWith("inputs/") && rel.length > 7) return `input:${rel.slice(7)}${tail}`;
+  const job = /^store\/jobs\/(j\d{6})\/out\/(.+)$/.exec(rel);
+  if (job) return `job:${job[1]}/${job[2]}`;
+  const imp = /^store\/imports\/([a-z0-9-]{1,64})\/out\/(.+)$/.exec(rel);
+  if (imp) return `import:${imp[1]}/${imp[2]}`;
+  if (/^(work|tool-output|catalog)\/./.test(rel)) return rel;
+  return null;
+}
+
+/**
+ * The companions of what a tool job is given, by its manifest's `companions`
+ * rules: for each rule, each run-relative path its parameter holds (after
+ * references are resolved), the companion files that are there (or the
+ * directory), as declared references. What is not there is not named; a
+ * rule that is not one is passed over.
+ */
+export function companionsOf(S: string, man: { companions?: unknown }, args: Record<string, unknown>): Companions[] {
+  const root = resolve(S);
+  const rules = Array.isArray(man.companions) ? (man.companions as unknown[]) : [];
+  const out: Companions[] = [];
+  for (const raw of rules) {
+    if (!raw || typeof raw !== "object") continue;
+    const rule = raw as CompanionRule;
+    if (typeof rule.param !== "string") continue;
+    const suffixes = Array.isArray(rule.suffixes) ? rule.suffixes.filter((x): x is string => typeof x === "string" && x.length > 0 && !x.includes("/")) : [];
+    const patterns = Array.isArray(rule.directory_of) ? rule.directory_of.filter((x): x is string => typeof x === "string" && x.length > 0 && !x.includes("/")) : [];
+    const given = args[rule.param];
+    for (const v of Array.isArray(given) ? given : [given]) {
+      if (typeof v !== "string" || !v.trim() || v.includes("{OUT}") || v.includes("\0")) continue;
+      const abs = resolve(root, v);
+      if (!abs.startsWith(`${root}/`)) continue;
+      let st;
+      try {
+        st = lstatSync(abs);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const add: string[] = [];
+      const name = basename(abs);
+      if (suffixes.length) {
+        let names: string[] = [];
+        try {
+          names = readdirSync(dirname(abs));
+        } catch {
+          names = [];
+        }
+        if (names.length <= COMPANION_LIST_MAX) {
+          const wanted = new Set(suffixes.map((x) => `${name}${x}`.toLowerCase()));
+          for (const n of names.sort()) {
+            if (!wanted.has(n.toLowerCase()) || n === name) continue;
+            try {
+              if (!lstatSync(join(dirname(abs), n)).isFile()) continue;
+            } catch {
+              continue;
+            }
+            const ref = refOfPath(relative(root, join(dirname(abs), n)));
+            if (ref) add.push(ref);
+          }
+        }
+      }
+      if (patterns.some((g) => new RegExp(`^${g.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(name))) {
+        const ref = refOfPath(relative(root, dirname(abs)), true);
+        if (ref && dirname(abs) !== root) add.push(ref);
+      }
+      if (add.length) out.push({ param: rule.param, of: v, add, why: typeof rule.why === "string" && rule.why.trim() ? rule.why.trim().slice(0, 200) : "the files it needs beside it" });
+    }
+  }
+  return out;
+}
+
+/** What a job's answer says of the companions its scope was given, in one sentence; "" when none. */
+export function companionsWords(list: readonly Companions[]): string {
+  if (!list.length) return "";
+  const shown = list.slice(0, 4).map((c) => `${c.add.map((r) => r.replace(/^(input|job|import):/, "")).join(", ")} beside ${c.of} (${c.why})`);
+  return `Its scope also holds what its tool's manifest says a file it was given needs: ${shown.join("; ")}${list.length > 4 ? `; and ${list.length - 4} more` : ""}.`;
+}
 
 /** Free megabytes on the file system holding `dir`, or its nearest parent that exists. */
 export function freeMb(dir: string): number | null {

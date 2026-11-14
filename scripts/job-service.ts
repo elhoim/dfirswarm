@@ -43,7 +43,7 @@ import { join, resolve } from "node:path";
 import { INDEX_MIN_BYTES } from "./manifest-index.ts";
 import { hubAlive, hubProcessFor, Journal, manifestFile, manifestOf, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
-import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, SCOPE_DECLARED_MAX, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
+import { buildView, companionsOf, companionsWords, declaredScope, dropProjected, freeMb, PROJECTED_DIR, type Companions, resolveScope, SCOPE_DECLARED_MAX, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sampleJob, type JobProgress } from "./job-telemetry.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
@@ -224,6 +224,8 @@ export type JobSpec = {
   each?: EachSpec;
   /** tool: the arguments taken as the types its manifest declares ("4096" for an integer, "[1, 2]" for an array), each said (extensions/forged-args.ts). */
   args_coerced?: string[];
+  /** tool, declared scope: the companion files its manifest's rules brought into the scope (job-scope.ts companionsOf). */
+  companions?: Companions[];
   /** recipe: the one phase of the recipe to run, of those its recipe.json declares (`phases`); the recipe is told in RECIPE_PHASE. Without it the recipe runs whole. */
   phase?: string;
   experimental?: boolean;
@@ -1510,11 +1512,14 @@ export class JobService {
       }
       // A declared scope is given what the arguments name: the tool could not read it otherwise.
       if (declared.kind === "declared") for (const r of refs.resolved) if (!base.inputs.some((x) => x === r.object || x.startsWith(`${r.object}/`) || x === r.from) && base.inputs.length < SCOPE_DECLARED_MAX) base.inputs.push(r.from);
-      // A directory given to a one-file reader: the tool runs once per file it reads there, or the call is refused with what to do.
       const man = JSON.parse(await readFile(join(this.S, "tools", String(raw.tool), "manifest.json"), "utf8"));
+      // And what its manifest says a file it is given needs beside it (a hive's logs, a database's -wal, a LevelDB's directory: job-scope.ts companionsOf).
+      const companions = declared.kind === "declared" ? companionsOf(this.S, man, refs.args).slice(0, 16) : [];
+      for (const c of companions) for (const ref of c.add) if (!base.inputs.includes(ref) && base.inputs.length < SCOPE_DECLARED_MAX) base.inputs.push(ref);
+      // A directory given to a one-file reader: the tool runs once per file it reads there, or the call is refused with what to do.
       const each = eachOf(this.S, String(raw.tool), refs.args, man);
       if (!each.ok) return { reason: each.reason };
-      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}), ...(typed.coerced.length ? { args_coerced: typed.coerced.slice(0, 32) } : {}) };
+      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}), ...(typed.coerced.length ? { args_coerced: typed.coerced.slice(0, 32) } : {}), ...(companions.length ? { companions } : {}) };
       // The tool's manifest says this job is secret output: so it is, whatever the agent said (false included).
       if (checked.secret) return { ...base, secret_output: true, secret_output_by: "tool_manifest", ...withRefs };
       return { ...base, ...withRefs };
@@ -4026,7 +4031,7 @@ export function describe(job: JobRecord): string {
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
   const sameN = job.same_as_total?.files ?? job.same_as?.length ?? 0;
   const same = sameN ? ` ${sameN} of its files are an earlier job's output byte for byte (job_status ${job.id} names ${job.same_as_total?.list ? `the first, ${job.same_as_total.list} every one` : "them"}).` : "";
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_coerced?.length ? ` ${coercedWords(job.spec.args_coerced)}` : ""}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_coerced?.length ? ` ${coercedWords(job.spec.args_coerced)}` : ""}${job.spec.companions?.length ? ` ${companionsWords(job.spec.companions)}` : ""}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
 }
 
 /**
@@ -4077,6 +4082,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number; wa
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
     ...(job.spec.args_coerced?.length ? { args_coerced: coercedWords(job.spec.args_coerced) } : {}),
+    ...(job.spec.companions?.length ? { companions: job.spec.companions } : {}),
     ...(job.spec.programs?.length ? { programs: job.spec.programs } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
     ...(job.spec.secret_output_by ? { secret_output_by: job.spec.secret_output_by } : {}),

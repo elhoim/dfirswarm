@@ -22,7 +22,7 @@
   "example": "{\"hive\": \"work/extracted/Amcache.hve\", \"limit\": 200}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 21,
+  "version": 22,
   "sha256": "12753e910855fe22880b956dca60adbe8b47caa074129d63e665c08337d853a7",
   "use": {
     "names": [
@@ -40,5 +40,16 @@
     "when_args": [
       "write_values"
     ]
-  }
+  },
+  "companions": [
+    {
+      "param": "hive",
+      "suffixes": [
+        ".LOG",
+        ".LOG1",
+        ".LOG2"
+      ],
+      "why": "the transaction logs beside the hive, which a dirty hive needs to be read whole"
+    }
+  ]
 }

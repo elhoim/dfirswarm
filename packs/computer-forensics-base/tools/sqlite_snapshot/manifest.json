@@ -42,6 +42,17 @@
   },
   "by": "maintainer",
   "at": "2026-10-13T12:00:00.000Z",
-  "version": 13,
-  "sha256": "cd96f503cffa9b8e30c8b2dada3a97252b38ec07c669eded9298ba93fe8393c3"
+  "version": 14,
+  "sha256": "cd96f503cffa9b8e30c8b2dada3a97252b38ec07c669eded9298ba93fe8393c3",
+  "companions": [
+    {
+      "param": "db_path",
+      "suffixes": [
+        "-wal",
+        "-shm",
+        "-journal"
+      ],
+      "why": "the write-ahead log, its index and the rollback journal beside the database, where its last writes may be"
+    }
+  ]
 }
