@@ -5,7 +5,7 @@
  * each other both ways, so it is not split further. It imports the core statically.
  */
 
-import { firstLine, formatMiss, formatNote, questionFormat } from "./answer-format.ts";
+import { extraDigestsWords, firstLine, formatMiss, formatNote, questionFormat } from "./answer-format.ts";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
@@ -5253,6 +5253,14 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput, D: Defects): 
         const qid = sectionAnswersId(sec.section);
         const forIt = standingCites.filter((e) => e.kind === "finding" && (e.answers ?? []).some((a) => sectionKey(a) === qid));
         for (const why of decoyRule({ value, result: resultText, rows: candidates, findings: forIt, cited: standingCites, checked: Boolean(decoyCheck) })) D.add(why);
+      }
+      // A second digest on the first line of an answer to a question whose format asks one (md5(text), Name_md5(file)) is
+      // a second candidate, not the answer: refused, where every other miss of the format is a note. The grader reads one
+      // string; a first line with two digests gives it two, and whichever is right the line is graded wrong.
+      if (question && questionWords && (resultText === "established" || resultText === "partial")) {
+        const open = resultText === "partial" && parts.some((p) => p.status === "open" || p.status === "limited");
+        const extra = formatMiss(questionWords, value, { open })?.extra_digests;
+        if (extra) D.add(extraDigestsWords(sec.section, questionWords, extra));
       }
       // Every defect of the entry, the ones its fields show and the ones the registers and the ledger show, in the one refusal.
       {

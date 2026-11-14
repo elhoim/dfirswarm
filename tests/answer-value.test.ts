@@ -70,9 +70,12 @@ test("value is the asked string and qualifier what qualifies it: a sentence in v
   assert.equal(formatNotes(bare.note), 0, bare.note);
   assert.equal(bare.entry.value, MD5);
   assert.equal((bare.entry as P.LedgerEntry & P.AnswerExtras).qualifier, "read from the overlay at frame 10; the lowercase l is the one glyph that could be an I");
-  // A second digest on the first line of an md5 answer is a second candidate, not the answer.
-  const two = ok(await rec(c.a1, answer("4", `invoice.docm_${MD5} or invoice.docm_${OTHER}`, `E-${f["4"]}`)));
-  assert.match(two.note ?? "", /question:4 asks for its answer in the format Name_md5\(file\).*the value's first line holds 2 digests where the format asks 1: one answer is graded, so the first line holds one, and a second candidate goes in qualifier/);
+  // A second digest on the first line of an md5 answer is a second candidate, not the answer: refused (every other miss of the format is a note), and taken with the other reading in candidates.
+  refused(await rec(c.a1, answer("4", `invoice.docm_${MD5} or invoice.docm_${OTHER}`, `E-${f["4"]}`)), /question:4 asks for its answer in the format Name_md5\(file\), and value's first line holds 2 digests where the format asks 1: one answer is graded, so value's first line holds one digest in that form, alone\. Put the other reading in candidates \[\{value, state: "open", why\}\] or in qualifier/);
+  refused(await rec(c.a1, answer("1", `${MD5} ${OTHER}`, `E-${f["1"]}`)), /question:1 asks for its answer in the format md5\(text\), and value's first line holds 2 digests where the format asks 1/);
+  const two = ok(await rec(c.a1, answer("4", `invoice.docm_${MD5}`, `E-${f["4"]}`, { candidates: [{ value: `invoice.docm_${OTHER}`, state: "open", why: "a second copy of the attachment hashes otherwise" }], alternatives_open: "the second copy of the attachment" })));
+  assert.equal(formatNotes(two.note), 0, two.note);
+  assert.equal(two.entry.value, `invoice.docm_${MD5}`);
   // A sentence passes a format of free text by its separator alone: said too.
   const pc = ok(await rec(c.a1, answer("3", "The PC name is DESKTOP-EXAMPLE1 and the time zone is Fiji_Standard Time", `E-${f["3"]}`)));
   assert.equal(formatNotes(pc.note), 1, pc.note);

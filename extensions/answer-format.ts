@@ -187,6 +187,17 @@ export function formatMiss(questionText: string, value: string, opts: { open?: b
   return { format: f.format, parts: f.parts, example: formatExample(f), first_line: first.length > 120 ? `${first.slice(0, 117)}...` : first, seen_elsewhere: elsewhere, ...(opts.open ? { open: true as const } : {}), ...(extra ? { extra_digests: digests.held } : {}) };
 }
 
+/**
+ * The refusal of an answer whose value's first line holds more digests than its question's format asks: on an md5
+ * question a second digest is a second candidate, and a first line with two gives the grader two strings. Every other
+ * miss of the format is a note (formatNote); this one is refused, with where the other reading goes.
+ */
+export function extraDigestsWords(section: string, questionText: string, held: number): string {
+  const f = questionFormat(questionText);
+  const asked = f ? f.parts.filter((p) => p === "hash").length : 1;
+  return `${section} asks for its answer in the format ${f?.format ?? "its question names"}, and value's first line holds ${held} digests where the format asks ${asked}: one answer is graded, so value's first line holds ${asked === 1 ? "one digest" : `${asked} digests`} in that form, alone. Put the other reading in candidates [{value, state: "open", why}] or in qualifier ("candidates: ..."), and record the answer again`;
+}
+
 /** The note an answer recorded out of its question's format gets. */
 export function formatNote(section: string, miss: { format: string; parts: string[]; example?: string; first_line?: string; seen_elsewhere?: boolean; open?: boolean; extra_digests?: number }): string {
   const what = [...new Set(miss.parts.filter((p) => p !== "text"))]
