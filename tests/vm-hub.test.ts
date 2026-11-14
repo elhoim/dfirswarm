@@ -2448,6 +2448,43 @@ test("every line of the hub's log says when (Plan 2, 0.13): its own, an error's,
   assert.match(plain.stderr, /^vm-hub: usage: /);
 });
 
+test("a crash's report in the hub's log has its time: a stamped copy is written before Node's own report, and the exit is Node's as before; the keeper's lines are stamped", async () => {
+  const { openSync, closeSync, readFileSync: read, mkdtempSync } = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "hub-crash-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const hub = join(import.meta.dirname, "..", "scripts", "vm-hub.ts");
+  // As the keeper starts the hub: its stderr appended to a file.
+  const crash = (how: string, stamp: boolean) => {
+    const file = join(dir, `${how}-${stamp}.log`);
+    const fd = openSync(file, "a");
+    const code = `const { stampLines, stampCrashes } = await import(${JSON.stringify(hub)}); ${stamp ? "stampLines(process.stderr); stampCrashes();" : ""} console.error("vm-hub: up"); setTimeout(() => { ${how === "throw" ? 'throw new Error("boom in a timer")' : 'Promise.reject(new Error("a rejection nobody took"))'}; }, 10);`;
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", code], { stdio: ["ignore", "ignore", fd] });
+    closeSync(fd);
+    return { status: r.status, log: read(file, "utf8") };
+  };
+  const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+  for (const how of ["throw", "reject"]) {
+    const plain = crash(how, false);
+    const stamped = crash(how, true);
+    assert.equal(stamped.status, plain.status, `${how}: the exit is Node's own, as before (${plain.status})`);
+    assert.equal(stamped.status, 1);
+    const lines = stamped.log.split("\n");
+    const at = lines.findIndex((l) => TS.test(l) && l.includes(how === "throw" ? "an uncaught exception ends the hub" : "a rejection nothing handled ends the hub"));
+    assert.ok(at > 0, stamped.log);
+    assert.match(lines[at]!, how === "throw" ? /Error: boom in a timer$/ : /Error: a rejection nobody took$/);
+    assert.ok(TS.test(lines[at + 1]!) && /^\S+ +at /.test(lines[at + 1]!), `the stack's lines are stamped too: ${lines[at + 1]}`);
+    assert.ok(stamped.log.slice(stamped.log.indexOf(lines[at]!)).includes(how === "throw" ? "boom in a timer" : "a rejection nobody took"), "and Node's own report follows");
+    assert.ok(!TS.test(plain.log.split("\n").find((l) => l.includes("Error:")) ?? ""), "without it, the crash's report had no time");
+  }
+  // The keeper writes into the hub's log only lines that carry their time (say), besides the hub's own output.
+  const keeper = await readFile(join(import.meta.dirname, "..", "scripts", "hub-supervise.sh"), "utf8");
+  const appends = keeper.split("\n").filter((l) => l.includes('traces/vm-hub.log"'));
+  assert.ok(appends.length >= 4);
+  for (const l of appends) assert.ok(/\bsay "/.test(l) || /"\$HUB_SCRIPT" --resume "\$HUB_DIR" >>"\$SANDBOX\/traces\/vm-hub.log" 2>&1/.test(l), `an unstamped line into the hub's log: ${l.trim()}`);
+  assert.match(keeper, /^say\(\) \{ printf '%s hub-supervise: %s\\n' "\$\(date -u \+%Y-%m-%dT%H:%M:%SZ\)" "\$\*"; \}$/m);
+});
+
 test("an answer past the wall reaches the seat cut to it, the whole kept among the seat's own outputs, which its VM reads, and named (Plan 2, A4)", async () => {
   const { hub, sandbox } = await setup();
   for (let i = 0; i < 60; i++) await postMessage({ sandboxRoot: sandbox, agentId: "a1" }, { tag: "result", body: `post ${i}: ${"q".repeat(3000)}` });

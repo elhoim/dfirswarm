@@ -3526,13 +3526,17 @@ export async function keepAnswer(sandbox: string, agent: string, fn: string, tex
 }
 
 /**
- * Each line the hub writes to its log (traces/vm-hub.log takes its stdout and
- * stderr: its own lines, Node's warnings, an error's stack) begins with when,
- * in UTC, as idle-nudge's do under SWARM_LOG_TS (Plan 2, 0.13): the log of the
- * runs s17fdfe and s5d814f could not be laid beside the trace. A chunk that
- * ends mid-line leaves the next chunk to go on with it, unstamped. What the
- * runtime writes past these streams (the text of a fatal out-of-memory) is
- * not stamped. Returns a function that puts the stream back.
+ * Each line the hub writes to its log through its streams (traces/vm-hub.log
+ * takes its stdout and stderr: its own lines, Node's warnings, an error it
+ * reports) begins with when, in UTC, as the watchdog's do (Plan 2, 0.13): the
+ * log of the runs s17fdfe and s5d814f could not be laid beside the trace. A
+ * chunk that ends mid-line leaves the next chunk to go on with it, unstamped.
+ * Not every line of the log is stamped: what the runtime writes past these
+ * streams is not. A crash's report is (Node prints an uncaught exception's
+ * stack itself), so stampCrashes writes a stamped copy of it first; the text
+ * of a fatal out-of-memory, and anything Node says before the hub's main()
+ * has run (a module that does not load), stay as Node writes them. Returns a
+ * function that puts the stream back.
  */
 export function stampLines(stream: { write: (...a: never[]) => boolean }, now: () => string = () => new Date().toISOString()): () => void {
   const write = stream.write;
@@ -3563,11 +3567,35 @@ export function stampLines(stream: { write: (...a: never[]) => boolean }, now: (
   };
 }
 
+/**
+ * A crash's report with its time: an uncaught exception, or a rejection
+ * nothing handled (which Node raises as one), is printed by Node itself past
+ * process.stderr.write, so its stack stood in the log with no time. Before
+ * Node prints it and exits as it always has (code 1), the same error is
+ * written through `stream`, stamped by stampLines. It listens on
+ * uncaughtExceptionMonitor, which changes nothing of what follows. Node's own
+ * report follows it, unstamped; a fatal out-of-memory has no such event and
+ * is not stamped. Returns a function that stops listening.
+ */
+export function stampCrashes(stream: { write: (text: string) => boolean } = process.stderr): () => void {
+  const said = (err: unknown, origin: string) => {
+    try {
+      const what = origin === "unhandledRejection" ? "a rejection nothing handled" : "an uncaught exception";
+      stream.write(`vm-hub: ${what} ends the hub (Node's own report of it follows, without times): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    } catch {
+      // Node's own report still follows.
+    }
+  };
+  process.on("uncaughtExceptionMonitor", said);
+  return () => void process.off("uncaughtExceptionMonitor", said);
+}
+
 async function main(): Promise<void> {
   // SWARM_LOG_TS=0 leaves the lines as they are.
   if (process.env.SWARM_LOG_TS !== "0") {
     stampLines(process.stdout);
     stampLines(process.stderr);
+    stampCrashes();
   }
   const args = process.argv.slice(2);
   const opt = (name: string) => {
