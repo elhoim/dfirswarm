@@ -46,6 +46,36 @@ out="$(swarm pack-add "$id" memory-forensics)" || fail "a second pack-add failed
 grep -q 'already among' <<<"$out" || fail "a second pack-add did not say it is there: $out"
 pass "tools seeded with their pack, notes read-only under notes/, the record and the board say so; a second add changes nothing"
 
+echo "# the next catalogue's dump post names the reader pack-add brought; a tool a seat forged under that name is not one"
+# The job service's own post (tellDumps), as a kickoff catalogue that lists a dump has it written: the job service
+# started with the packs the run began with, and the memory pack came in by pack-add.
+dumps_post() { # <sandbox> -> the post a catalogue listing one dump gives every seat
+  mkdir -p "$1/catalog/gen/g9" 2>/dev/null || { chmod u+w "$1" "$1/catalog" 2>/dev/null; mkdir -p "$1/catalog/gen/g9"; }
+  printf 'n\ttype\tpath\tpath_b64\tsize\tpacked\tmtime\ttz\tmode\tuid\tgid\tlink\tlocator\tflags\n0\tfile\tUsers/x/AppData/Local/Temp/app.dmp\t\t4096\t\t\t\t\t\t\t\tad1:item=0\t\n' > "$1/catalog/gen/g9/members.tsv"
+  node --experimental-strip-types --no-warnings --input-type=module -e '
+    const { JobService } = await import(process.argv[1]);
+    const [S, cfb] = process.argv.slice(2);
+    const posts = [];
+    const svc = new JobService({ sandbox: S, run: "s000000", image: "img:test", workers: 1, workerCpus: 1, workerMemoryMib: 512, allowHosts: [], openNet: false, packDirs: [cfb], forging: false,
+      runWorker: async () => ({ code: 0, fenced: true }), destroyWorker: async () => ({ ok: true }), notify: async (_to, body) => void posts.push(body), identity: async () => ({}) });
+    await svc.tellDumps({ spec: { target: { ref: "import:ev-2/disk.ad1" } } }, "g9", "import:ev-2/disk.ad1", false);
+    process.stdout.write(posts.join("\n"));
+  ' "$ROOT/scripts/job-service.ts" "$1" "$DFIRSWARM_HOME/packs/computer-forensics-base"
+}
+dp="$(dumps_post "$sb")"
+grep -q 'lists 1 member named as a process or memory dump' <<<"$dp" || fail "no dump post: $dp"
+grep -q 'In this run.s packs mem_profile, minidump_map read one\|In this run.s packs minidump_map, mem_profile read one' <<<"$dp" || fail "the dump post after pack-add does not name the memory pack's readers: $dp"
+out="$(kick --pack computer-forensics-base --label p0)" || fail "$out"
+sb0="$(sandbox_of p0)"
+dp="$(dumps_post "$sb0")"
+grep -q "No tool of this run's packs reads a dump" <<<"$dp" || fail "a run without the memory pack is told of a reader: $dp"
+chmod u+w "$sb0/tools" 2>/dev/null || true
+mkdir -p "$sb0/tools/minidump_map"
+printf '{"name": "minidump_map", "by": "s0000001", "runtime": "python3", "description": "a seat'"'"'s own"}\n' > "$sb0/tools/minidump_map/manifest.json"
+dp="$(dumps_post "$sb0")"
+grep -q "No tool of this run's packs reads a dump" <<<"$dp" || fail "a forged tool under a reader's name is said to be the pack's: $dp"
+pass "after pack-add the job service's dump post names minidump_map and mem_profile; without it, or with a forged namesake, it names none"
+
 echo "# a pack whose files changed since it was installed is not added; an older install than the checkout's is said"
 out="$(kick --pack computer-forensics-base --label pt)" || fail "$out"
 idt="$(id_of pt)"; sbt="$(sandbox_of pt)"

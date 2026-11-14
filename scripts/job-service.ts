@@ -3383,7 +3383,8 @@ export class JobService {
       const found = await dumpMembers(membersTsv(this.S, generation));
       if (!found || !found.total) return;
       this.dumpsTold.add(key);
-      const post = dumpsPost(generation, over, found, dumpReaders(this.o.packDirs));
+      // The run's packs as they are now: one pack-add brought in is not in packDirs; its tools are in the run's tools/.
+      const post = dumpsPost(generation, over, found, dumpReaders(this.o.packDirs, this.S));
       if (post) await this.o.notify("all", post).catch(() => undefined);
     } catch (e) {
       this.log(`dump members of ${generation}: ${(e as Error).message}`);
