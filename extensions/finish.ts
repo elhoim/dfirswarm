@@ -1847,9 +1847,28 @@ export async function recordCheck(sandboxRoot: string, by: string, revision: str
  * `question:1`. Null for any other heading (Summary, Timeline, Method).
  */
 export function reportQuestionOf(text: string): string | null {
+  return reportQuestionForm(text)?.q ?? null;
+}
+
+/**
+ * The question a heading or a first cell names, and whether it names it in a question's own form (`Q1`, `Q-1`,
+ * `Question 1`, `question:1`) or only by a number (`1.`, `1)`), which is also how a report numbers its own parts
+ * (`1. Executive summary`); `title` is what follows the number or the label.
+ */
+function reportQuestionForm(text: string): { q: string; own: boolean; title: string } | null {
   const t = text.replace(/[*_`]/g, "").trim();
-  const m = /^question:([A-Za-z0-9._-]+)/i.exec(t) ?? /^(?:§\s*)?(\d{1,3})(?:[.):](?:\s|$)|$)/.exec(t) ?? /^(?:Q|Question)\s*-?\s*(\d{1,4})\b/i.exec(t);
-  return m ? `question:${m[1]}` : null;
+  const own = /^question:([A-Za-z0-9._-]+)(.*)$/i.exec(t) ?? /^(?:Q|Question)\s*-?\s*(\d{1,4})\b(.*)$/i.exec(t);
+  if (own) return { q: `question:${own[1]}`, own: true, title: own[2]!.trim() };
+  const n = /^(?:§\s*)?(\d{1,3})(?:[.):](?:\s|$)|$)(.*)$/.exec(t);
+  return n ? { q: `question:${n[1]}`, own: false, title: n[2]!.trim() } : null;
+}
+
+const TITLE_STOP = new Set(["the", "and", "what", "which", "who", "whom", "whose", "when", "where", "why", "how", "was", "were", "is", "are", "did", "does", "that", "this", "with", "from", "for", "into", "its", "their", "his", "her", "format", "name", "answer", "question"]);
+/** The words of a heading's title that are in the question's own words (stop words and short words aside). */
+function titleOverlap(title: string, question: string): number {
+  const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []).filter((w) => !TITLE_STOP.has(w)));
+  const asked = words(question);
+  return [...words(title)].filter((w) => asked.has(w)).length;
 }
 
 /** A line of a report or a ledger value as the two are compared: its first line's words, without marks, citations, edge punctuation or case. */
@@ -1878,20 +1897,24 @@ function framing(line: string): boolean {
 /**
  * The answer a report gives each question, as a reader takes it: in a section whose heading names the question, the
  * line labelled as its answer, else its first line that says something (the question repeated, a quote and a rule are
- * passed over); in a table, the row whose first cell names the question, its second cell. The first one a question
- * has counts.
+ * passed over); in a table, the row whose first cell names the question, its second cell. When several sections or
+ * rows name one question, a heading in a question's own form (Q1, Question 1) is taken over one that only starts with
+ * its number, which is also how a report numbers its own parts: "## 1. Executive summary" is not question 1's answer
+ * when "### Q1" follows. Among those left, the one whose title shares the most words with the question (`questions`,
+ * by section, when its words are known), else the first.
  */
-export function reportAnswers(report: string): Map<string, string> {
-  const out = new Map<string, string>();
+export function reportAnswers(report: string, questions?: ReadonlyMap<string, string>): Map<string, string> {
+  const found = new Map<string, Array<{ own: boolean; title: string; answer: string }>>();
+  const add = (q: string, own: boolean, title: string, answer: string) => found.set(q, [...(found.get(q) ?? []), { own, title, answer }]);
   const lines = report.split(/\r?\n/);
   let fenced = false;
-  let current: { q: string; level: number; lines: string[] } | null = null;
+  let current: { q: string; own: boolean; title: string; level: number; lines: string[] } | null = null;
   const close = () => {
-    if (!current || out.has(current.q)) return;
+    if (!current) return;
     const said = current.lines.filter((l) => !framing(l));
     const labelled = current.lines.map(labelledAnswer).find((x) => x !== null && x !== "");
     const first = labelled ?? said.find((l) => !/^\s*\|/.test(l)) ?? said[0];
-    if (first !== undefined) out.set(current.q, first);
+    if (first !== undefined) add(current.q, current.own, current.title, first);
   };
   for (const line of lines) {
     if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
@@ -1899,25 +1922,33 @@ export function reportAnswers(report: string): Map<string, string> {
     const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
     if (h) {
       const level = h[1]!.length;
-      const q = reportQuestionOf(h[2]!);
-      if (q || !current || level <= current.level) {
+      const form = reportQuestionForm(h[2]!);
+      if (form || !current || level <= current.level) {
         close();
-        current = q ? { q, level, lines: [] } : null;
+        current = form ? { ...form, level, lines: [] } : null;
       }
       continue;
     }
     const row = /^\s*\|(.+)\|\s*$/.exec(line);
     if (row) {
       const cells = row[1]!.split("|").map((c) => c.trim());
-      const q = cells.length >= 2 ? reportQuestionOf(cells[0]!) : null;
-      if (q && !out.has(q) && cells[1]) {
-        out.set(q, cells[1]);
+      const form = cells.length >= 2 ? reportQuestionForm(cells[0]!) : null;
+      if (form && cells[1]) {
+        add(form.q, form.own, form.title, cells[1]);
         continue;
       }
     }
     current?.lines.push(line);
   }
   close();
+  const out = new Map<string, string>();
+  for (const [q, all] of found) {
+    const pool = all.some((c) => c.own) ? all.filter((c) => c.own) : all;
+    const words = questions?.get(q);
+    const scores = words ? pool.map((c) => titleOverlap(c.title, words)) : [];
+    const best = scores.length ? Math.max(...scores) : 0;
+    out.set(q, (best > 0 ? pool[scores.indexOf(best)]! : pool[0]!).answer);
+  }
   return out;
 }
 
@@ -1945,11 +1976,12 @@ export function datedEvents(entries: readonly P.LedgerEntry[], replaced: Readonl
  * as sentences (s082123), another cited E-97 in a ledger that ended at E-95, a third said "pending" twelve minutes after
  * the answer was recorded. Finding the value anywhere in the report is not enough: a report whose section 5 leads with
  * a sentence and quotes the value further down is graded on the sentence. Pure: `answers` are the standing answers,
- * `maxSeq` the ledger's last entry, `dated` its standing dated events when known.
+ * `maxSeq` the ledger's last entry, `dated` its standing dated events when known, `questions` each question's words
+ * by section (question:<id>) when known.
  */
-export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number, dated?: number): string[] {
+export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number, dated?: number, questions?: ReadonlyMap<string, string>): string[] {
   const out: string[] = [];
-  const said = reportAnswers(report);
+  const said = reportAnswers(report, questions);
   const cut = (x: string) => (x.length > 120 ? `${x.slice(0, 117)}...` : x);
   const standing = new Map(answers.map((a) => [a.section, a]));
   for (const a of answers) {
@@ -1982,7 +2014,10 @@ export async function reportCheck(sandboxRoot: string, report: string | null | u
   const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
   const replaced = P.supersededBy(entries);
   const answers = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && String(e.section ?? "").startsWith("question:")).map((e) => ({ section: String(e.section), seq: e.seq, value: String(e.value ?? "") }));
-  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0), datedEvents(entries, replaced));
+  // Each question's words, so a section is matched to the question its title speaks of (reportAnswers).
+  const snap = await import("./questions.ts").then((Q) => Q.questionsSnapshot(sandboxRoot)).catch(() => null);
+  const questions = new Map([...(snap?.bySection ?? new Map())].map(([id, q]) => [`question:${id}`, String(q.text ?? "")]));
+  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0), datedEvents(entries, replaced), questions);
 }
 
 /**

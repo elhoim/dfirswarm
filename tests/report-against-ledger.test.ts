@@ -9,7 +9,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { answerLineKey, datedEvents, reportAgainstLedger, reportAnswers, reportEventCount, reportQuestionOf } from "../extensions/finish.ts";
+import { writeFile } from "node:fs/promises";
+import { answerLineKey, datedEvents, reportAgainstLedger, reportAnswers, reportCheck, reportEventCount, reportQuestionOf } from "../extensions/finish.ts";
+import { A, F, ok, planned, rec, run } from "./negative-bar-fixture.ts";
 
 const FIX = join(import.meta.dirname, "fixtures", "report-against-ledger");
 const MD5 = "5f4dcc3b5aa765d61d8327deb882cf99";
@@ -74,4 +76,33 @@ test("the headings that name a question, and the line keys compared", () => {
   for (const [h, q] of [["1. What is it?", "question:1"], ["Q-4", "question:4"], ["Question 12: the account", "question:12"], ["question:7", "question:7"], ["**3**", "question:3"], ["Timeline", null], ["Summary", null], ["2024 in review", null]] as const) assert.equal(reportQuestionOf(h), q, h);
   assert.equal(answerLineKey("**`invoice.docm_ABC`** (E-4, E-9)."), "invoice.docm_abc");
   assert.notEqual(answerLineKey("A_B"), answerLineKey("AB"), "an underscore in a value is kept");
+});
+
+test("a heading that only numbers the report's own part is not taken for that question when a section names it in a question's form or by its words", () => {
+  // What the review found: "## 1. Executive summary" read as question 1, and the first match won.
+  const report = "# Report\n\n## 1. Executive summary\n\nThe host was compromised through a phishing mail.\n\n## 2. Answers\n\n### Q1\n\nDESKTOP-1\n";
+  assert.equal(reportAnswers(report).get("question:1"), "DESKTOP-1");
+  assert.deepEqual(reportAgainstLedger(report, [{ section: "question:1", seq: 4, value: "DESKTOP-1" }], 9), []);
+  // The same with Question 1, and with the answer in a table row in a question's form.
+  assert.equal(reportAnswers(report.replace("### Q1", "### Question 1: the host's name")).get("question:1"), "DESKTOP-1");
+  assert.equal(reportAnswers("## 1. Executive summary\n\nA summary.\n\n## 2. Answers\n\n| Q | Answer |\n|---|---|\n| Q1 | DESKTOP-1 |\n").get("question:1"), "DESKTOP-1");
+  // Numbered alike: the section whose title shares the question's words, when they are known.
+  const numbered = "## 1. Executive summary\n\nThe host was compromised.\n\n## 2. Answers\n\n### 1. The computer's host name\n\nDESKTOP-1\n\n### 2. The attacker's address\n\n192.0.2.7\n";
+  const questions = new Map([["question:1", "What is the host name of the compromised computer?"], ["question:2", "What address did the attacker connect from?"]]);
+  assert.equal(reportAnswers(numbered, questions).get("question:1"), "DESKTOP-1");
+  assert.equal(reportAnswers(numbered, questions).get("question:2"), "192.0.2.7");
+  assert.deepEqual(reportAgainstLedger(numbered, [{ section: "question:1", seq: 4, value: "DESKTOP-1" }, { section: "question:2", seq: 5, value: "192.0.2.7" }], 9, undefined, questions), []);
+  // With no words to go by, and only numbers, the first section still counts, as before.
+  assert.equal(reportAnswers(numbered).get("question:1"), "The host was compromised.");
+  // A report whose numbered sections are its answers is read as it was.
+  assert.equal(reportAnswers("## 1. What is the host name?\n\nDESKTOP-1\n\n## 2. Who?\n\nalice\n").get("question:2"), "alice");
+});
+
+test("the finish's report check reads each question's words from the register, so a numbered part of the report is not taken for a question", async () => {
+  const c = await run();
+  await planned(c.a0, "1");
+  const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "the log", evidence: "line 12", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry.seq;
+  ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f} shows it`, ...A, result: "established" }));
+  await writeFile(join(c.S, "work", "report.md"), `## 1. Executive summary\n\nThe host was entered through a mail.\n\n## 2. Answers\n\n### 1. Who logged on\n\nalice (E-${f})\n`);
+  assert.deepEqual(await reportCheck(c.S, "work/report.md"), []);
 });
