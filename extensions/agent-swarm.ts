@@ -219,7 +219,7 @@ import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
 import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
-import { cropPng, pngForModel } from "./png-scale.ts";
+import { cropPng, scaleReadImages } from "./png-scale.ts";
 import { PUBLISH_MAX_BYTES } from "./board.ts";
 import { coerceArgs } from "./forged-args.ts";
 import { sightingDigest } from "./sighting.ts";
@@ -2194,26 +2194,19 @@ export default function (pi: ExtensionAPI) {
       contentChanged = true;
       if (agentId) await logEvent(ctx.cwd, agentId, "shell_timeout", { tool: name }, { ok: true, seconds: limit.seconds, why: limit.why }).catch(() => undefined);
     }
-    // An image a seat reads goes to the model at a size worth looking at (png-scale.ts): a large PNG is scaled to 1,568
-    // pixels on its long side, and the seat is told from what and where the original is. Other formats pass as they are.
-    if (name === "read" && Array.isArray(content) && process.env.SWARM_IMAGE_SCALE !== "off") {
-      const scaledNotes: string[] = [];
-      const next = content.map((part) => {
-        if (part.type !== "image" || part.mimeType !== "image/png" || typeof part.data !== "string") return part;
-        try {
-          const scaled = pngForModel(Buffer.from(part.data, "base64"));
-          if (!scaled) return part;
-          scaledNotes.push(`${scaled.from.width}x${scaled.from.height} (${scaled.from.bytes} bytes) to ${scaled.to.width}x${scaled.to.height}`);
-          return { ...part, data: scaled.data.toString("base64") };
-        } catch {
-          return part;
-        }
-      });
-      if (scaledNotes.length) {
-        const where = typeof input?.path === "string" ? ` The file itself is unchanged at ${input.path}.` : "";
-        content = [...next, { type: "text", text: `The image above was scaled down for viewing, from ${scaledNotes.join("; ")}.${where} For detail too small to read here (small text, a code, single pixels), crop the region at full size with image_crop (a PNG), or in a job for another format.` }];
+    // Every image a seat reads goes to the model at a size worth looking at (png-scale.ts): at most 1,568 pixels on its
+    // long side and 300 KB, whatever its format, under the file's own name, and the seat is told from what and where the
+    // original is. Pi's own resize stops at 2,000 pixels and 4.5 MB.
+    if (name === "read" && Array.isArray(content) && process.env.SWARM_IMAGE_SCALE !== "off" && content.some((part) => part?.type === "image")) {
+      const path = typeof input?.path === "string" ? input.path : undefined;
+      const { stat: statFile } = await import("node:fs/promises");
+      const { resolve: resolvePath } = await import("node:path");
+      const fileBytes = path ? await statFile(resolvePath(ctx.cwd, path)).then((st) => st.size).catch(() => undefined) : undefined;
+      const read = await scaleReadImages(content, { path, fileBytes }).catch(() => null);
+      if (read) {
+        content = read.content;
         contentChanged = true;
-        if (agentId) await logEvent(ctx.cwd, agentId, "image_scaled", { path: typeof input?.path === "string" ? input.path : undefined }, { ok: true, scaled: scaledNotes }).catch(() => undefined);
+        if (agentId) await logEvent(ctx.cwd, agentId, "image_scaled", { path }, { ok: read.unscaled.length === 0, scaled: read.scaled.map((x) => `${x.from.width}x${x.from.height} to ${x.to.width}x${x.to.height} (${x.to.bytes} bytes, ${x.mimeType}, ${x.via})`), ...(read.unscaled.length ? { unscaled: read.unscaled } : {}) }).catch(() => undefined);
       }
     }
     const hostSpill = details?.fullOutputPath;
@@ -3010,7 +3003,7 @@ export default function (pi: ExtensionAPI) {
     name: "image_crop",
     label: "Crop an image",
     description:
-      "A region of a PNG at its own resolution: `read` scales a large picture to 1,568 pixels on its long side, which loses small text, a code or single pixels. path is a PNG you can read (a job's output under store/jobs/<id>/out/, or your own under work/); x, y, width and height are in the original's pixels (read says the original's size when it scaled it). A region past the image is clipped to it; one larger than 1,568 x 1,568 pixels is scaled to fit, and the answer says so. Other formats, and interlaced, 16-bit or palette PNGs, are cropped in a job.",
+      "A region of a PNG at its own resolution: `read` shows a picture at most 1,568 pixels on its long side and 300 KB, which loses small text, a code or single pixels. path is a PNG you can read (a job's output under store/jobs/<id>/out/, or your own under work/); x, y, width and height are in the original's pixels (read says the original's size when it scaled it). A region past the image is clipped to it; one larger than 1,568 x 1,568 pixels is scaled to fit, and the answer says so. Any PNG (every depth, palette or not, interlaced or not); other formats are cropped in a job.",
     parameters: Type.Object({
       path: Type.String({ description: "The PNG, relative to the run's directory" }),
       x: Type.Integer({ description: "Left edge, in the original's pixels" }),
