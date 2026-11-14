@@ -4,12 +4,20 @@
  * import named in `programs`.
  *
  *   supply-probe.ts <sandbox> <import id> --provides CAP[,CAP] --hub-admin SOCKET [--timeout SECONDS]
+ *   supply-probe.ts <sandbox> <import id> --untested WHY [--provides CAP[,CAP]] [--hub-admin SOCKET]
  *
- * Prints one JSON object: { ok, import, probes: [{ capability, ok, job, said }] },
+ * Prints one JSON object: { ok, import, probes: [{ capability, ok, job, said }], requires },
  * writes the same under the import's id in <sandbox>/supplied-capabilities.json,
- * marks a capability the kickoff recorded as wanted (toolbox.json `requires`)
- * as met by the supply or not, and tells the seats on the board. Exit 0 when
- * every probe passed, 3 when one did not, 2 on a usage error.
+ * takes it into what the kickoff recorded as wanted (toolbox.json `requires`):
+ * a capability whose known-answer test passed is met, by the import, and
+ * `requires` in the answer says how many are met now. It tells the seats on
+ * the board. Exit 0 when every probe passed, 3 when one did not, 2 on a usage
+ * error.
+ *
+ * --untested: a program that is sealed and was not tested (nothing said what
+ * it is for, or the run has no job service to test it in) is recorded so,
+ * and the seats are told it is untested: its silence says nothing about the
+ * evidence. Exit 0; the caller says what that means to the operator.
  *
  * Why: a QR decoder supplied to eight runs could read no image (its
  * ImageMagick had no coders). It had been tried with `--version` only; two
@@ -117,6 +125,53 @@ export async function runProbes(call: HubCall, importId: string, capabilities: s
   return { ok: probes.every((x) => x.ok), import: importId, probes };
 }
 
+/** A row of toolbox.json's `requires`, as toolbox.sh writes it. */
+export type RequireRow = Record<string, unknown>;
+
+/**
+ * A supplied program's probes taken into what the kickoff recorded as wanted: a capability whose known-answer test
+ * passed is met, and the import is among what meets it; one that failed stays as it was, with the failure beside it.
+ * Returns how many of the wanted capabilities are met now, and which this supply made met.
+ */
+export function applySupply(requires: RequireRow[], importId: string, probes: ProbeResult[]): RequiresCount {
+  const newly: string[] = [];
+  for (const r of requires) {
+    const p = probes.find((x) => x.capability === r.capability);
+    if (!p) continue;
+    r.supplied = { import: importId, ok: p.ok, job: p.job, said: p.said };
+    if (!p.ok) continue;
+    if (r.met_at_kickoff === undefined) r.met_at_kickoff = r.met === true;
+    if (r.met !== true) newly.push(String(r.capability));
+    r.met = true;
+    const by = Array.isArray(r.by) ? (r.by as unknown[]).map(String) : [];
+    const ref = `import:${importId}`;
+    r.by = by.includes(ref) ? by : [...by, ref];
+  }
+  return countRequires(requires, newly);
+}
+
+/** A supply that was not tested, beside each capability it was said to be for: met is left as the kickoff found it. */
+export function applyUntested(requires: RequireRow[], importId: string, capabilities: string[], why: string): RequiresCount {
+  for (const r of requires) if (capabilities.includes(String(r.capability))) r.supplied = { import: importId, ok: null, untested: why };
+  return countRequires(requires, []);
+}
+
+export type RequiresCount = { met: number; of: number; newly_met: string[]; unmet: string[] };
+
+function countRequires(requires: RequireRow[], newly: string[]): RequiresCount {
+  return { met: requires.filter((r) => r.met === true).length, of: requires.length, newly_met: newly, unmet: requires.filter((r) => r.met !== true).map((r) => String(r.capability)) };
+}
+
+/** The words the seats are told of a program sealed and not tested. */
+export function untestedPost(importId: string, why: string, capabilities: string[]): string {
+  return (
+    `SUPPLIED PROGRAM NOT TESTED: import:${importId} was not run against a known answer (${why})` +
+    (capabilities.length ? `; it was supplied for ${capabilities.join(", ")}, which is therefore not shown to work` : "") +
+    `. Whether it works where you run it is not known: a program that starts and prints its version can still read no file. ` +
+    `Before you rely on it, run it in a job on an input whose answer you know (job_run programs ["import:${importId}"]). Until then its silence or an empty answer says nothing about the evidence, and what rests on it says it was untested.`
+  );
+}
+
 /** The words the seats are told. */
 export function probePost(importId: string, probes: ProbeResult[]): string {
   const lines = probes.map((x) => `${x.capability}: ${x.ok ? "WORKS" : "DOES NOT WORK"} (${x.said}${x.job ? `; job ${x.job}` : ""})`);
@@ -124,19 +179,31 @@ export function probePost(importId: string, probes: ProbeResult[]): string {
   return `SUPPLIED PROGRAM TESTED: import:${importId} was run in a worker VM against a known answer. ${lines.join(". ")}.${bad ? " A capability that does not work must not be read as a negative: its silence says nothing about the evidence. Say so on the ledger if you relied on it, and use another way." : ""}`;
 }
 
+async function readToolbox(sandbox: string): Promise<{ requires?: RequireRow[] } | null> {
+  return readFile(join(sandbox, "toolbox.json"), "utf8").then((t) => JSON.parse(t) as { requires?: RequireRow[] }).catch(() => null);
+}
+
+async function recordSupply(sandbox: string, importId: string, rec: Record<string, unknown>): Promise<void> {
+  const file = join(sandbox, "supplied-capabilities.json");
+  const had = await readFile(file, "utf8").then((t) => JSON.parse(t) as Record<string, unknown>).catch(() => ({}) as Record<string, unknown>);
+  await writeFile(file, `${JSON.stringify({ ...had, [importId]: { at: new Date().toISOString(), ...rec } }, null, 2)}\n`);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [sandbox, importId, ...rest] = argv;
   const opt = (name: string) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
   const provides = (opt("--provides") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const admin = opt("--hub-admin");
-  if (!sandbox || !importId || !provides.length || !admin) {
-    console.error("usage: supply-probe.ts <sandbox> <import id> --provides CAP[,CAP] --hub-admin SOCKET [--timeout SECONDS]");
+  const untested = opt("--untested");
+  if (!sandbox || !importId || (untested === undefined && (!provides.length || !admin)) || untested === "") {
+    console.error("usage: supply-probe.ts <sandbox> <import id> --provides CAP[,CAP] --hub-admin SOCKET [--timeout SECONDS]\n       supply-probe.ts <sandbox> <import id> --untested WHY [--provides CAP[,CAP]] [--hub-admin SOCKET]");
     return 2;
   }
   // The hub's board functions take the run root first: the admin socket's "call" is given it here.
   const call: HubCall = (fn, arg) =>
     new Promise((resolve, reject) => {
       let answer = "";
+      if (!admin) return reject(new Error("no hub admin socket"));
       const socket = connect(admin);
       socket.setTimeout(60_000, () => { socket.destroy(); reject(new Error("the hub did not answer")); });
       socket.setEncoding("utf8");
@@ -147,22 +214,31 @@ async function main(argv: string[]): Promise<number> {
       });
       socket.on("connect", () => socket.write(`${JSON.stringify({ op: "call", fn, args: [sandbox, arg] })}\n`));
     });
-  const result = await runProbes(call, importId, provides, { timeoutS: Number(opt("--timeout") ?? 600) });
-  const file = join(sandbox, "supplied-capabilities.json");
-  const had = await readFile(file, "utf8").then((t) => JSON.parse(t) as Record<string, unknown>).catch(() => ({}) as Record<string, unknown>);
-  await writeFile(file, `${JSON.stringify({ ...had, [importId]: { at: new Date().toISOString(), probes: result.probes } }, null, 2)}\n`);
-  // What the kickoff recorded as wanted and unmet is now met by the supply, or shown not to be.
   const tb = join(sandbox, "toolbox.json");
-  const toolbox = await readFile(tb, "utf8").then((t) => JSON.parse(t) as { requires?: Array<Record<string, unknown>> }).catch(() => null);
+  if (untested !== undefined) {
+    // Sealed and not tested: said so in the run's records and to the seats, never left to read as working.
+    await recordSupply(sandbox, importId, { untested, ...(provides.length ? { provides } : {}) });
+    const toolbox = await readToolbox(sandbox);
+    const requires = toolbox?.requires ? applyUntested(toolbox.requires, importId, provides, untested) : null;
+    if (toolbox?.requires) await writeFile(tb, `${JSON.stringify(toolbox, null, 2)}\n`).catch(() => undefined);
+    const post = { tag: "hold", to: "all", key: `supply-probe:${importId}`, body: untestedPost(importId, untested, provides) };
+    const posted = admin
+      ? await call("systemPost", post).then(() => true, () => false)
+      : await import("../extensions/protocol.ts").then((P) => P.systemPost(sandbox, post)).then(() => true, () => false);
+    console.log(JSON.stringify({ ok: false, untested: true, import: importId, why: untested, provides, posted, ...(requires ? { requires } : {}) }));
+    return 0;
+  }
+  const result = await runProbes(call, importId, provides, { timeoutS: Number(opt("--timeout") ?? 600) });
+  await recordSupply(sandbox, importId, { probes: result.probes });
+  // What the kickoff recorded as wanted is now met by the supply where its known-answer test passed, or shown not to be.
+  const toolbox = await readToolbox(sandbox);
+  let requires: RequiresCount | null = null;
   if (toolbox?.requires) {
-    for (const r of toolbox.requires) {
-      const p = result.probes.find((x) => x.capability === r.capability);
-      if (p) r.supplied = { import: importId, ok: p.ok, job: p.job, said: p.said };
-    }
+    requires = applySupply(toolbox.requires, importId, result.probes);
     await writeFile(tb, `${JSON.stringify(toolbox, null, 2)}\n`).catch(() => undefined);
   }
   await call("systemPost", { tag: result.ok ? "result" : "hold", to: "all", key: `supply-probe:${importId}`, body: probePost(importId, result.probes) }).catch(() => undefined);
-  console.log(JSON.stringify(result));
+  console.log(JSON.stringify({ ...result, ...(requires ? { requires } : {}) }));
   return result.ok ? 0 : 3;
 }
 

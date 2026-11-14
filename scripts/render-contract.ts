@@ -297,9 +297,14 @@ function toolboxSection(sandbox: string): string {
     if (Array.isArray(req) && req.length) {
       const rows = ["The case requires these done; checked at kickoff where you run:", "", "| Capability | Met by | Use |", "| --- | --- | --- |"];
       for (const r of req) {
-        const by = (get(r, "by", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ");
+        // A program the operator supplied (scripts/supply-probe.ts) meets a capability once its known-answer test
+        // passed, and is named as supplied; one that failed or was not tested is said beside the capability. The
+        // program this file replaced knew no supply: a row without `supplied` reads as it did.
+        const by = (get(r, "by", []) as unknown[]).map((b) => `\`${pyStr(b)}\`${pyStr(b).startsWith("import:") ? " (supplied by the operator; its known-answer test passed in a worker job)" : ""}`).join(", ");
         const failed = (get(r, "present_but_failed_probe", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ");
-        rows.push(`| ${pyStr(r.capability)} | ${get(r, "met") === true ? by : `not met${failed ? ` (${failed} is there and failed a test input)` : ` (none of ${(get(r, "wanted", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ")})`}`} | ${pyStr(get(r, "use", ""))} |`);
+        const sup = get(r, "supplied") as Obj | undefined;
+        const supWords = sup && typeof sup === "object" && get(r, "met") !== true ? (get(sup, "ok") === false ? `; supplied \`import:${pyStr(get(sup, "import"))}\` FAILED its known-answer test` : get(sup, "ok") === null ? `; supplied \`import:${pyStr(get(sup, "import"))}\` is NOT tested (${pyStr(get(sup, "untested", ""))}): its silence says nothing` : "") : "";
+        rows.push(`| ${pyStr(r.capability)} | ${get(r, "met") === true ? by : `not met${failed ? ` (${failed} is there and failed a test input)` : ` (none of ${(get(r, "wanted", []) as unknown[]).map((b) => `\`${pyStr(b)}\``).join(", ")})`}${supWords}`} | ${pyStr(get(r, "use", ""))} |`);
       }
       if (req.some((r) => get(r, "met") !== true)) rows.push("", "A capability not met is not a reason to stop at not determinable: a program the operator supplies runs in a job (`job_run` with `programs`), and asking for one is an acquisition ask.");
       section += `${rows.join("\n")}\n\n`;

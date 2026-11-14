@@ -10503,24 +10503,39 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
         + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
         + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
-      if [[ "$mode" == tool && -z "$provides" ]]; then
-        echo "NOTE: nothing says what this program is for (--provides CAP[,CAP]), so it was not tested: whether it works where the seats run it is not known. A decoder that starts and prints its version can still read no file."
-      fi
-      printf '%s\n' "$out"
-      if [[ -n "$provides" ]]; then
-        local probe_admin probe_out probe_rc=0 probe_import
+      # A tool is tested where the seats run it, against a known answer (--provides and a hub with a job service), or it
+      # is recorded as untested and the seats are told so: never left to be read as working.
+      local probe_admin="" probe_out="" probe_rc=0 probe_import="" untested="" told
+      if [[ "$mode" == tool ]]; then
         probe_import="$(jq -r '.import // empty' <<<"$out")"
         probe_admin="$(question_admission_args "$sandbox" | sed -n 2p)"
-        if [[ -z "$probe_admin" ]]; then
-          echo "WARN: the run has no hub with a job service to test the program in (--provides $provides): it is sealed, and NOT tested."
-        else
-          probe_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/supply-probe.ts" "$sandbox" "$probe_import" --provides "$provides" --hub-admin "$probe_admin")" || probe_rc=$?
-          jq -r '.probes[]? | "Tested \(.capability): \(if .ok then "works" else "DOES NOT WORK" end) (\(.said)\(if .job then "; job " + .job else "" end))"' <<<"$probe_out" 2>/dev/null || printf '%s\n' "$probe_out"
+        if [[ -z "$provides" ]]; then
+          untested="nothing said what it is for (no --provides)"
+        elif [[ -z "$probe_admin" ]]; then
+          untested="the run has no hub with a job service to test it in"
+        fi
+        if [[ -n "$untested" && -n "$probe_import" ]]; then
+          probe_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/supply-probe.ts" "$sandbox" "$probe_import" --untested "$untested" \
+            ${provides:+--provides "$provides"} ${probe_admin:+--hub-admin "$probe_admin"} 2>&1)" || true
+          told="$(jq -r 'if .posted == true then "the seats were told on the board that it is untested" else "the board post that it is untested could not be made: tell the seats yourself (swarm.sh say)" end' <<<"$probe_out" 2>/dev/null || echo "it could not be recorded as untested ($probe_out): tell the seats yourself (swarm.sh say)")"
           OPERATOR_AUDIT_DETAIL="$(jq -c '{probe: .}' <<<"$probe_out" 2>/dev/null || echo '{}')" operator_audit "${name//-/_}_probe" "$id" add || true
-          if [[ "$probe_rc" -ne 0 ]]; then
-            echo "BLOCKER: $probe_import does not do what it was supplied for (see above). It stays sealed and the seats were told it does not work; supply one that passes." >&2
-            exit 3
-          fi
+        fi
+      fi
+      if [[ "$mode" == tool && -z "$provides" ]]; then
+        echo "NOTE: nothing says what this program is for (--provides CAP[,CAP]), so it was not tested: whether it works where the seats run it is not known. A decoder that starts and prints its version can still read no file. It is recorded as untested (supplied-capabilities.json), and ${told:-nothing told the seats}."
+      fi
+      printf '%s\n' "$out"
+      if [[ -n "$provides" && -n "$untested" ]]; then
+        echo "WARN: the run has no hub with a job service to test the program in (--provides $provides): it is sealed, and NOT tested. It is recorded as untested, what the kickoff found of $provides stands, and ${told:-nothing told the seats}." >&2
+        exit 4
+      elif [[ -n "$provides" ]]; then
+        probe_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/supply-probe.ts" "$sandbox" "$probe_import" --provides "$provides" --hub-admin "$probe_admin")" || probe_rc=$?
+        jq -r '.probes[]? | "Tested \(.capability): \(if .ok then "works" else "DOES NOT WORK" end) (\(.said)\(if .job then "; job " + .job else "" end))"' <<<"$probe_out" 2>/dev/null || printf '%s\n' "$probe_out"
+        jq -r --arg imp "import:$probe_import" 'select(.requires) | .requires | "Required capabilities: \(.met)/\(.of) met" + (if (.newly_met | length) > 0 then " (\(.newly_met | join(", ")) now met by \($imp))" else "" end) + (if (.unmet | length) > 0 then "; not met: \(.unmet | join(", "))" else "" end) + "."' <<<"$probe_out" 2>/dev/null || true
+        OPERATOR_AUDIT_DETAIL="$(jq -c '{probe: .}' <<<"$probe_out" 2>/dev/null || echo '{}')" operator_audit "${name//-/_}_probe" "$id" add || true
+        if [[ "$probe_rc" -ne 0 ]]; then
+          echo "BLOCKER: $probe_import does not do what it was supplied for (see above). It stays sealed and the seats were told it does not work; supply one that passes." >&2
+          exit 3
         fi
       fi
       ;;
@@ -12652,6 +12667,10 @@ directory inside the job. A job that tried to run one in place says so in its re
 material are kept: every preset admits it; one that says operator_supplied=none for material refuses it,
 because nothing recorded on its output could be kept. What rests on it is flagged with its class. The reply
 tells you if the run's hub, started by an older harness, took it as plain material. docs/adr/0014.
+--provides CAP[,CAP] (qr-decode, image-convert, video-decode) tests the program against a known answer in a
+worker job once it is sealed: a capability the case requires (toolbox.json) is then met by it, and the seats
+are told what works. One that fails exits 3. A program supplied without --provides, or to a run with no hub
+whose job service could test it, is recorded as untested and the seats are told so; the second exits 4.
 EOF
       ;;
     *) die_usage "no help for '$topic'" ;;
