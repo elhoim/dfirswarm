@@ -101,11 +101,11 @@ test("similar jobs are ranked and bounded without loss: the closest first, the r
   assert.doesNotMatch(line, /\n/);
   assert.ok(line.length <= SIMILAR_LINE_MAX, `${line.length} characters`);
   assert.equal(SIMILAR_SHOWN, 3);
-  assert.match(line, /^Other seats did this work over these objects: j000001 by a2 \(committed ok; same command\), j000002 by a2 \(committed ok; same command\), j000003 by a2 \(committed ok; same command\), and 3 more on the job_similar line for j000100 in store\/journal\.jsonl\. /);
+  assert.match(line, /^Other seats did this work over these objects: j000001 by a2 \(committed ok; same command\), j000002 by a2 \(committed ok; same command\), j000003 by a2 \(committed ok; same command\), and 3 more on the job_similar line for j000100 in store\/journal\.jsonl\. Read their outputs \(job:<id>\/<path>\)/);
   // What happens now: this job runs, and a second run on purpose says so.
   assert.match(line, /this job was not joined to theirs and runs \(job_status cancel=true stops it\); say independent: true when a second run is the point\.$/);
-  const overlap = String(similarView("j000100", [s("j000007", "same leading command", "overlap", "running", "")], false).similar);
-  assert.match(overlap, /j000007 by a2 \(running; same leading command, 1 object\(s\) in common\)/);
+  const overlap = String(similarView("j000100", [{ ...s("j000007", "same leading command", "overlap", "running", ""), lead: "L-4" }], false).similar);
+  assert.match(overlap, /j000007 by a2 \(running; same leading command, 1 object\(s\) in common; L-4\)/, "its lead is named");
   assert.match(String(similarView("j000100", many.slice(0, 1), true).similar), /^Recorded as an independent reproduction of j000001 by a2/);
   // A seat's name that is long or holds line breaks does not make the line longer or break it.
   const named = String(similarView("j000100", many.map((x) => ({ ...x, name: `a name\nwith a break ${"x".repeat(500)}` })), false).similar);

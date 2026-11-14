@@ -173,12 +173,12 @@ export function similarView(job: string, similar: Similar[], independent: boolea
   const shown = similar.slice(0, SIMILAR_SHOWN);
   const rest = similar.slice(shown.length);
   const clean = (t: string) => t.replace(/\s+/g, " ").slice(0, 32);
-  const one = (s: Similar) => `${s.job} by ${clean(s.name ?? s.seat)} (${s.state === "committed" ? `committed ${s.status ?? ""}`.trim() : s.state}; ${s.match}${s.objects === "same" ? "" : `, ${s.shared} object(s) in common`}${s.independent ? "; independent" : ""})`;
+  const one = (s: Similar) => `${s.job} by ${clean(s.name ?? s.seat)} (${s.state === "committed" ? `committed ${s.status ?? ""}`.trim() : s.state}; ${s.match}${s.objects === "same" ? "" : `, ${s.shared} object(s) in common`}${s.lead ? `; ${clean(s.lead)}` : ""}${s.independent ? "; independent" : ""})`;
   const more = !rest.length ? "" : recorded ? `, and ${rest.length} more on the job_similar line for ${job} in store/journal.jsonl` : `, and ${rest.map((s) => s.job).join(", ")}`;
   const list = `${shown.map(one).join(", ")}${more}`;
   const line = independent
     ? `Recorded as an independent reproduction of ${list}: keep your result apart from theirs until yours is in, then compare.`
-    : `Other seats did this work over these objects: ${list}. Read their outputs before you rely on a second run; this job was not joined to theirs and runs (job_status cancel=true stops it); say independent: true when a second run is the point.`;
+    : `Other seats did this work over these objects: ${list}. Read their outputs (job:<id>/<path>) before you rely on a second run; this job was not joined to theirs and runs (job_status cancel=true stops it); say independent: true when a second run is the point.`;
   // One line, whatever the names: what would make it longer is the job_similar line's to hold (with no such line, every id is said).
   return { similar: line.length <= SIMILAR_LINE_MAX || !recorded ? line : `${line.slice(0, SIMILAR_LINE_MAX - 1)}…` };
 }
