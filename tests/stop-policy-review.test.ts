@@ -60,7 +60,7 @@ test("an extension checks the run's end under the lock a stop takes: a stop that
     // A cap-stop takes the lock first and writes the sentinel while the extension waits for it.
     let release: () => void = () => undefined;
     const holding = new Promise<void>((r) => (release = r));
-    const stop = P.withTableLock(root, async () => {
+    const stop = P.withBudgetLock(root, async () => {
       await sleep(150);
       await mkdir(join(root, "done"), { recursive: true });
       await writeFile(join(root, P.SENTINEL_REL), "---\nby: harness\nreason: cap\noutcome: stopped\n---\n");

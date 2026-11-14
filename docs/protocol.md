@@ -52,7 +52,10 @@ runs/<id>/
   inbox/<id>/cursors.json      per-agent, per-thread: highest post id read
   work/                        the artifact(s); work/<agent>/.browser/*.png from playwright
   locks/<sha256(path)>.json    live claims
-  locks/.table.lock/           mkdir mutex for lock-table changes (pid, ns, owner token inside)
+  locks/.table.lock/           mkdir mutex for lock-table and board changes (pid, ns, owner token inside)
+  locks/.ledger.lock/          the same, for the ledger and its attestations and disputes
+  locks/.budget.lock/          the same, for budget.json and the stop markers a cap or the operator writes
+  locks/.history.lock/         the same, for history/*/index.json
   history/<sha256(path)>/      000001.bin … + index.json (rev, ts, agent, bytes, sha256)
   done/agents/<id>.done        this worker exited
   done/agents/<id>.dead        this worker was reaped
@@ -162,7 +165,12 @@ reason**, not an open-ended lock:
 - `release_file` drops your own lease. `done`, `session_shutdown` and the
   reaper drop everything an agent owns.
 - All lock-table mutations run under `locks/.table.lock` (exclusive `mkdir`,
-  10 s wait). The holder rewrites `beat` inside it every 3 s, so a lock that
+  10 s wait). The ledger, the budget and the file history each have a lock of
+  their own (`.ledger.lock`, `.budget.lock`, `.history.lock`), so a call to one
+  never waits for a call to another; the calls of one process take a lock in
+  the order they asked, and only the first of them waits on disk, for another
+  process. Every one of them is described here: the same mutex under another
+  name. The holder rewrites `beat` inside it every 3 s, so a lock that
   has not changed for 15 s has no live holder unless that holder has stalled (SIGSTOP, swap, a
   laptop asleep). A stale lock is broken, except that a holder is kept while
   its pid is live and it recorded the same `ns` as the waiter: the pid
@@ -576,7 +584,7 @@ A run started `--until-solved` or `--stop operator` (or whose goal's metadata bl
                            "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 } } }
 ```
 
-On every `turn_end` and on `session_shutdown` the extension reads `ctx.sessionManager.getEntries()` and sums `Usage` the way Pi's footer and `get_session_stats` do: assistant messages (each counted as a `call`), tool results, compaction and branch summaries. `tokens = input + output + cacheRead + cacheWrite`, `spent_usd = Σ usage.cost.total`. The fold into `agents.<id>` never makes a seat's row smaller: its counters are the seat's whole run, and swarm totals are the sum of rows, all under the table lock. Pi reports a session's own totals, so the fold keys them on `ctx.sessionManager.getSessionId()`: `session_id` is the live session, `sessions` holds each session's last report by id and the row is their sum, and `earlier_sessions` is what the sessions other than the live one spent. A restart adds a session; `/new` then `/resume` back replaces the resumed session's entry. When Pi gives no id, a counter going down marks a new session and the row so far moves into `earlier_sessions`. `/fork` counts the copied prefix in both sessions, which errs high. `compactions`, `compaction_tokens`, `compaction_usd` and `handoffs` are carried forward the same way. A report of all zeros (a session read that failed) leaves the counters as they were. In a microVM run the hub folds a seat's report and takes only the counters and context fields (no `session_id`), and refuses a report smaller than the row it replaces (`usage went backwards`), so a Pi session that restarts inside a VM is not folded until its counters pass the old ones.
+On every `turn_end` and on `session_shutdown` the extension reads `ctx.sessionManager.getEntries()` and sums `Usage` the way Pi's footer and `get_session_stats` do: assistant messages (each counted as a `call`), tool results, compaction and branch summaries. `tokens = input + output + cacheRead + cacheWrite`, `spent_usd = Σ usage.cost.total`. The fold into `agents.<id>` never makes a seat's row smaller: its counters are the seat's whole run, and swarm totals are the sum of rows, all under the budget's lock. Pi reports a session's own totals, so the fold keys them on `ctx.sessionManager.getSessionId()`: `session_id` is the live session, `sessions` holds each session's last report by id and the row is their sum, and `earlier_sessions` is what the sessions other than the live one spent. A restart adds a session; `/new` then `/resume` back replaces the resumed session's entry. When Pi gives no id, a counter going down marks a new session and the row so far moves into `earlier_sessions`. `/fork` counts the copied prefix in both sessions, which errs high. `compactions`, `compaction_tokens`, `compaction_usd` and `handoffs` are carried forward the same way. A report of all zeros (a session read that failed) leaves the counters as they were. In a microVM run the hub folds a seat's report and takes only the counters and context fields (no `session_id`), and refuses a report smaller than the row it replaces (`usage went backwards`), so a Pi session that restarts inside a VM is not folded until its counters pass the old ones.
 
 `budget.json` is replaced whole (a temp file beside it, then `rename`), so a reader never sees half a record; under Landlock alone, where a pane's rights on it are a rule on its inode, every process of the run writes it in place instead. A missing `budget.json` starts a new one. One that is there and does not parse is read once more (an editor caught mid-save); still unparseable, the fold is refused and the file left alone, never rebuilt from defaults, and the pane logs `budget_unreadable` and posts a `veto` to the board, once per process.
 
@@ -619,7 +627,7 @@ again on the next pass, and only a delivery that went through counts). The
 operator is told of a pause once, whichever process wrote it: the watchdog and
 the hub claim an unnotified pause with a mark under `traces/pause-notices/`
 (`claimPauseNotice`). An extension reads the run's end (the sentinel,
-`done/STOPPED`) under the table lock every stop writes it under. The watchdog
+`done/STOPPED`) under the budget's lock every stop writes it under. The watchdog
 runs whatever `--idle-nudge-sec` says: at 0 it prompts nobody for being idle
 and still holds all of this. The wall clock counts only
 the time the run went: `wall_used_ms` holds what earlier stretches used and
@@ -648,7 +656,7 @@ provider (the model's part before the slash), else the earliest when each
 was told one, else none; `since` the start of the spell when this pause
 follows the harness's own try with no seat having worked since (the try is
 then not charged to the wall clock: `wall_base_at` moves to the pause). The
-rule is read again under the table lock (`pauseRun`'s `recheck`). The
+rule is read again under the budget's lock (`pauseRun`'s `recheck`). The
 harness tries again at `until` plus a minute, or 30 minutes after the pause
 when no end is known (`liftProviderLimit`, `resumed_by: "harness"`; never on
 a run with `done/STOPPED`), and the watchdog wakes each seat; a run whose

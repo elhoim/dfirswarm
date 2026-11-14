@@ -47,8 +47,8 @@ async function hugeJob(S: string, id: string, n: number): Promise<void> {
   await writeFile(join(dir, "job.json"), JSON.stringify({ id, state: "committed", requester: { agent: "a0" }, status: "ok", exit: 0, spec: { kind: "command", scope: "declared", inputs: ["input:disk.E01"], command: "extract" } }));
 }
 
-/** The longest a lock (the table lock unless `lock` names another) was seen held while `during` ran: its directory looked for at every turn of the loop. */
-async function lockHeld(S: string, during: () => Promise<unknown>, lock = join(S, "locks", ".table.lock")): Promise<number> {
+/** The longest a lock (the ledger's, which a record takes, unless `lock` names another) was seen held while `during` ran: its directory looked for at every turn of the loop. */
+async function lockHeld(S: string, during: () => Promise<unknown>, lock = join(S, "locks", P.LEDGER_LOCK)): Promise<number> {
   let since = 0;
   let longest = 0;
   let done = false;
@@ -65,7 +65,7 @@ async function lockHeld(S: string, during: () => Promise<unknown>, lock = join(S
   return longest;
 }
 
-test("a sweep that left 200,000 objects writes a line under 64 KB and names the list in a file of 200,000 rows; its words, the gate's item and ledger.md stay small, and a record made beside it holds the table lock for milliseconds", async () => {
+test("a sweep that left 200,000 objects writes a line under 64 KB and names the list in a file of 200,000 rows; its words, the gate's item and ledger.md stay small, and a record made beside it holds the ledger's lock for milliseconds", async () => {
   const { S, a0, a1, a2 } = await run();
   await hugeJob(S, "j900000", ROWS);
   await planned(a0, "2");
@@ -135,17 +135,17 @@ test("a sweep that left 200,000 objects writes a line under 64 KB and names the 
   assert.match(d.what, new RegExp(`whose store sweep is partial: 0 object\\(s\\) searched, not searched: ${all.total} object\\(s\\); by reason: .*the whole list: ${file.path}`));
   assert.match(d.fix, /a partial sweep is not a clean one/);
   assert.ok(r.lines.join("\n").length < 64 * 1024, "the check's whole answer is small");
-  // A record made while that sweep line stands: the table lock is held for the append, not for a render of the list.
+  // A record made while that sweep line stands: the ledger's lock is held for the append, not for a render of the list.
   ok(await rec(a0, { kind: "finding", ...F, value: "a warm-up", source: "the disk", evidence: "row 1", refs: ["job:j000001/hits.txt"], answers: ["2"] }));
   const md = (await stat(join(S, P.LEDGER_MD))).size;
   const t0 = performance.now();
   const held = await lockHeld(S, async () => ok(await rec(a0, { kind: "finding", ...F, value: "the export's first row is a header", source: "the disk", evidence: "row 2", refs: ["job:j000001/hits.txt"], answers: ["2"] })));
   const took = performance.now() - t0;
-  assert.ok(held < 200, `the table lock was held for ${held.toFixed(1)} ms`);
+  assert.ok(held < 200, `the ledger's lock was held for ${held.toFixed(1)} ms`);
   assert.ok(took < 2000, `the record took ${took.toFixed(1)} ms`);
   assert.match(await readFile(join(S, P.LEDGER_MD), "utf8"), /the export's first row is a header/, "and ledger.md holds the record when the call returns");
   assert.ok((await stat(join(S, P.LEDGER_MD))).size - md < 2048);
-  process.stdout.write(`# 200,000 unsearched: line ${Buffer.byteLength(lines[0]!)} B, list ${body.length} B in ${rows.length} rows, sweepWords ${Buffer.byteLength(words)} B, gate item ${Buffer.byteLength(d.what)} B, ledger.md +${grown} B, table lock held ${held.toFixed(1)} ms of a ${took.toFixed(1)} ms record\n`);
+  process.stdout.write(`# 200,000 unsearched: line ${Buffer.byteLength(lines[0]!)} B, list ${body.length} B in ${rows.length} rows, sweepWords ${Buffer.byteLength(words)} B, gate item ${Buffer.byteLength(d.what)} B, ledger.md +${grown} B, ledger lock held ${held.toFixed(1)} ms of a ${took.toFixed(1)} ms record\n`);
 });
 
 test("records made in a burst share a render of ledger.md, each returning after one that read what it wrote", async () => {
