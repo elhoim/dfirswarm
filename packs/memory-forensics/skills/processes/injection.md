@@ -3,7 +3,7 @@ id: processes/injection
 title: Process anomalies and candidate code modification
 when: You need what was running, or are asked if code was injected into a process.
 needs: []
-card: Process lists, malfind regions and handles are observations, not verdicts. Identify a process by id, creation time and object address. A private executable region is a candidate (JIT and unpackers make them); a handle is a capability, not a read. mem_fs text and export: {"write_values": true}, secret_output job. Does not show: intent, that code ran, or compromise.
+card: Process lists, malfind regions and handles are observations, not verdicts: identify a process by id, creation time and object address. A private executable region is a candidate (JIT and unpackers make them); a handle is a capability, not a read. mem_fs text and export: {"write_values": true}, secret_output job. Does not show: intent, that code ran, or compromise.
 tools: [mem_fs]
 requires_host: []
 ---

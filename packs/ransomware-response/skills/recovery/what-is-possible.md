@@ -5,7 +5,7 @@ when: The organisation needs a defensible recovery position and restoration plan
 needs: []
 tools: [encrypted_survey, file_type, encryption_extent]
 requires_host: []
-card: encryption_extent ({"policy": "sampling", "census": "<census>"}): high_entropy_fraction is a share of the inspected bytes, not a percentage encrypted; compressed formats read high, and an uninspected range says nothing. In encrypted_survey, noncandidate is not unaffected. Report the population tested and its denominator. Permanent loss never rests on entropy or one failed route: name the routes tried. Does not show: what is lost or what survives.
+card: encryption_extent ({"policy": "sampling", "census": "<census>"}): high_entropy_fraction is a share of inspected bytes, not a percentage encrypted; an uninspected range says nothing. In encrypted_survey noncandidate is not unaffected; give the tested population's denominator. Permanent loss never rests on entropy or one failed route: name the routes tried. Does not show: what is lost or survives.
 ---
 
 Use when the organisation needs a defensible recovery position. Not for partial damage, deleted originals or a decryptor test.

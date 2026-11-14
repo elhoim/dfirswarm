@@ -3,7 +3,7 @@ id: aws/cloudtrail
 title: CloudTrail records, coverage and session origin
 when: Supplied AWS CloudTrail exports need event interpretation or identity correlation.
 needs: [logs/what-exists]
-card: cloudtrail_parse {"path": "<CloudTrail files>"}: read status, coverage and pagination_markers first: complete means every record was read, not that the account logged everything. Count distinct event_id. outcome is an error recorded, not an effect; notable names an API. session_origin is a candidate (unresolved picks none), never a person. No digest is validated. Does not show: a person, an effect, unlogged calls.
+card: cloudtrail_parse {"path": "<CloudTrail files>"}: read status, coverage, pagination_markers first: complete means every record was read, not that everything was logged; count distinct event_id. outcome is an error recorded, not an effect, and notable names an API; session_origin is a candidate (unresolved picks none). No digest is validated. Does not show: a person or unlogged calls.
 tools: [cloudtrail_parse]
 mentions: [guardduty_findings]
 requires_host: []

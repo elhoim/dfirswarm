@@ -5,7 +5,7 @@ when: You state what the incident did to services, data and people, beyond a fil
 needs: []
 tools: [ransomware_scope_report]
 requires_host: []
-card: ransomware_scope_report counts what sealed outputs say, by reference: {"censuses": [...], "extents": [...], "recovery_checks": [...], "timelines": [...], "expected_hosts": [...]}, each entry {"host": "<h>", "file": "<path>"}. A host whose scope is unknown (no census, or none read) has no figure, a conflict is not added in, and it states no estate_wide_percentage: do not write one. Name every host in expected_hosts. Mark each figure estimated, tested or confirmed. Does not show: an effect on a service, sound data, or a host not named.
+card: ransomware_scope_report ({"censuses": [{"host": "<h>", "file": "<path>"}], "expected_hosts": ["<h>"]}) counts sealed outputs per host: name every host in expected_hosts. A host of unknown scope has no figure, a conflict is not added in, and no estate_wide_percentage is stated: write none. Mark each figure estimated, tested or confirmed. Does not show: service effects, sound data, or unnamed hosts.
 ---
 
 Use when you state what the incident did to services, data and people. Not for the notification clocks (`reporting/notification-register`) or the report's conclusions (`reporting/conclusions-and-controls`).

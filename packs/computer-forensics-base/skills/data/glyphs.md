@@ -2,7 +2,7 @@
 id: data/glyphs
 title: Exact characters
 when: Text read off a picture must be exact.
-card: glyph_strip: {"image": "<crop of ONE line>", "reading": "<as you read it>", "uncertain": [{"at": 4, "among": "lI"}, {"at": 9, "among": "'`"}]} (positions from 0, spaces counted). A reading with a confusable character (' `, l I 1, O 0) is recorded at MEDIUM confidence as a candidate set (candidate_set_size, candidates_file), never as one string. count is ink runs: touching characters count once (wide), a two-stroke character twice (narrow_pairs); look at strip.png. The reading, OCR text and candidates are files, never in the answer; for a credential run it with secret_output: true.
+card: glyph_strip {"image": "<crop of ONE line>", "reading": "<as you read it>", "uncertain": [{"at": 4, "among": "lI"}]} (positions from 0, spaces counted). With a confusable character (' `, l I 1, O 0) the reading is recorded at MEDIUM confidence as a candidate set (candidates_file). Check count (ink runs) against your reading on strip.png. For a credential run it with secret_output: true.
 needs: []
 tools: [glyph_strip]
 requires_host: [tesseract]

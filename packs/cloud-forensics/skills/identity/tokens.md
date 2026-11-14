@@ -3,7 +3,7 @@ id: identity/tokens
 title: Tokens, grants and evidence of containment
 when: Assessing whether account or application access could continue after a containment action.
 needs: [logs/what-exists]
-card: No containment action certifies that access ended: record each (identity, method, target, result, evidenced time) from ual_parse {"path": "<audit export>"}, signin_analyse or cloud_normalise. Keep apart the action, effective, last-use and end-of-coverage times; unsettled effect is unknown. Never replay, refresh or submit a recovered token. Does not show: that a token was valid, used or stolen, or that nothing survived.
+card: No containment action certifies access ended: record each one's result and evidenced time from ual_parse {"path": "<audit export>"}, signin_analyse or cloud_normalise. Keep the action, effective, last-use and end-of-coverage times apart; an unsettled effect is unknown. Never replay, refresh or submit a recovered token. Does not show: that a token was valid, used or stolen, or nothing survived.
 tools: [ual_parse, signin_analyse, cloud_normalise]
 requires_host: []
 ---

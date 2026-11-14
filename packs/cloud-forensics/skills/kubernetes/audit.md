@@ -3,7 +3,7 @@ id: kubernetes/audit
 title: Kubernetes audit events and stages
 when: Supplied API audit events must say which user did what to which object.
 needs: [logs/what-exists]
-card: cloud_normalise {"path": "<audit events>", "provider": "kubernetes"}: read status first; tenant is empty, so record which cluster and backend the file came from. One row is one stage: rows sharing event_id (the audit id) are one request, not several actions; RequestReceived has outcome unknown. principal is the requester, impersonated_principal who it ran as; source_ip lists the client, then proxies. The audit policy and backend decide what was logged: an absent request shows nothing. An API request to create or exec is not execution on a node. Secret bodies are withheld whole. Does not show: a person, that a request took effect or that anything ran.
+card: cloud_normalise {"path": "<audit events>", "provider": "kubernetes"}: read status first; tenant is empty, so record the cluster and backend. Rows sharing event_id are stages of one request; RequestReceived has outcome unknown. The audit policy and backend decide what was logged: an absent request shows nothing. Does not show: a person, that a request took effect or that anything ran on a node.
 tools: [cloud_normalise]
 requires_host: []
 ---

@@ -3,7 +3,7 @@ id: triage/process-dumps
 title: A process dump (minidump)
 when: One process's dump (a file that begins with MDMP) is in the evidence.
 needs: []
-card: minidump_map {"path": "<dump>"}: summary first (full-memory or partial dump), then modules. An address not in the dump is unknown, not zero. A module with gaps needs {"allow_gaps": true}: state coverage_percent, never hash it against the disk file. A partial find: pass resume_va as va_start. Does not show: malice, or anything before or after the instant.
+card: minidump_map {"path": "<dump>"}: summary first (full-memory or partial dump), then modules; an address not in the dump is unknown, not zero. A module with gaps needs {"allow_gaps": true}: state coverage_percent, never hash it against the disk file. A partial find: pass its resume_va as va_start. Does not show: malice, or anything before or after the instant.
 tools: [minidump_map]
 requires_host: []
 mentions: [cipher_state_scan]

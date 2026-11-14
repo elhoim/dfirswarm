@@ -5,7 +5,7 @@ when: A sample survives, behaviour is attributed, or public decryptors are check
 needs: []
 tools: [ransom_note_scan, ransomware_family_match]
 requires_host: [yara]
-card: ransomware_family_match ({"values_file": "<ransom-note-values.jsonl>", "extensions": [".<ext>"], "note_names": ["<name>"]}) takes the values file of a ransom_note_scan job run with secret_output: true. Its set is a dated snapshot of a few families: no match does not mean an unknown family is absent, and no candidate names an affiliate. Read outcome and contradictions, and confirm a candidate in the sources it cites. Without yara the text rules do not run and the answer is partial. Does not show: the actor, or that a decryptor fits.
+card: ransomware_family_match ({"values_file": "<ransom-note-values.jsonl>", "extensions": [".<ext>"], "note_names": ["<name>"]}) reads a secret_output ransom_note_scan job's values file. Its set is a dated snapshot: no match does not rule out a family, and no candidate names an affiliate. Confirm a candidate in its sources; without yara it is partial. Does not show: the actor, or a decryptor's fit.
 ---
 
 Use only if a sample survives, behaviour is attributed or you check public decryptors. Not for the first classification (`identify/family`); a decryptor's lookup, obtaining and test are `recovery/public-decryptors`.

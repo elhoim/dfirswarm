@@ -3,7 +3,7 @@ id: evidence/boundaries
 title: Planes of virtualization evidence, and handling
 when: You are about to open VM images, hypervisor or backup exports and must scope and protect them.
 needs: []
-card: Hash every descriptor, extent and export before reading (check_inputs), and take the whole set. Never power on, import, consolidate, restore or repair evidence, or start the product against it. A finding on one plane is not one on another. A credential found is an indicator: never use it. Does not show: that an export holds everything the system once did.
+card: Hash every descriptor, extent and export before reading (check_inputs), and take the whole set. Never power on, import, consolidate, restore or repair evidence, start the product against it, or use a credential found in it. A finding on one plane is not one on another. Does not show: that an export holds everything the system once did.
 tools: [check_inputs]
 requires_host: []
 ---

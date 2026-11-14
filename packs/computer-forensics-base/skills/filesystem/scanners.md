@@ -2,7 +2,7 @@
 id: filesystem/scanners
 title: Needle and feature scans over raw bytes
 when: Searching raw bytes for strings or record types.
-card: ioc_scan, chunk_needles ({"path": "<file>", "needles": "a|b"}) read bytes AS STORED: a file that begins like a container (AD1, E01, zip, gzip) answers partial with `container`: write its content out (ad1_extract, archive_extract) and scan that. partial at the clock: call again with {"start": <next_start>}. Read all_results, not the inline page. Context is withheld (write_values only in a secret_output job); never put a secret in a needle.
+card: ioc_scan, chunk_needles ({"path": "<file>", "needles": "a|b"}) read bytes AS STORED: a container file answers partial with `container`: extract it (ad1_extract, archive_extract) and scan that. At the clock, ioc_scan goes on with {"start": <next_start>}. Read all_results, not the inline page. Context is withheld (write_values only in a secret_output job); never put a secret in a needle.
 needs: []
 tools: [ioc_scan, chunk_needles, feature_scan]
 requires_host: [bulk_extractor, icat]

@@ -3,7 +3,7 @@ id: browser/downloads
 title: Download provenance
 when: Source of a file; did it finish?
 needs: [browser/artefacts]
-card: browser_history {"path": "<History>", "query": "chrome_downloads"} (firefox_downloads for places.sqlite): tab_url is the page the download started from, not necessarily its source; state, interrupt reason, referrer and the URL chain are in other columns or tables, read with {"sql": "<SELECT>"}. Compare received with total bytes and the end time: an interrupted transfer is not a completed one. The record, its URL chain, the file and its Zone.Identifier must agree before a provenance sentence; mail clients and archivers write that stream too, and its absence proves little. Does not show: that the file is the one on disk now, or that it was opened or run.
+card: browser_history {"path": "<History>", "query": "chrome_downloads"}: tab_url is where the download started, not necessarily its source; read state, referrer and URL chain with {"sql": "<SELECT>"}. Received below total bytes is no completed transfer. Record, URL chain, file and Zone.Identifier must agree before a provenance claim. Does not show: that it is the file on disk now, or that it ran.
 tools: [browser_history]
 requires_host: []
 ---

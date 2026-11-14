@@ -3,7 +3,7 @@ id: google/workspace
 title: Google Workspace exported audit evidence
 when: Supplied Google Workspace logs concern account access, administration, OAuth grants, Drive or Gmail.
 needs: [logs/what-exists]
-card: signin_analyse {"path": "<login activities>"} reads Workspace login activities only: another application's activity is rejected and counted; read it with cloud_normalise {"path": "<activities>", "provider": "workspace"}. A login row is not every session or token use. pagination_markers make the export partial. A time with no zone fails unless assume_utc is set on the export's documentation. Does not show: a person behind a login, that a grant was used.
+card: signin_analyse {"path": "<login activities>"} reads login activities only, cloud_normalise {"path": "<activities>", "provider": "workspace"} the other applications'. A login row is not every session or token use; pagination_markers make the export partial. A time with no zone fails unless assume_utc is set on the export's documentation. Does not show: a person behind a login, or a grant's use.
 tools: [signin_analyse, cloud_normalise]
 mentions: [cloudtrail_parse]
 requires_host: []

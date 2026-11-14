@@ -3,7 +3,7 @@ id: coverage/delivered-collection
 title: From delivered objects to question coverage
 when: You must say what a delivery covers for a question, before a negative or a count of "all".
 needs: [evidence/coverage]
-card: collection_coverage {"root": "<collection dir>", "questions": [{"id": "q1", "source_paths": ["<glob>"]}]}: patterns are globs, not regexes. census_incomplete, no_file_and_no_record_read and unknown_* states assert no absence: they are gaps. Without verification, integrity is not assessed. Run it as a job with secret_output: true. Does not show: that the source never held the artefact.
+card: collection_coverage {"root": "<collection dir>", "questions": [{"id": "q1", "source_paths": ["<glob>"]}]} runs as a job with secret_output: true; patterns are globs, not regexes. census_incomplete, no_file_and_no_record_read and unknown_* states assert no absence: they are gaps. Without verification, integrity is not assessed. Does not show: that the source never held the artefact.
 tools: [collection_coverage, collection_manifest_verify]
 requires_host: []
 mentions: [KAPE]

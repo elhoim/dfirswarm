@@ -5,7 +5,7 @@ when: Encrypted files and the encryptor or its process dump are held; no public 
 core: 3
 needs: []
 tools: [encrypted_survey, cipher_state_scan, stream_kpa_check, family_decrypt]
-card: Encrypted family, no decryptor. (1) Measure what the encryptor added: encrypted_survey scheme_pointers (overhead against a plaintext twin, tails unique per file). A constant per-file trailer is where the per-file key usually is, plain or masked: test it first. (2) Read the routine to the key's last use: where is it written? (3) cipher_state_scan on the process dump, then stream_kpa_check with {"candidates": values_file} as key and nonce source: one key that opens one file is tried as the rule for all; partial says how far. (4) family_decrypt with the recipe file. No hit is a negative only after the planted control passed. Never quote a key.
+card: First measure what the encryptor added (encrypted_survey scheme_pointers): a constant per-file trailer usually holds the key, plain or masked. cipher_state_scan reads the dump, stream_kpa_check {"key_sources": [{"candidates": "<cipher-state-candidates.jsonl>"}]} tries its keys, and family_decrypt applies the recipe. No hit is a negative only after the planted control passed. Never quote a key.
 ---
 
 Use when encrypted files of one family are held with the encryptor, its process dump or a plaintext twin, and no public decryptor fits. Not for obtaining a public decryptor (`recovery/public-decryptors`) or for how much of a file was encrypted (`encryptor/samples-and-notes`).

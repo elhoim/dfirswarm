@@ -2,7 +2,7 @@
 id: data/video
 title: Every frame of a video
 when: A video shows it briefly, or will not open.
-card: frame_survey: {"video": "<file>"} decodes EVERY frame onto numbered contact sheets and scores each; read `runs` first (a region that changed and changed back with no cut: a caption, an overlay), then take those frames at native size: {"mode": "extract", "first": N, "last": M}. A sampled or capped survey (every, max_frames) is partial: nothing-stands-out is a negative only when complete with every 1. A file that will not open: {"mode": "repair"}; the frames the repaired copy DECODES are the claim; a missing moov is not rebuilt. No ffmpeg in the image: status failed, not an empty video.
+card: frame_survey {"video": "<file>"} scores EVERY frame on numbered sheets: read `runs` first, then those frames at native size: {"mode": "extract", "first": N, "last": M}. every above 1 or max_frames makes it partial: a negative needs complete with every 1. A file that will not open: {"mode": "repair"}; claim only what the copy DECODES. No ffmpeg in the image: status failed, not an empty video.
 needs: []
 tools: [frame_survey]
 requires_host: [ffmpeg, ffprobe]

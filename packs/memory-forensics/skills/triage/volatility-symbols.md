@@ -3,7 +3,7 @@ id: triage/volatility-symbols
 title: The image's symbol tables, and a missing one
 when: The error names a PDB, GUID and age, or you say which kernels the image reads.
 needs: []
-card: A Windows table is matched by PDB name, GUID and age: search vol -q isfinfo for the GUID; a listing without it covers only the directories this vol searched. Tell a missing table from a stale cache, a missing layer, an unsupported format or a missing plugin dependency. Close the lead needs_operator with the PDB, GUID, age and what you checked. isf_intake {"path": "<image>", "debug": "<vmlinux>", "kind": "elf"} makes Linux tables only. Tables stay local-only. Does not show: that one table covers a Windows release.
+card: Windows tables match by PDB name, GUID and age: grep vol -q isfinfo for the GUID; a miss covers only this vol's directories. Name the gap (table, cache, layer, format or dependency); close the lead needs_operator with PDB, GUID, age and your checks. isf_intake {"path": "<image>", "debug": "<vmlinux>", "kind": "elf"} makes Linux tables only. Does not show: that one table covers a Windows release.
 tools: [isf_intake]
 requires_host: [vol]
 ---

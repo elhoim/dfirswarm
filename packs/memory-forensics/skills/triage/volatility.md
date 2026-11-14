@@ -3,7 +3,7 @@ id: triage/volatility
 title: Volatility, offline, with the right symbols
 when: Selecting Volatility plugins, or diagnosing an unmet symbol or translation requirement.
 needs: []
-card: mem_profile first; vol_views {"path": "<image>", "question": "<plugin as vol lists it>", "readiness": "<vol_readiness answer file>"} runs one listed plugin offline, on a ready answer only. An error naming a PDB, GUID and age: keep --offline, fetch nothing. Raw output: {"write_values": true}, secret_output job. Empty output is an absence only after a complete run with the right table. Does not show: that every plugin works.
+card: mem_profile first; vol_views {"path": "<image>", "question": "<plugin as vol lists it>", "readiness": "<vol_readiness answer file>"} runs it offline, on a ready answer; raw output: {"write_values": true}, secret_output job. A PDB, GUID and age in an error: keep --offline, fetch nothing. Empty output is absence only after a complete run with the right table. Does not show: that every plugin works.
 tools: [mem_profile, vol_readiness, vol_views, isf_intake]
 requires_host: [vol]
 ---

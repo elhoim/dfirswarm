@@ -3,7 +3,7 @@ id: m365/unified-audit-log
 title: Microsoft 365 unified audit exports
 when: Supplied Purview audit records need workload-specific interpretation and source-record correlation.
 needs: [logs/what-exists]
-card: ual_parse {"path": "<export>", "notable_only": true}: read status, coverage, pagination_markers first; count distinct Id. audit_data is the evidence. No zone is UTC only with {"assume_utc": true} per the export's documentation. An operation names a record, not an effect: MailItemsAccessed is not reading or exfiltration. Does not show: a human act, completeness of auditing.
+card: ual_parse {"path": "<export>", "notable_only": true}: read status, coverage, pagination_markers first; count distinct Id; audit_data is the evidence. No zone is UTC only with {"assume_utc": true} per the export's documentation. An operation names a record, not an effect: MailItemsAccessed is not reading or exfiltration. Does not show: a human act, completeness of auditing.
 tools: [ual_parse]
 requires_host: []
 ---

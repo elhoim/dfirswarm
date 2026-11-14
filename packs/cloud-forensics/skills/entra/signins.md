@@ -3,7 +3,7 @@ id: entra/signins
 title: Entra sign-ins and their evidential limits
 when: Supplied Entra sign-in exports need authentication, client, policy or account-activity analysis.
 needs: [logs/what-exists]
-card: signin_analyse {"path": "<export>"}, one export a call: read status and pagination_markers first. A time with no zone fails unless {"assume_utc": true} on the export's own say-so. success null (Interrupted, a prompt code) is never a failure. Leads (single_factor_successes, failure_bursts_before_success, impossible_travel) are hypotheses; an empty list excludes nothing. Does not show: a person, token use after the sign-in.
+card: signin_analyse {"path": "<export>"}, one export a call: read status and pagination_markers first; a time with no zone fails unless {"assume_utc": true} on the export's own say-so. success null (Interrupted, a prompt code) is never a failure. Leads (single_factor_successes, impossible_travel) are hypotheses; an empty list excludes nothing. Does not show: a person, token use after the sign-in.
 tools: [signin_analyse, cloud_normalise]
 requires_host: []
 ---

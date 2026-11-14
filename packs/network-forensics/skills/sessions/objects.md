@@ -3,7 +3,7 @@ id: sessions/objects
 title: Exporting protocol objects with their provenance
 when: You export files or other protocol objects from a capture with pcap_extract.
 needs: []
-card: pcap_extract {"path": "<capture>", "out_dir": "<empty dir under $OUT>"} in a job with secret_output: true. Exit 0 means tshark ran: read status, receipt.json and association_pass; zero objects, a failed pass and a negative are three results. An unmapped object in index.tsv makes no claim. A token-shaped name is withheld (the real one is in withheld-names.jsonl). Does not show: that the endpoint received or opened a file.
+card: pcap_extract {"path": "<capture>", "out_dir": "<empty dir under $OUT>"} in a job with secret_output: true. Exit 0 means tshark ran: read status, receipt.json and association_pass; zero objects, a failed pass and a negative differ. An unmapped object in index.tsv makes no claim; a token-shaped name is withheld (see withheld-names.jsonl). Does not show: that the endpoint received or opened a file.
 tools: [pcap_extract]
 requires_host: [tshark, tcpflow]
 ---

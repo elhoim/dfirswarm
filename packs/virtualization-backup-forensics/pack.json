@@ -1,7 +1,7 @@
 {
   "id": "virtualization-backup-forensics",
   "name": "Virtualization and Backup Forensics Pack",
-  "version": "1.7.12",
+  "version": "1.7.13",
   "description": "Method and tooling for the control plane of virtualization and backup: what hypervisor management records and VM configuration files say, whether a snapshot or disk chain is complete and which markers a consolidation or an unclean close may leave, what a backup catalogue, job record and retention setting show, and which recovery points survive. It reads exports and configuration files offline; it never runs hypervisor or backup software, reads no guest content, and supports only the products its tools list.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -25,9 +25,9 @@
       "skills/INDEX.md": "f6761c975bcc503deceeb2ab584adedbd3c423147b52a6ca2f65c8cc1bf643fb",
       "skills/backup/catalogues-and-retention.md": "127fcfa18df8e5f4e36f9a67d316733755620c98233c1221d512ef7b817f7440",
       "skills/backup/deletion-vs-loss.md": "8d91801320e514914a5c1bf581cb619caf39db179a10fab9dbe5bf580cc2cd9a",
-      "skills/backup/product-presets.md": "f81e75b7bf4f15a9fe94b0668326e46a0d23b13c8d978f105781518701645840",
-      "skills/control-plane/chronology.md": "c6912687d402ff3d145333294f83a61e5d6ac60e3b332c89d7588b4283986a27",
-      "skills/evidence/boundaries.md": "c9be07604a841134a71650f3a93a11bbedea027fee4f1f9525689cd6a9a2512e",
+      "skills/backup/product-presets.md": "bff645b731ab2827bd80aad4110c37fc46d3e99a8677e9e2185e8e38967da5e7",
+      "skills/control-plane/chronology.md": "56c42554efa131837353a13f368e7a26c1373b3e8111f67c10d08a52f4883019",
+      "skills/evidence/boundaries.md": "b6e1fe708b2e79156c6bc891d3078285489813640dc9b10fef3e83baeec35cc2",
       "skills/hypervisor/activity.md": "782ddce820023a55082dc57f725092631d73f6f30b3116c3f160684a93565add",
       "skills/hypervisor/inventory.md": "c97440bd2a78a91f79acef2be8d8600e68f4b80afdf3b19265eae418fba3dbdb",
       "skills/recovery/survivability.md": "e77ff1998d58ea831b507b92a6780e8ada66c195ca757e5b402e6cb6d7c1997f",

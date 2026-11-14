@@ -3,7 +3,7 @@ id: control-plane/chronology
 title: Clocks across hypervisor, backup and guest
 when: Events from a hypervisor, a management server, a backup system and a guest must be ordered.
 needs: [timeline/clocks]
-card: backup_audit_normalise keeps the raw time beside time_utc and leaves a time with no zone underived (time_utc null) unless you declare a fixed offset ({"time_zone_offset_minutes": 60}); daylight saving is not accounted for. Read each source's zone and epoch from its export, never assume UTC. Two events closer than the offsets and resolutions allow are not ordered. Use timestamp_decode for a value you identified. Does not show: which person or account acted.
+card: backup_audit_normalise leaves time_utc null for a zoneless time unless you declare a fixed offset ({"time_zone_offset_minutes": 60}), without daylight saving. Read each source's zone and epoch from its export, never assume UTC; timestamp_decode is for a value you identified. Two events closer than the offsets and resolutions allow are not ordered. Does not show: which person or account acted.
 tools: [backup_audit_normalise, timestamp_decode]
 requires_host: []
 mentions: [evtx_query]

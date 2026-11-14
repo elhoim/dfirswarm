@@ -3,7 +3,7 @@ id: registry/devices-dates
 title: Device dates
 when: First, last or recent attachment.
 needs: [registry/devices]
-card: regkv {"hive": "<SYSTEM>", "key": "<the property's own key>"} returns a date property's eight bytes as hex, a FILETIME in little-endian byte order: timestamp_decode with hex: true reads them big-endian and gives a wrong date, so turn the bytes into a little-endian integer, pass the decimal and record both. InstallDate, FirstInstallDate, LastArrivalDate and LastRemovalDate (property IDs 0064 to 0067) are different events. The key's last-write time is no substitute; a device without the properties gives no date: say so, do not estimate one. An absent setupapi.dev.log entry is a rotated log, not a device never installed. Does not show: the connection window.
+card: regkv {"hive": "<SYSTEM>", "key": "<the property's own key>"} gives a date's eight bytes as little-endian hex: timestamp_decode with hex: true reads big-endian, so pass the integer in decimal and record both. InstallDate, FirstInstallDate, LastArrivalDate and LastRemovalDate are different events. Without them there is no date, not even the key's last write. Does not show: the connection window.
 tools: [regkv, timestamp_decode, icat_extract]
 requires_host: []
 ---

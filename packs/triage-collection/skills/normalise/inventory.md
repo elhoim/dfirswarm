@@ -3,7 +3,7 @@ id: normalise/inventory
 title: What the census guarantees and what it does not
 when: You quote a file count or say a file is not in the delivery.
 needs: []
-card: Census: collection_index {"root": "<collection dir>"} without contains (contains limits the inline page and the hashing; complete_index holds every object). With census.errors, census.stopped or status partial, a count is of what was read. An archive, image or capture is one file with an object_class, its contents uncounted. It cannot see what the collector or an extraction left out. Run it as a job with secret_output: true. Does not show: that nothing else was delivered.
+card: For a census run collection_index {"root": "<collection dir>"} without contains, as a secret_output job; complete_index holds every object. With census.errors, census.stopped or status partial, a count is of what was read. An archive, image or capture is one file with an object_class, its contents uncounted. Does not show: what the collector or an extraction left out.
 tools: [collection_index]
 requires_host: []
 ---

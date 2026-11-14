@@ -3,7 +3,7 @@ id: flows/interpret
 title: Flow records, exporter semantics and volume bounds
 when: The evidence is NetFlow, IPFIX, sFlow or cloud flow-log records rather than packets.
 needs: []
-card: flow_reader {"inputs": ["<nfcapd file>"], "declared_format": "<netflow_v5|netflow_v9|ipfix|nfcapd>"} reads nfcapd files only. nfdump exits 0 on a file it cannot read: on a status other than complete, quote problems. counters_exact is never true: a volume is a bound with its sampling rate. A record is not a connection. Does not show: content, delivery, identity, or that a missing record is missing traffic.
+card: flow_reader {"inputs": ["<nfcapd file>"], "declared_format": "<netflow_v5|netflow_v9|ipfix|nfcapd>"} reads nfcapd files only; nfdump exits 0 on a file it cannot read, so quote problems when status is not complete. counters_exact is never true: a volume is a bound with its sampling rate. A record is not a connection. Does not show: content, delivery, identity, or that no record means no traffic.
 tools: [flow_reader, pcap_summary]
 requires_host: [nfdump]
 ---

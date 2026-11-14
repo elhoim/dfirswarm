@@ -5,7 +5,7 @@ when: Recent and pinned items.
 needs: [artifacts/shell]
 tools: [jumplist, lnk_parse, lnk_jumplist]
 requires_host: [olecfexport, lnkinfo, JLECmd, dotnet]
-card: jumplist {"path": "<AutomaticDestinations-ms>"}: a DestList version other than 1, 3 or 4 is refused, a limitation and not an empty list; undecoded_* is no access count. A volume serial or target time is the link's: write_links: true, then lnk_parse. Does not show: an opening event, the target's times, a person.
+card: jumplist {"path": "<AutomaticDestinations-ms>"}: a DestList version other than 1, 3 or 4 is refused, a limit and not an empty list; undecoded_* is no access count. A volume serial or target time is the link's: jumplist write_links: true, then lnk_parse. Does not show: an opening event, the target's times, a person.
 ---
 
 Use when you read Jump List files. Not for the Recent folder's own links (`artifacts/links`) or for execution (`execution/overview`).
