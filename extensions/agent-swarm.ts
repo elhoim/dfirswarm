@@ -221,7 +221,7 @@ import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
 import { cropPng, pngForModel } from "./png-scale.ts";
 import { coerceArgs } from "./forged-args.ts";
-import { sightingDigest } from "./sighting.ts";
+import { sightedFormats, sightedLine, sightingDigest, type OpenQuestion } from "./sighting.ts";
 
 /** How long a read made before a model call may take before the call goes out on the last known value. */
 const PRECALL_DEADLINE_MS = 1500;
@@ -699,6 +699,18 @@ export default function (pi: ExtensionAPI) {
   const jobHinted = new Set<string>();
   /** The sensitive jobs this seat was told about already (docs/adr/0018): the note on a read is once per seat and job. */
   const toldSensitive = new Set<string>();
+  /** When this seat was last told that a result held an open question's asked format, by question (B5): again only after FORMAT_TOLD_MS. */
+  const toldFormat = new Map<string, number>();
+  const FORMAT_TOLD_MS = 30 * 60_000;
+  /** The open questions (in scope, not withdrawn, no standing answer) and their words, read at most once a minute. */
+  let openQuestionsRead: { at: number; list: OpenQuestion[] } | null = null;
+  async function openQuestionsNow(cwd: string): Promise<OpenQuestion[]> {
+    if (openQuestionsRead && Date.now() - openQuestionsRead.at < 60_000) return openQuestionsRead.list;
+    const v = (await questionsView(ctxFrom(cwd, agentId), { view: "list" })) as { questions?: Array<{ section?: unknown; text?: unknown; scope?: unknown; answer?: unknown; withdrawn?: unknown }> };
+    const list = (v.questions ?? []).filter((q) => q.scope === "in_scope" && !q.withdrawn && !q.answer && typeof q.text === "string" && typeof q.section === "string").map((q) => ({ section: q.section as string, text: q.text as string }));
+    openQuestionsRead = { at: Date.now(), list };
+    return list;
+  }
   let jobsOffered: boolean | undefined;
   /** When this agent was steered for its own cap, if it was. */
   let agentCapSteeredAt: number | null = null;
@@ -2255,6 +2267,22 @@ export default function (pi: ExtensionAPI) {
         for (const job of fresh) toldSensitive.add(job);
         content = [...(Array.isArray(content) ? content : []), { type: "text", text: SENSITIVE_READ_NOTE }];
         contentChanged = true;
+      }
+    }
+    // A result read from the evidence (a job's answer, a file, a shell's output, a pack or forged tool's) that holds a
+    // string in an open question's asked format (B5): the seat is told in one line which question it may answer, once a
+    // question in FORMAT_TOLD_MS. The line names the question and its format, never the value, and so does the trace row.
+    if (agentId && !isError && Array.isArray(content) && (["job_run", "job_status", "read", "bash", "powershell", "grep"].includes(name) || loadedTools.has(name))) {
+      const text = content.map((p) => (p?.type === "text" && typeof p.text === "string" ? p.text : "")).join("\n");
+      const now = Date.now();
+      const open = text ? await openQuestionsNow(ctx.cwd).catch(() => [] as OpenQuestion[]) : [];
+      const hits = sightedFormats(text, open).filter((h) => now - (toldFormat.get(h.section) ?? 0) >= FORMAT_TOLD_MS);
+      const line = sightedLine(hits);
+      if (line) {
+        for (const h of hits) toldFormat.set(h.section, now);
+        content = [...content, { type: "text", text: line }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "format_sighted", { tool: name }, { ok: true, questions: hits.map((h) => h.section) }).catch(() => undefined);
       }
     }
     // Pi takes a tool's failure only from a throw: an `isError: true` in what

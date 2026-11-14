@@ -197,3 +197,65 @@ test("friction: the gap before a model call counts only requests that follow a t
   assert.deepEqual(f.model_gap, { source: "model-gateway", calls: 1, median_s: 3, p90_s: 3, max_s: 3 }, "the third request followed only the model's own thinking row");
   assert.equal(frictionMetrics([], []).model_gap.source, null);
 });
+
+test("a result that holds a string in an open question's asked format is said in one line, by question and format, never by value (B5)", async () => {
+  const S = await import("../extensions/sighting.ts");
+  const open = [
+    { section: "question:5", text: "Which address and port did the beacon call? Format: *ip:port*" },
+    { section: "question:4", text: "What is the name and hash of the dropped file? Format: *Name_md5(file)*" },
+    { section: "question:9", text: "When was the account made? Format: *DD-MM-YYYY-HH-MM*" },
+    { section: "question:1", text: "What is the hidden text? Format: *md5(text)*" },
+    { section: "question:3", text: "What is the PC name and time zone? Format: *PC-name_Time-Zone-info*" },
+  ];
+  const output = ["tcp  ESTABLISHED  192.0.2.7:8080  pid 4012", "dropper.exe_5f4dcc3b5aa765d61d8327deb882cf99", "created 03-02-2024-11-07", "a digest alone 7c6a180b36896a0a8c02787eeafb0e4c", "HOST_Some Zone"].join("\n");
+  const hits = S.sightedFormats(output, open);
+  assert.deepEqual(hits, [{ section: "question:5", format: "ip:port" }, { section: "question:4", format: "Name_md5(file)" }, { section: "question:9", format: "DD-MM-YYYY-HH-MM" }], "a lone digest or free words are in every listing, and are not said");
+  const line = S.sightedLine(hits)!;
+  assert.match(line, /^This result holds a string in the form open questions ask for: question:5 \(ip:port\), question:4 \(Name_md5\(file\)\), question:9 \(DD-MM-YYYY-HH-MM\), with no answer yet\. If it is the answer, record it: .*as a finding with answers: \[5, 4, 9\].*record_candidate: question, value, ref/);
+  for (const value of ["192.0.2.7", "8080", "5f4dcc3b", "dropper.exe", "03-02-2024"]) assert.ok(!line.includes(value), `the line holds no value (${value})`);
+  assert.deepEqual(S.sightedFormats("listening on 192.0.2.7 port 8080; 1192.0.2.7:80801", open.slice(0, 1)), [], "not in the form, or inside a longer number");
+  assert.equal(S.sightedLine([]), null);
+  assert.equal(S.formatScanner("Format: *md5(text)*"), null);
+  assert.equal(S.formatScanner("no format here"), null);
+});
+
+test("through the extension: a shell result in an open question's format gets the line once, and the trace row names the question only", async (t) => {
+  const { access, mkdtemp, readFile } = await import("node:fs/promises");
+  const REPO = join(import.meta.dirname, "..");
+  const loader = join(process.env.PI_PACKAGE_DIR ?? join(REPO, "node_modules", "@earendil-works", "pi-coding-agent"), "dist", "core", "extensions", "loader.js");
+  if (!(await access(loader).then(() => true, () => false))) {
+    t.skip("Pi package not found (set PI_PACKAGE_DIR, or npm install)");
+    return;
+  }
+  const P = await import("../extensions/protocol.ts");
+  const S = await mkdtemp(join(tmpdir(), "format-sighted-"));
+  const goal = ["## Goal", "", "Examine the host.", "", "### Questions", "", "1. Which address and port did the beacon call? Format: *ip:port*", "2. What is the PC name? Format: *PC-name_Time-Zone-info*", "", "## Definition of done", "", "d", "", "## Checks", "", '- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2`', ""].join("\n");
+  await P.initSandbox(S, { reset: true, agentIds: ["agent00"], goal });
+  const keep = process.env.AGENT_ID;
+  process.env.AGENT_ID = "agent00";
+  try {
+    const { loadExtensions } = (await import(loader)) as { loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: Array<{ handlers: Map<string, Array<(e: unknown, c: unknown) => Promise<unknown>>> }>; errors: unknown[] }> };
+    const out = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], S);
+    assert.deepEqual(out.errors, []);
+    const handlers = out.extensions[0]!.handlers;
+    const ctx = { cwd: S, hasUI: false, ui: {}, abort: () => undefined, shutdown: () => undefined, sessionManager: { getEntries: () => [], buildContextEntries: () => [], getBranch: () => [] } };
+    const fire = async (payload: Record<string, unknown>) => {
+      const outs: unknown[] = [];
+      for (const h of handlers.get("tool_result") ?? []) outs.push(await h({ type: "tool_result", ...payload }, ctx));
+      return (outs.find((o) => o && typeof o === "object" && "content" in (o as object)) as { content: Array<{ text?: string }> } | undefined)?.content ?? [];
+    };
+    const result = { toolName: "bash", toolCallId: "c1", input: { command: "netstat -an" }, isError: false, content: [{ type: "text", text: "tcp ESTABLISHED 192.0.2.7:8080" }] };
+    const told = (await fire(result)).map((c) => c.text ?? "").join("\n");
+    assert.match(told, /This result holds a string in the form an open question asks for: question:1 \(ip:port\), with no answer yet/);
+    // Once a question: the next result in the same form says nothing more.
+    assert.ok(!(await fire({ ...result, toolCallId: "c2" })).map((c) => c.text ?? "").join("\n").includes("This result holds"));
+    const rows = (await readFile(join(S, "traces", "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { tool: string; args: unknown; result: Record<string, unknown> });
+    const sighted = rows.filter((r) => r.tool === "format_sighted");
+    assert.equal(sighted.length, 1);
+    assert.deepEqual(sighted[0]!.result.questions, ["question:1"]);
+    assert.ok(!JSON.stringify(sighted[0]).includes("192.0.2.7"), "the row holds no value");
+  } finally {
+    if (keep === undefined) delete process.env.AGENT_ID;
+    else process.env.AGENT_ID = keep;
+  }
+});
