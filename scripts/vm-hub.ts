@@ -94,7 +94,7 @@ import { similarView } from "./job-reuse.ts";
 import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
 import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
-import { commandNames, freshCoverage, libraryHint, shortHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
+import { commandNames, freshCoverage, libraryHint, seatLibraryHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
 import { boundRpcAnswer } from "../extensions/reply-bound.ts";
 import { jobsListing, storeFind } from "./store-find.ts";
 import { loopMonitor, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
@@ -107,15 +107,13 @@ import { ACCESS_RULES, apiPageHit, classifyTraceRow, type AccessHit } from "./se
  * run's library whose manifest `use` (or description) matches the files the
  * job declared, the ones its command already runs left out (library-hint.ts).
  */
-/** The tools each seat was last told of, by run and seat: a tool is not named to the same seat again for a while (shortHint). */
+/** The overlap items each seat was last told of, by run and seat (freshCoverage). */
 const hintSeen = new Map<string, Map<string, number>>();
-async function admissionHint(S: string, spec: JobSpec, who = ""): Promise<ShortHint | null> {
+/** A tool is named to a seat once a compaction cycle, and what was named is kept in the hub's directory (seatLibraryHint). */
+async function admissionHint(S: string, spec: JobSpec, who = "", dir?: string): Promise<ShortHint | null> {
   const r = await resolveScope(S, spec.inputs, {});
   if (!r.ok) return null;
-  const key = `${S}\u0000${who}`;
-  const seen = hintSeen.get(key) ?? new Map<string, number>();
-  hintSeen.set(key, seen);
-  return shortHint(await libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) }), seen);
+  return seatLibraryHint(S, who, await libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) }), { dir });
 }
 
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
@@ -955,7 +953,7 @@ export function boardTable(hub: {
       const coverage = freshCoverage(coverageAll as CoverageHint | null, coverageSeen);
       // Library visibility (docs/adr/0016): a command job that declared what it
       // reads is told which library tools say they read that kind of file. A hint.
-      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec, who).catch(() => null) : null;
+      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec, who, hub.dir).catch(() => null) : null;
       return {
         ok: true,
         job: await shown(who, "jobSubmit", r.job),
