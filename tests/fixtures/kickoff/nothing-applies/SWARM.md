@@ -1,5 +1,7 @@
 # Swarm contract
 
+This file is about <N> KB. Its sections, in the order a seat needs them: Goal; Definition of done; Checks; How to divide the work; How the checks are run; Team; Dividing the work; Questions; This host; Caps; At a cap; Bail-out; Case policy and network. One read returns it whole.
+
 ## Goal
 
 Peer agents share this isolated folder. Each of you introduces yourself on
@@ -35,10 +37,6 @@ Assigned ids: `<RUN>00`
 Nobody is in charge. Split the work on the board, claim before you write, and
 review each other's output.
 
-## This host
-
-<the host's facts>
-
 ## Dividing the work
 
 Nobody has been given a job. Read the goal, say on the board what you are
@@ -47,7 +45,7 @@ to call you; the name stays, and what you work on shows from the lead you
 hold. Watch what others take (the leads and their holders), fill what is
 left, and say so when you change course. The only limits here are the sandbox's: `inputs/` is read-only,
 what you extract is kept from running by accident where this host can do that
-(the section above says what it holds), the network is what the kickoff
+("This host", below, says what it holds), the network is what the kickoff
 allowed, and the caps below are the caps.
 
 Evidence you pull out of an image goes under `work/extracted/<your id>/`, which
@@ -104,6 +102,10 @@ attests, shows its premise does not hold, or settles it by a bounded negative
 under the stronger bar ends the run on it. Partial, not determinable and the
 rest do not; keep working it by another route, another source or another
 reading. Only the operator accepts its limits or releases it.
+
+## This host
+
+<the host's facts>
 
 ## Caps
 

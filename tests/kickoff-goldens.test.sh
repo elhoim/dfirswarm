@@ -80,6 +80,8 @@ t = re.sub(r'"(guard|enforce)": "[^"]*"', r'"\1": "<HOST>"', t)
 # SWARM.md: the inputs' guard sentence, and the host's own section.
 t = re.sub(r"(`edit`/`write`/`claim_file` refuse it, ).*?(, and every attempt is announced)", r"\1<the host's guard>\2", t, flags=re.S)
 t = re.sub(r"## This host\n\n.*?(?=\n## |\Z)", "## This host\n\n<the host's facts>\n", t, flags=re.S)
+# SWARM.md's first line: its size, which the paths above make the host's.
+t = re.sub(r"^This file is about \d+ KB\.", "This file is about <N> KB.", t, flags=re.M)
 open(path, "w", encoding="utf-8").write(t)
 PY
 }

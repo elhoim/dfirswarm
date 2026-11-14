@@ -199,3 +199,21 @@ set -e
 [[ "$rc" -eq 3 ]] || fail "--required with an unmet capability exits 3, got $rc: $(cat "$TMP/req.err")"
 [[ "$rc2" -eq 2 ]] && grep -q "unknown capability teleport" "$TMP/unk.err" || fail "an unknown capability is refused (exit 2): $rc2 $(cat "$TMP/unk.err")"
 pass "required capabilities: met by a program that does the work; a failed probe and an absent program are said; --required blocks"
+
+# The way out the message names is printed as written: the command in
+# backticks once ran as a command substitution inside the double quotes,
+# printed a syntax error and left "supply a program right after the start
+# with , which tests it".
+want='supply a program right after the start with `swarm.sh tool-supply <id> add PATH --provides <capability>`, which tests it against a known answer'
+[[ "$err" == *"$want"* ]] || fail "the WARN does not name the tool-supply command whole: $err"
+printf '{"image": "x", "programs": []}' > "$TMP/image-none.json"
+set +e
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires qr-decode --required --image "$TMP/image-none.json" >/dev/null 2>"$TMP/cap.err"; rc=$?
+set -e
+[[ "$rc" -eq 3 ]] || fail "an unmet capability with --required in an image exits 3, got $rc: $(cat "$TMP/cap.err")"
+grep -qF "BLOCKER: --toolbox-required and the case requires what the image cannot do" "$TMP/cap.err" || fail "no capability BLOCKER: $(cat "$TMP/cap.err")"
+grep -qF "$want" "$TMP/cap.err" || fail "the BLOCKER does not name the tool-supply command whole: $(cat "$TMP/cap.err")"
+for f in "$err" "$(cat "$TMP/cap.err")"; do
+  [[ "$f" == *"with , which"* || "$f" == *"syntax error"* || "$f" == *"command not found"* || "$f" == *"No such file"* ]] && fail "the message ran its own example: $f"
+done
+pass "the unmet-capability WARN and BLOCKER print the tool-supply command as written"
