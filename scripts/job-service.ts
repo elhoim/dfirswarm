@@ -48,6 +48,7 @@ import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sa
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { argRefsWords, resolveToolArgs, type ArgRef } from "./tool-arg-refs.ts";
+import { elsewhereWords } from "./store-find.ts";
 import { EACH_SCRIPT, eachOf, eachPlan, eachWords, type EachSpec } from "./tool-each.ts";
 import { dumpMembers, dumpReaders, dumpsPost, membersTsv } from "./dump-members.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, SAME_AS_SHOWN, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
@@ -1484,7 +1485,11 @@ export class JobService {
       if (!checked.ok) return { reason: checked.reason };
       // A reference given as an argument is the path it names; one that names nothing is refused here, with the form that works.
       const refs = resolveToolArgs(this.S, String(raw.tool), args as Record<string, unknown>, (id) => this.jobs.get(id)?.state);
-      if (!refs.ok) return { reason: refs.reason };
+      if (!refs.ok) {
+        // A path that is not in the job named: which job holds it, the nearest names in that one, and store_find (D1).
+        const more = refs.missing ? await elsewhereWords(this.S, refs.missing.kind, refs.missing.id, refs.missing.rel).catch(() => "") : "";
+        return { reason: more ? `${refs.reason}; ${more}` : refs.reason };
+      }
       // A declared scope is given what the arguments name: the tool could not read it otherwise.
       if (declared.kind === "declared") for (const r of refs.resolved) if (!base.inputs.some((x) => x === r.object || x.startsWith(`${r.object}/`) || x === r.from) && base.inputs.length < SCOPE_DECLARED_MAX) base.inputs.push(r.from);
       // A directory given to a one-file reader: the tool runs once per file it reads there, or the call is refused with what to do.

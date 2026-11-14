@@ -14,7 +14,7 @@
  */
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { manifestOf, storePaths } from "./evidence-store.ts";
+import { manifestFile, manifestNearNames, manifestOf, storePaths } from "./evidence-store.ts";
 
 export type Found = { ref: string; bytes: number; sha256: string };
 export type FindResult = { ok: true; matched: number; returned: number; hits: Found[]; searched: { jobs: number; imports: number; files: number }; complete: boolean; note?: string } | { ok: false; reason: string };
@@ -68,6 +68,45 @@ export async function storeFind(sandbox: string, q: { name?: string; sha256?: st
       "This finds files by name or by content hash, from the manifests. To search inside the files for text, run a job: " +
       `job_run(command: "grep -rlaF -- '<text>' store/jobs/<id>/out | head -100", inputs: ["job:<id>"], timeout_seconds: 900) over the job that holds them, not a grep in your own shell.`,
   };
+}
+
+/** The most other jobs and imports a refusal names as holding the path. */
+export const ELSEWHERE_SHOWN = 3;
+
+/**
+ * What a refusal of a path that is not in the job or import a seat named
+ * says (IMPROVEMENT-PLAN-2 D1): the other jobs and imports whose sealed
+ * output holds that path (asked of each manifest's index, a bisection each,
+ * never a grep), the nearest names in the one it named, and store_find for
+ * the name anywhere. A seat that cited a dump in the wrong job was told only
+ * "not in job X's manifest", and one run recorded an 894 MB dump as
+ * truncated by the case. Words to follow a refusal's own, "" when there is
+ * nothing to add (a path that holds no name).
+ */
+export async function elsewhereWords(sandbox: string, kind: "job" | "import", id: string, rel: string): Promise<string> {
+  const path = rel.replace(/^\/+|\/+$/g, "");
+  if (!path) return "";
+  const P = storePaths(sandbox);
+  const holders: string[] = [];
+  for (const [k, dir] of [["job", P.jobs], ["import", P.imports]] as const) {
+    const ids = (await readdir(dir).catch(() => [] as string[])).filter((x) => !(k === kind && x === id) && !x.startsWith(".")).sort();
+    for (const other of ids) {
+      if (holders.length > ELSEWHERE_SHOWN) break;
+      const manifestPath = join(dir, other, "manifest.json");
+      const view = await manifestOf(manifestPath).catch(() => null);
+      if (!view) continue;
+      const file = await manifestFile(manifestPath, view, [path]).catch(() => null);
+      if (file) holders.push(`${k} ${other} (${k}:${other}/${file.path})`);
+      else if (await view.dir(path).catch(() => null)) holders.push(`${k} ${other} (${k}:${other}/${path}/, a directory)`);
+    }
+  }
+  const nearest = await manifestNearNames(join(kind === "job" ? P.jobs : P.imports, id, "manifest.json"), path, 3).catch(() => [] as string[]);
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const words: string[] = [];
+  if (holders.length) words.push(`${path} is in ${holders.slice(0, ELSEWHERE_SHOWN).join(", ")}${holders.length > ELSEWHERE_SHOWN ? " and more" : ""}: name ${holders.length === 1 ? "that" : "the one you meant"} instead`);
+  if (nearest.length) words.push(`the nearest in ${kind} ${id}: ${nearest.map((p) => `${kind}:${id}/${p}`).join(", ")}`);
+  words.push(`store_find(name: ${JSON.stringify(name)}) finds a file by its name in every job's output and every import`);
+  return words.join("; ");
 }
 
 export type JobRow = { job: string; state: string; status?: string; what: string; by: string; lead?: string; waiting?: string; files?: number; bytes?: number };

@@ -40,6 +40,7 @@ import { constants, statfsSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { manifestFile, manifestOf, readManifest, storePaths } from "./evidence-store.ts";
+import { elsewhereWords } from "./store-find.ts";
 import type { Mount } from "./vm.ts";
 
 /** declared: the worker sees what the job named; all: everything, said; default-all: everything, because nothing was said. */
@@ -381,7 +382,11 @@ async function resolveObjects(S: string, declared: string[], o: { collections?: 
         continue;
       }
       const inside = await found.dir(rel);
-      if (!inside) throw new ScopeError(`${at.ref}: ${rel} is not in ${kind === "jobs" ? "job" : "import"} ${id}'s manifest`);
+      if (!inside) {
+        // Which job holds it, if one does, the nearest names in this one, and store_find (D1).
+        const more = await elsewhereWords(S, kind === "jobs" ? "job" : "import", id, rel).catch(() => "");
+        throw new ScopeError(`${at.ref}: ${rel} is not in ${kind === "jobs" ? "job" : "import"} ${id}'s manifest${more ? `; ${more}` : ""}`);
+      }
       add({ ref: at.ref, path: `${base}/out/${rel}`, area: "store", shape: "dir", from: w.from, files: inside.files, bytes: inside.bytes });
       continue;
     }

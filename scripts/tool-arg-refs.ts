@@ -19,7 +19,12 @@ import { join, normalize } from "node:path";
 /** One argument that was a reference, where it was, and what it became. */
 export type ArgRef = { at: string; from: string; to: string; object: string };
 
-export type ArgRefsResult = { ok: true; args: Record<string, unknown>; resolved: ArgRef[] } | { ok: false; reason: string };
+/**
+ * A refusal; `missing` names the sealed job or import and the path in it that is not there, for the
+ * caller to say where that path is instead (store-find.ts elsewhereWords: the job that holds it, the
+ * nearest names, store_find), which needs the store's indexes and so is not done here.
+ */
+export type ArgRefsResult = { ok: true; args: Record<string, unknown>; resolved: ArgRef[] } | { ok: false; reason: string; missing?: { kind: "job" | "import"; id: string; rel: string } };
 
 /** What the service knows of a job: its state, or undefined when the run has no such job. */
 export type JobStateOf = (id: string) => string | undefined;
@@ -58,7 +63,9 @@ function shape(abs: string): "file" | "dir" | null {
 export function resolveToolArgs(S: string, tool: string, args: Record<string, unknown>, jobState: JobStateOf): ArgRefsResult {
   const resolved: ArgRef[] = [];
   let refusal: string | null = null;
-  const refuse = (at: string, text: string): string => {
+  let missing: { kind: "job" | "import"; id: string; rel: string } | undefined;
+  const refuse = (at: string, text: string, what?: { kind: "job" | "import"; id: string; rel: string }): string => {
+    if (refusal === null && what) missing = what;
     refusal ??= `tool ${tool}: ${at} ${text}`;
     return "";
   };
@@ -80,7 +87,7 @@ export function resolveToolArgs(S: string, tool: string, args: Record<string, un
       }
       const base = j ? `store/jobs/${id}/out` : `store/imports/${id}/out`;
       const path = rel ? `${base}/${rel}` : base;
-      if (!shape(join(S, path))) return refuse(at, `names ${kind}:${id}${rel ? `/${rel}` : ""}, and ${kind} ${id} has no ${rel || "output"} (${j ? `job_status ${id}` : "the board's post of it"} lists its files; a name is written as the listing has it)`);
+      if (!shape(join(S, path))) return refuse(at, `names ${kind}:${id}${rel ? `/${rel}` : ""}, and ${kind} ${id} has no ${rel || "output"} (${j ? `job_status ${id}` : "the board's post of it"} lists its files; a name is written as the listing has it)`, rel ? { kind, id, rel } : undefined);
       resolved.push({ at, from: v, to: path, object: `${kind}:${id}` });
       return path;
     }
@@ -103,7 +110,7 @@ export function resolveToolArgs(S: string, tool: string, args: Record<string, un
     return v;
   };
   const out = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, walk(v, k, 0)]));
-  if (refusal) return { ok: false, reason: refusal };
+  if (refusal) return { ok: false, reason: refusal, ...(missing ? { missing } : {}) };
   return { ok: true, args: out, resolved };
 }
 
