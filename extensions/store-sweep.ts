@@ -1193,6 +1193,40 @@ const sweepFiles = new Map<string, SweepFile>();
 const sweepLoads = new Map<string, Promise<SweepFile>>();
 const emptySweepFile = (): SweepFile => ({ cached: false, dev: 0, ino: 0, size: 0, mtimeMs: 0, parsedTo: 0, lines: [], head: "genesis", legacy: new Map() });
 
+/** The bytes of each held line's written form, and of the file of hits read back into it (hydrateHits): measured once per line. */
+const heldLineBytes = new WeakMap<object, number>();
+const hydratedBytes = new WeakMap<object, number>();
+
+/**
+ * What this process holds of the store sweeps (the hub's health line names
+ * it, Plan 2 G2): the runs whose sweeps it keeps, their lines, the bytes of
+ * the lines as written, and the rows and bytes of the lists of hits read
+ * back from their files.
+ */
+export function sweepsHeld(): { runs: number; lines: number; bytes: number; hit_rows: number; hit_bytes: number } {
+  let lines = 0;
+  let bytes = 0;
+  let hitRows = 0;
+  let hitBytes = 0;
+  for (const f of sweepFiles.values()) {
+    for (const l of f.lines) {
+      lines += 1;
+      let b = heldLineBytes.get(l);
+      if (b === undefined) {
+        b = Buffer.byteLength(JSON.stringify(writtenForms.get(l) ?? l));
+        heldLineBytes.set(l, b);
+      }
+      bytes += b;
+      const h = hydratedBytes.get(l);
+      if (h !== undefined) {
+        hitBytes += h;
+        hitRows += listsOf(l).reduce((n, [, xs]) => n + xs.length, 0);
+      }
+    }
+  }
+  return { runs: sweepFiles.size, lines, bytes, hit_rows: hitRows, hit_bytes: hitBytes };
+}
+
 /** The lines between two offsets of the file, each parsed as it completes; a torn line is the chain check's to name. */
 async function parseSweepRange(file: string, start: number, end: number, into: SweepFile): Promise<void> {
   if (end <= start) return;
@@ -1662,10 +1696,12 @@ export async function hydrateHits<L extends object>(root: string, written: L): P
   const got: Record<HitListName, SweepHit[]> = { hits: [], named_hits: [], echoes: [] };
   const name = SWEEP_SIDE_FILE.exec(all.file.path);
   let whole = Boolean(name && name[1] === "hits" && name[2] === all.file.sha256);
+  let fileBytes = 0;
   if (whole) {
     try {
       const hash = createHash("sha256");
       let rows = 0;
+      let read = 0;
       let rest = Buffer.alloc(0);
       const take = (b: Buffer) => {
         if (!b.length) return;
@@ -1677,6 +1713,7 @@ export async function hydrateHits<L extends object>(root: string, written: L): P
       for await (const raw of createReadStream(join(root, all.file.path), { highWaterMark: 1024 * 1024 })) {
         const chunk = raw as Buffer;
         hash.update(chunk);
+        read += chunk.length;
         const buf = rest.length ? Buffer.concat([rest, chunk]) : chunk;
         let from = 0;
         for (let nl = buf.indexOf(0x0a, from); nl >= 0; nl = buf.indexOf(0x0a, from)) {
@@ -1687,12 +1724,16 @@ export async function hydrateHits<L extends object>(root: string, written: L): P
       }
       take(rest);
       whole = rows === all.file.rows && hash.digest("hex") === all.file.sha256;
+      fileBytes = read;
     } catch {
       whole = false;
     }
   }
   let held: L;
-  if (whole) held = { ...written, ...Object.fromEntries(listsOf(written).map(([k]) => [k, got[k]])) };
+  if (whole) {
+    held = { ...written, ...Object.fromEntries(listsOf(written).map(([k]) => [k, got[k]])) };
+    hydratedBytes.set(held, fileBytes);
+  }
   else {
     const records = (written as { records?: Array<{ seq: number }> }).records;
     const terms = (written as { terms?: string[] }).terms ?? [];

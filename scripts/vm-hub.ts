@@ -75,7 +75,7 @@
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import v8 from "node:v8";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -96,8 +96,9 @@ import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
 import { commandNames, freshCoverage, libraryHint, shortHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
 import { boundRpcAnswer } from "../extensions/reply-bound.ts";
+import { sweepsHeld } from "../extensions/store-sweep.ts";
 import { jobsListing, storeFind } from "./store-find.ts";
-import { loopMonitor, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
+import { diskSpeed, healthEveryMs, loopMonitor, memoryPressure, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
 import { sensitiveIndex } from "./output-hygiene.ts";
 import { ACCESS_RULES, apiPageHit, classifyTraceRow, type AccessHit } from "./sensitive-access.ts";
 
@@ -1423,32 +1424,12 @@ export class Hub {
     this.memoryTimer.unref();
     // Each minute, what the hub and the host look like, on the trace (hub-health.ts); and one heap snapshot while it can still be written.
     const loop = loopMonitor();
+    let sampling = false;
     this.healthTimer = setInterval(() => {
-      const h = sampleHealth(loop.read(), { transfers: this.transfers.size, seats_linked: [...this.status.values()].filter((a) => a.connected).length, queued_prompts: [...this.queued.values()].reduce((n, q) => n + q.length, 0), jobs: this.jobService?.jobs.size ?? 0 });
-      void this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
-      if (snapshotDue(h, this.snapshotTaken)) {
-        this.snapshotTaken = true;
-        try {
-          const file = v8.writeHeapSnapshot(join(this.cfg.dir, `Heap.at-${Math.round(snapshotAt() * 100)}pct.${process.pid}.heapsnapshot`));
-          void this.event("hub_heap_snapshot", {}, { ok: true, file, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb }).catch(() => undefined);
-          this.log(`memory: heap snapshot written at ${h.heap_used_mb} of ${h.heap_limit_mb} MB: ${file}`);
-        } catch (err) {
-          void this.event("hub_heap_snapshot", {}, { ok: false, reason: (err as Error).message }).catch(() => undefined);
-        }
-      }
-      // Past the recycle line, at a quiet moment, a supervised hub ends so that its keeper starts it again with --resume.
-      const busyJobs = [...(this.jobService?.jobs.values() ?? [])].filter((j) => j.state === "running" || j.state === "fenced" || j.state === "finished").length;
-      const calls = [...this.inFlight.values()].reduce((a, n) => a + n, 0);
-      const recycle = recycleDue(h, { supervised: process.env.SWARM_HUB_SUPERVISED === "1", callsInFlight: calls, jobsBusy: busyJobs });
-      if (recycle.due && !this.recycling) {
-        this.recycling = true;
-        this.log(`memory: ending for a restart by the keeper: ${recycle.why}`);
-        void this.event("hub_recycled", {}, { ok: true, why: recycle.why, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb })
-          .catch(() => undefined)
-          .then(() => this.flushRefusals().catch(() => undefined))
-          .then(() => process.exit(75));
-      }
-    }, 60_000);
+      if (sampling) return;
+      sampling = true;
+      void this.healthTick(loop).finally(() => (sampling = false));
+    }, healthEveryMs());
     this.healthTimer.unref();
     // A Unix socket path the kernel takes is 103 bytes and its NUL (104 on
     // macOS): past it `listen` fails with a bare EINVAL, which said nothing
@@ -2670,6 +2651,70 @@ export class Hub {
 
   statusSnapshot(): Record<string, AgentState> {
     return Object.fromEntries(this.status);
+  }
+
+  /**
+   * The sizes of what the hub holds (Plan 2, G2): each large structure's
+   * count and, where it holds bytes, its bytes. A health line that counted
+   * only transfers and jobs could not say which structure filled a heap.
+   */
+  holdsNow(): Record<string, number> {
+    let transferBytes = 0;
+    for (const t of this.transfers.values()) transferBytes += t.data?.length ?? t.got;
+    let promptBytes = 0;
+    let prompts = 0;
+    for (const q of this.queued.values()) {
+      prompts += q.length;
+      for (const p of q) promptBytes += Buffer.byteLength(String((p as { text?: unknown }).text ?? ""));
+    }
+    const sweeps = sweepsHeld();
+    const kept = P.appendOnlyHeldSize();
+    return {
+      seats_linked: [...this.status.values()].filter((a) => a.connected).length,
+      calls_in_flight: [...this.inFlight.values()].reduce((a, n) => a + n, 0),
+      call_args_bytes: [...this.held.values()].reduce((a, n) => a + n, 0),
+      transfers: this.transfers.size,
+      transfers_bytes: transferBytes,
+      replies_kept: this.replies.size,
+      queued_prompts: prompts,
+      queued_prompts_bytes: promptBytes,
+      sweeps_lines: sweeps.lines,
+      sweeps_bytes: sweeps.bytes,
+      sweeps_hit_rows: sweeps.hit_rows,
+      sweeps_hit_bytes: sweeps.hit_bytes,
+      ledger_kept_bytes: kept.bytes,
+      jobs: this.jobService?.jobs.size ?? 0,
+    };
+  }
+
+  /** One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at a quiet moment. */
+  async healthTick(loop: { read(): { p50: number; p99: number; max: number } }): Promise<void> {
+    const [pressure, disk] = await Promise.all([memoryPressure().catch(() => undefined), diskSpeed(this.cfg.dir).catch(() => undefined)]);
+    const h = sampleHealth(loop.read(), this.holdsNow(), { pressure, disk });
+    await this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
+    if (snapshotDue(h, this.snapshotTaken)) {
+      this.snapshotTaken = true;
+      try {
+        const file = v8.writeHeapSnapshot(join(this.cfg.dir, `Heap.at-${Math.round(snapshotAt() * 100)}pct.${process.pid}.heapsnapshot`));
+        const bytes = statSync(file).size;
+        await this.event("hub_heap_snapshot", {}, { ok: true, file, bytes, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb }).catch(() => undefined);
+        this.log(`memory: heap snapshot written at ${h.heap_used_mb} of ${h.heap_limit_mb} MB: ${file} (${bytes} bytes)`);
+      } catch (err) {
+        await this.event("hub_heap_snapshot", {}, { ok: false, reason: (err as Error).message }).catch(() => undefined);
+      }
+    }
+    // Past the recycle line, at a quiet moment, a supervised hub ends so that its keeper starts it again with --resume.
+    const busyJobs = [...(this.jobService?.jobs.values() ?? [])].filter((j) => j.state === "running" || j.state === "fenced" || j.state === "finished").length;
+    const calls = [...this.inFlight.values()].reduce((a, n) => a + n, 0);
+    const recycle = recycleDue(h, { supervised: process.env.SWARM_HUB_SUPERVISED === "1", callsInFlight: calls, jobsBusy: busyJobs });
+    if (recycle.due && !this.recycling) {
+      this.recycling = true;
+      this.log(`memory: ending for a restart by the keeper: ${recycle.why}`);
+      void this.event("hub_recycled", {}, { ok: true, why: recycle.why, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb })
+        .catch(() => undefined)
+        .then(() => this.flushRefusals().catch(() => undefined))
+        .then(() => process.exit(75));
+    }
   }
 
   /** Said once each time the heap passes three quarters of its limit, and again after it has gone back under two thirds. */
