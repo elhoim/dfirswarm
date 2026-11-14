@@ -5,16 +5,26 @@
  *
  *   node --experimental-strip-types scripts/metrics.ts <run-dir> [--json]
  *   node --experimental-strip-types scripts/metrics.ts --compare <run-dir-A> <run-dir-B> [--json]
+ *   node --experimental-strip-types scripts/metrics.ts --arms <run-dir>... [--registry FILE] [--json]
  *   swarm.sh metrics <id> [--json]
  *   swarm.sh metrics --compare <id-A> <id-B> [--json]
+ *   swarm.sh metrics --arms <id>... [--json]
+ *
+ * A run's table ends with the improvement plan's section 8 measures, the
+ * fourteen in that table's order, each with its figure or why the run's
+ * registers cannot give it (section8Of). `--arms` sets the runs of the notes
+ * experiment side by side by their --skill-cards arm (compareArms).
  *
  * What is read, and nothing else: the lead register (leads/leads.jsonl, and
  * the finish register leads/finish.jsonl where the run has one), the question
  * register, the ledger with its attestations and disputes, the operator
  * requests, the store's journal (jobs, reuse hints, evidence added), the
  * network's grants and fetches, the trace (done calls, the hub's refusals),
- * the run's end (done/SWARM_DONE, done/STOPPED) and the seats' token records
- * (the model gateway's log, else the Pi sessions). A register a run does not
+ * the run's end (done/SWARM_DONE, done/STOPPED), its start (budget.json's
+ * started_at) and the seats' token records (the model gateway's log, else the
+ * Pi sessions); with `--arms`, each run's record in the run registry (its
+ * skill_cards, packs and pack_skills), the one register outside the run, read
+ * where it is beside the runs or named by --registry. A register a run does not
  * have is said to be absent, never read as zero: a run from before offers
  * has no offer events, one from before the reuse hints no job_similar lines.
  *
@@ -40,9 +50,10 @@
 import { skillMetrics, skillMetricsWords, type SkillMetrics } from "./skill-metrics.ts";
 import { firstSightings, frictionMetrics, frictionWords, LARGE_FILES, type FirstSightings, type FrictionMetrics, type ModelCall, type SightingAnswer } from "./friction-metrics.ts";
 import { answerKey, answerPieces } from "../extensions/sighting.ts";
-import { existsSync, statSync } from "node:fs";
+import { firstLine, formatMiss, looksLikeSentence, questionFormat } from "../extensions/answer-format.ts";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import * as L from "../extensions/leads.ts";
@@ -392,6 +403,8 @@ export type RunMetrics = {
   first_sighting?: FirstSightings;
   /** The harness measures, one a line, each with its figure or why the run cannot give it (metricsText's second table). */
   measures: Measure[];
+  /** The improvement plan's section 8 table, its fourteen measures in its order (section8Of), each a figure or why not. */
+  section8: Section8Row[];
   notes: string[];
 };
 
@@ -1251,6 +1264,416 @@ function measuresOf(c: Context, f: FrictionMetrics, trace: boolean, sight: First
   return out;
 }
 
+// --- section 8 ------------------------------------------------------------------------------------
+
+/**
+ * A row of the improvement plan's section 8 table ("the measures to read on the verification runs"): its number in that
+ * table, the figure the table reads (null when the run gives none, or none of one number), its unit, the registers it
+ * was read from, and the ids it counts (jobs, entries), so a figure can be checked against the record.
+ */
+export type Section8Row = Measure & { n: number; figure: number | null; unit: string; register: string; items?: string[]; parts?: { n: number; of: number } };
+
+/** The fourteen measures of section 8, in its order. */
+export const SECTION8_MEASURES = [
+  "Commit wait of small jobs",
+  "Seal rate",
+  "Largest hub answer",
+  "Table lock timeouts",
+  "Gap before a model call",
+  "Refusals per accepted record",
+  "Library share of job_run text",
+  "Compactions per seat-hour, with packs and without",
+  "Shell time",
+  "Plain values in established answers",
+  "High-confidence answer versions changed or lowered",
+  "Minutes from first sighting to answer",
+  "Arrival of the kickoff listing",
+  "Whole-image extractions",
+] as const;
+
+/** A small job, as friction-metrics.ts counts one for its commit wait: 50 output files or fewer. */
+export const SMALL_JOB_FILES = 50;
+
+const JOURNAL = "store/journal.jsonl";
+const TRACE_FILE = "traces/events.jsonl";
+const GATEWAY = "traces/model-gateway.jsonl";
+const LEDGER_FILE = "ledger/entries.jsonl";
+
+/** Rows a seat writes that are not a tool's result (friction-metrics.ts reads the gap before a model call past the same ones). */
+const NOT_A_RESULT = new Set(["thinking", "model_reported", "compact_done", "compact_failed", "compact_started", "self_compact_hint", "seat_down", "seat_relaunched", "seat_dead"]);
+
+/** Pi's own shells: the seats' time in them is the shell time of section 8. */
+const SHELLS = new Set(["bash", "powershell"]);
+
+/**
+ * The arguments by which an extraction tool takes a selection of what it writes out (ad1_extract's members,
+ * members_file and paths; a file list; inode numbers): a job that names one extracts members, not the whole.
+ */
+const SELECTION_ARGS = ["members", "members_file", "paths", "files", "inode", "inodes", "items", "names"] as const;
+
+type JobTimes = { spec: Rec | null; accepted: number | null; finished: number | null; fenced: number | null; committed: number | null; files: number | null };
+
+/** Each job's lines on the store's journal: its spec, its end, its fence (fenced: true), its first commit and that commit's file count. */
+function jobTimes(journal: readonly Rec[]): Map<string, JobTimes> {
+  const out = new Map<string, JobTimes>();
+  for (const l of journal) {
+    const job = str(l.job);
+    if (!job || typeof l.type !== "string") continue;
+    const j = out.get(job) ?? { spec: null, accepted: null, finished: null, fenced: null, committed: null, files: null };
+    const at = ms(l.at);
+    if (l.type === "job_accepted") {
+      j.spec ??= l.spec && typeof l.spec === "object" ? (l.spec as Rec) : {};
+      j.accepted ??= at;
+    } else if (l.type === "job_finished" && at !== null) j.finished = at;
+    else if (l.type === "job_fenced" && l.fenced === true && at !== null) j.fenced = at;
+    else if (l.type === "job_committed" && j.committed === null && at !== null) {
+      j.committed = at;
+      j.files = num((l.outputs as Rec | undefined)?.files);
+    }
+    out.set(job, j);
+  }
+  return out;
+}
+
+/**
+ * The gap before a model call, summed: from a seat's last tool result after its previous model call ended to the next
+ * request's start, the reading friction-metrics.ts gives as a median and a maximum (model_gap), added up over every
+ * request that followed a tool result. Seconds, and how many requests.
+ */
+export function modelGapTotal(events: readonly P.SwarmEvent[], calls: readonly ModelCall[]): { calls: number; seconds: number } {
+  const results = new Map<string, number[]>();
+  for (const e of events) {
+    const at = ms(P.hostTime(e));
+    if (!e.agent || e.agent === "system" || !e.tool || NOT_A_RESULT.has(e.tool) || at === null) continue;
+    results.set(e.agent, [...(results.get(e.agent) ?? []), at]);
+  }
+  const bySeat = new Map<string, ModelCall[]>();
+  for (const c of calls) if (Number.isFinite(c.start) && Number.isFinite(c.end)) bySeat.set(c.seat, [...(bySeat.get(c.seat) ?? []), c]);
+  let n = 0;
+  let seconds = 0;
+  for (const [seat, list] of bySeat) {
+    list.sort((a, b) => a.start - b.start);
+    const mine = (results.get(seat) ?? []).sort((a, b) => a - b);
+    let prevEnd = -Infinity;
+    for (const c of list) {
+      let last: number | null = null;
+      for (const x of mine) {
+        if (x > c.start) break;
+        if (x > prevEnd) last = x;
+      }
+      if (last !== null) {
+        n += 1;
+        seconds += Math.max(0, (c.start - last) / 1000);
+      }
+      prevEnd = Math.max(prevEnd, c.end);
+    }
+  }
+  return { calls: n, seconds };
+}
+
+/**
+ * Whether the run's seats had its packs' notes, from the trace's skills_index rows (one a seat process, naming the packs
+ * whose notes its prompt carried): true when one names a pack, false when every one names none, null with none.
+ */
+export function packsOnTrace(events: readonly P.SwarmEvent[]): { packs: boolean | null; ids: string[] } {
+  const rows = events.filter((e) => e.tool === "skills_index");
+  if (!rows.length) return { packs: null, ids: [] };
+  const ids = new Set<string>();
+  for (const e of rows) for (const p of ((e.result as Rec | null)?.packs as Rec[] | undefined) ?? []) if (str(p?.id)) ids.add(str(p.id));
+  return { packs: ids.size > 0, ids: [...ids].sort() };
+}
+
+/**
+ * Whether a value's first line is the plain value and not prose, by the record's own format check
+ * (extensions/answer-format.ts, the note a record gets): where the question names a format, its first line gives it
+ * (formatMiss finds nothing to say); else that line is there and does not read as a sentence (looksLikeSentence).
+ */
+export function plainValue(value: string, questionText: string | null | undefined): boolean {
+  const first = firstLine(value);
+  if (!first) return false;
+  if (questionText && questionFormat(questionText)) return formatMiss(questionText, value) === null;
+  return !looksLikeSentence(first);
+}
+
+const CONFIDENCE_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
+
+/**
+ * The high-confidence answer versions a later version of the same question changed or lowered: every answer entry to a
+ * question in scope whose author stated high, and the first later answer entry of that question (by ledger order,
+ * superseding it or not) that records another value (its first line, as the format check reads it, letter case
+ * aside), another result, or a confidence below high. A restatement with the same value, result and high is passed by.
+ * Without truth, a version a later one replaced is the run's own sign that it was wrong or incomplete.
+ */
+function highVersionsChanged(c: Context, live: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const answers = c.entries.filter((e) => e.kind === "answer" && str(e.section).startsWith("question:")).sort((a, b) => a.seq - b.seq);
+  const valueOf = (e: P.LedgerEntry) => firstLine(str(e.value)).toLowerCase();
+  for (const [i, e] of answers.entries()) {
+    const section = sectionOf(str(e.section), c.qs);
+    if (!live.has(section) || e.confidence !== "high") continue;
+    for (const later of answers.slice(i + 1)) {
+      if (sectionOf(str(later.section), c.qs) !== section) continue;
+      const how: string[] = [];
+      if (valueOf(later) !== valueOf(e)) how.push("another value");
+      const was = NB.answerResult(e);
+      const now = NB.answerResult(later);
+      if (was !== now) how.push(`result ${was ?? "none"} to ${now ?? "none"}`);
+      if ((CONFIDENCE_RANK[str(later.confidence)] ?? 0) < CONFIDENCE_RANK.high) how.push(`confidence ${str(later.confidence) || "none"}`);
+      if (!how.length) continue;
+      out.push(`E-${e.seq} (${c.qs?.bySection.get(section)?.id ?? `question:${section}`}) by E-${later.seq}: ${how.join(", ")}`);
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a job wrote out the whole of what it read, by what the store's journal records of it. A job counts when its
+ * job_accepted line is a tool, command or recipe job (not an import, a detect pass or the hub's seal of a cited
+ * output) and not a listing (a recipe's listing phase, a tool's list: true), its arguments name no selection
+ * (SELECTION_ARGS), and either it asks for the whole (whole: true) or its first job_committed line counts LARGE_FILES
+ * output files or more. An identical whole-object call answered with the job already under way (job_deduplicated) is
+ * no job of its own and is not counted: that is the one extraction a run should make, shared.
+ */
+export function wholeExtraction(j: Pick<JobTimes, "spec" | "files">): boolean {
+  const spec = j.spec;
+  if (!spec) return false;
+  const kind = str(spec.kind);
+  if (!["tool", "command", "recipe"].includes(kind) || spec.seal || str(spec.phase) === "listing") return false;
+  const args = spec.args && typeof spec.args === "object" ? (spec.args as Rec) : {};
+  if (args.list === true) return false;
+  const picked = SELECTION_ARGS.some((k) => {
+    const v = args[k];
+    return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== "" && v !== false;
+  });
+  if (picked) return false;
+  return args.whole === true || (j.files ?? 0) >= LARGE_FILES;
+}
+
+type Section8Input = {
+  f: FrictionMetrics;
+  events: readonly P.SwarmEvent[];
+  traced: boolean;
+  sight: FirstSightings | undefined;
+  calls: readonly ModelCall[] | null;
+  scope: RunMetrics["questions"];
+  /** When the run started (budget.json started_at), and where that was read. */
+  start: { at: number | null; from: string };
+  harness: readonly Measure[];
+};
+
+/**
+ * Section 8's table, one row a measure in its order: each its figure, or "not measured" and why the run's registers
+ * cannot give it. A register the run does not have is said absent, never read as zero.
+ */
+function section8Of(c: Context, x: Section8Input): Section8Row[] {
+  const TRACE = `not measured: no readable ${TRACE_FILE}`;
+  const name = (n: number) => SECTION8_MEASURES[n - 1]!;
+  const yes = (n: number, figure: number | null, unit: string, register: string, value: string, items?: string[]): Section8Row => ({ n, measure: name(n), measured: true, value, figure, unit, register, ...(items?.length ? { items } : {}) });
+  const no = (n: number, unit: string, register: string, why: string): Section8Row => ({ n, measure: name(n), measured: false, value: why.startsWith("not measured") ? why : `not measured: ${why}`, figure: null, unit, register });
+  const f = x.f;
+  const jobs = jobTimes(c.journal);
+  const rows: Section8Row[] = [];
+
+  // 1. The commit wait of small jobs, summed: every small job's seconds from its end to its commit.
+  {
+    const unit = "job-seconds";
+    const committed = [...jobs].filter(([, j]) => j.committed !== null);
+    const timed = committed.filter(([, j]) => j.finished !== null);
+    const small = timed.filter(([, j]) => (j.files ?? 0) <= SMALL_JOB_FILES).map(([id, j]) => ({ id, s: Math.max(0, (j.committed! - j.finished!) / 1000) }));
+    const sum = Math.round(small.reduce((a, b) => a + b.s, 0));
+    const worst = small.reduce<{ id: string; s: number } | null>((m, y) => (!m || y.s > m.s ? y : m), null);
+    rows.push(
+      !c.have.journal
+        ? no(1, unit, JOURNAL, `no ${JOURNAL}`)
+        : !committed.length
+          ? yes(1, 0, unit, JOURNAL, "0 job-seconds: no job was committed")
+          : !timed.length
+            ? no(1, unit, JOURNAL, `none of the ${committed.length} committed job(s) has a job_finished line (a journal from before them)`)
+            : yes(1, sum, unit, JOURNAL, `${sum} job-seconds over ${small.length} small job(s) (${SMALL_JOB_FILES} output files or fewer), each from its end to its commit${worst ? `; the longest ${Math.round(worst.s)} s (${worst.id})` : ""}`),
+    );
+  }
+
+  // 2. The seal rate: files a second over the large extractions' seals, from the fence (else the end) to the commit.
+  {
+    const unit = "files/s";
+    const large = [...jobs].filter(([, j]) => j.committed !== null && (j.files ?? 0) >= LARGE_FILES && (j.fenced ?? j.finished) !== null).map(([id, j]) => ({ id, files: j.files ?? 0, s: Math.max(0.001, (j.committed! - (j.fenced ?? j.finished)!) / 1000) }));
+    const files = large.reduce((a, b) => a + b.files, 0);
+    const seconds = large.reduce((a, b) => a + b.s, 0);
+    const slowest = large.reduce<{ id: string; files: number; s: number } | null>((m, y) => (!m || y.files / y.s < m.files / m.s ? y : m), null);
+    rows.push(
+      !c.have.journal
+        ? no(2, unit, JOURNAL, `no ${JOURNAL}`)
+        : !large.length
+          ? no(2, unit, JOURNAL, `no job sealed ${LARGE_FILES} files or more (a small seal's time is its fixed cost, not a rate)`)
+          : yes(2, Math.round(files / seconds), unit, JOURNAL, `${Math.round(files / seconds)} files/s: ${files} files sealed in ${Math.round(seconds)} s over ${large.length} job(s) of ${LARGE_FILES} files or more, each from its fence (else its end) to its commit; the slowest ${Math.round(slowest!.files / slowest!.s)} files/s (${slowest!.id})`, large.map((l) => l.id)),
+    );
+  }
+
+  // 3. The largest hub answer: one the hub cut at its bound (answer_too_large, in bytes), else the largest a seat's row sizes (answer_chars).
+  {
+    const unit = "bytes";
+    let cut: { bytes: number; fn: string; max: number } | null = null;
+    let sized: { chars: number; tool: string } | null = null;
+    for (const e of x.events) {
+      const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+      if (e.tool === "hub_call" && str((e.args as Rec)?.fn) === "answer_too_large") {
+        const m = /^(\S+): (\d+) bytes over (\d+)/.exec(str(r.error));
+        if (m && (!cut || Number(m[2]) > cut.bytes)) cut = { fn: m[1]!, bytes: Number(m[2]), max: Number(m[3]) };
+      } else if (e.agent && e.agent !== "system" && typeof r.answer_chars === "number" && (!sized || r.answer_chars > sized.chars)) sized = { chars: r.answer_chars, tool: e.tool };
+    }
+    rows.push(
+      !x.traced
+        ? no(3, unit, TRACE_FILE, TRACE)
+        : cut
+          ? yes(3, cut.bytes, unit, TRACE_FILE, `${cut.bytes} bytes (${cut.fn}, over the ${cut.max}-byte bound: kept whole, not sent); ${f.hub.answers_too_large} answer(s) over the bound`)
+          : sized
+            ? yes(3, sized.chars, unit, TRACE_FILE, `no answer went over the hub's bound (no answer_too_large row); the largest answer a seat's row sizes: ${sized.chars} characters (${sized.tool})`)
+            : no(3, unit, TRACE_FILE, "no answer_too_large row and no row that gives an answer's size (answer_chars: a job_run, job_status or tools call, or a run from before them)"),
+    );
+  }
+
+  // 4. Table lock timeouts.
+  rows.push(x.traced ? yes(4, f.hub.lock_timeouts, "count", TRACE_FILE, `${f.hub.lock_timeouts} row(s) on the trace say "Timed out waiting for locks/"`) : no(4, "count", TRACE_FILE, TRACE));
+
+  // 5. The gap before a model call, summed over the seats.
+  {
+    const unit = "seat-minutes";
+    const g = x.calls && x.traced ? modelGapTotal(x.events, x.calls) : null;
+    rows.push(
+      !x.traced
+        ? no(5, unit, `${TRACE_FILE}, ${GATEWAY}`, TRACE)
+        : !x.calls
+          ? no(5, unit, `${TRACE_FILE}, ${GATEWAY}`, `no model gateway log (${GATEWAY}): a request's start is recorded only there`)
+          : !g!.calls
+            ? no(5, unit, `${TRACE_FILE}, ${GATEWAY}`, "no request followed a seat's tool result on the trace")
+            : yes(5, Math.round((g!.seconds / 60) * 10) / 10, unit, `${TRACE_FILE}, ${GATEWAY}`, `${Math.round((g!.seconds / 60) * 10) / 10} seat-min over ${g!.calls} request(s), each from its seat's last tool result to the request's start (median ${f.model_gap.median_s ?? "?"} s, max ${f.model_gap.max_s ?? "?"} s)`),
+    );
+  }
+
+  // 6. Refusals per accepted record.
+  rows.push(
+    !x.traced
+      ? no(6, "per accepted record", TRACE_FILE, TRACE)
+      : f.record.accepted
+        ? yes(6, f.record.per_accepted, "per accepted record", TRACE_FILE, `${f.record.per_accepted} (${f.record.refused} refused for ${f.record.accepted} accepted)`)
+        : yes(6, null, "per accepted record", TRACE_FILE, `no record accepted (${f.record.refused} refused)`),
+  );
+
+  // 7. The library hint's share of job_run's text.
+  rows.push(
+    !x.traced
+      ? no(7, "share", TRACE_FILE, TRACE)
+      : !x.events.some((e) => e.tool === "job_run" && (e.result as Rec | null)?.ok !== false)
+        ? no(7, "share", TRACE_FILE, "no job_run answer on the trace (no job was run)")
+        : !f.library.recorded
+          ? no(7, "share", TRACE_FILE, "no job_run row gives library_chars (a run from before them)")
+          : f.library.of_job_run === null
+            ? no(7, "share", TRACE_FILE, "no job_run row gives its answer's size (answer_chars)")
+            : yes(7, f.library.of_job_run, "share", TRACE_FILE, `${share(f.library.of_job_run)} of job_run's text: the library hint ${f.library.hint_chars} of ${f.job_run_text.chars} characters over ${f.job_run_text.answers} answer(s)`),
+  );
+
+  // 8. Compactions per seat-hour; whether the run had packs, from its skills_index rows. The ratio needs runs of both kinds.
+  {
+    const unit = "per seat-hour";
+    const p = packsOnTrace(x.events);
+    const kind = p.packs === null ? "whether it ran with packs is not recorded in the run (no skills_index row on the trace)" : p.packs ? `with packs (${p.ids.join(", ")})` : "without packs (its skills_index rows name none)";
+    rows.push(
+      !x.traced
+        ? no(8, unit, TRACE_FILE, TRACE)
+        : f.compactions.per_seat_hour === null
+          ? no(8, unit, TRACE_FILE, "no seat time on the trace")
+          : yes(8, f.compactions.per_seat_hour, unit, TRACE_FILE, `${f.compactions.per_seat_hour} in this run (${f.compactions.done} compaction(s)), ${kind}; the ratio with packs to without needs a run of the other kind (metrics.ts --arms sets runs side by side)`),
+    );
+  }
+
+  // 9. Shell time: the seats' own shell calls, start to result.
+  {
+    const unit = "seat-minutes";
+    const shells = x.events.filter((e) => e.agent && e.agent !== "system" && SHELLS.has(e.tool));
+    const timed = shells.filter((e) => typeof (e.result as Rec | null)?.duration_ms === "number");
+    const minutesIn = Math.round((timed.reduce((a, e) => a + num((e.result as Rec).duration_ms), 0) / 60000) * 10) / 10;
+    rows.push(
+      !x.traced
+        ? no(9, unit, TRACE_FILE, TRACE)
+        : !shells.length
+          ? yes(9, 0, unit, TRACE_FILE, "0 seat-min: no shell call on the trace")
+          : !timed.length
+            ? no(9, unit, TRACE_FILE, `none of the ${shells.length} shell call(s) on the trace gives its duration (duration_ms)`)
+            : yes(9, minutesIn, unit, TRACE_FILE, `${minutesIn} seat-min over ${timed.length} shell call(s)${timed.length < shells.length ? `; ${shells.length - timed.length} more give no duration, not counted` : ""}`),
+    );
+  }
+
+  // 10. Plain values: the standing established answers in scope whose first line is the value, not prose.
+  {
+    const live = new Set(x.scope.in_scope.map((q) => q.section));
+    const established = [...standingAnswers(c)].filter(([section, e]) => live.has(section) && NB.answerResult(e) === "established");
+    const prose = established.filter(([section, e]) => !plainValue(str(e.value), c.qs?.bySection.get(section)?.text)).map(([section, e]) => `${c.qs?.bySection.get(section)?.id ?? `question:${section}`} E-${e.seq}`);
+    const plain = established.length - prose.length;
+    rows.push(
+      !c.have.ledger
+        ? no(10, "share", LEDGER_FILE, `no ${LEDGER_FILE}`)
+        : !established.length
+          ? yes(10, null, "share", LEDGER_FILE, "no established answer in scope")
+          : { ...yes(10, Math.round((plain / established.length) * 100) / 100, "share", LEDGER_FILE, `${share(plain / established.length)}: ${plain} of ${established.length} established answer(s) in scope give the plain value as their first line (the question's format where it names one)${prose.length ? `; not: ${prose.join(", ")}` : ""}`, prose), parts: { n: plain, of: established.length } },
+    );
+  }
+
+  // 11. High-confidence answer versions a later version changed or lowered.
+  {
+    const live = new Set(x.scope.in_scope.map((q) => q.section));
+    const list = highVersionsChanged(c, live);
+    rows.push(!c.have.ledger ? no(11, "versions", LEDGER_FILE, `no ${LEDGER_FILE}`) : yes(11, list.length, "versions", LEDGER_FILE, `${list.length} answer version(s) stated high that a later version of the question changed or lowered${list.length ? `: ${list.join("; ")}` : ""}`, list.map((l) => l.split(" ")[0]!)));
+  }
+
+  // 12. Minutes from first sighting to answer: the harness measure, its maximum the figure.
+  {
+    const h = x.harness.find((m) => m.measure === "Minutes from first sighting to answer");
+    rows.push(h && h.measured ? yes(12, x.sight?.max_minutes ?? null, "minutes", `${LEDGER_FILE}, ${TRACE_FILE}`, h.value) : no(12, "minutes", `${LEDGER_FILE}, ${TRACE_FILE}`, h?.value ?? TRACE));
+  }
+
+  // 13. The kickoff listing: the first catalogue generation the kickoff's recipes committed, in minutes from the run's start.
+  {
+    const unit = "minutes from the start";
+    const queued = c.journal.find((l) => l.type === "kickoff_queued");
+    const first = c.journal.find((l) => l.type === "generation_committed" && l.trigger === "kickoff");
+    const register = `${JOURNAL}, ${x.start.from}`;
+    const at = first ? ms(first.at) : null;
+    const listing = first && str(jobs.get(str(first.job))?.spec?.phase) === "listing";
+    rows.push(
+      !c.have.journal
+        ? no(13, unit, register, `no ${JOURNAL}`)
+        : !queued && !first
+          ? no(13, unit, register, "no kickoff_queued line on the journal: the job service queued no kickoff (a run without it, or from before it)")
+          : !first
+            ? yes(13, null, unit, register, Array.isArray(queued!.jobs) && !queued!.jobs.length ? "the kickoff queued no recipe" : `never arrived: the kickoff queued ${Array.isArray(queued!.jobs) ? queued!.jobs.length : "?"} job(s) and none committed a generation`)
+            : x.start.at === null || at === null
+              ? no(13, unit, register, "the run's start is not recorded (no started_at in budget.json and no store_opened line)")
+              : yes(13, minutes(x.start.at, at), unit, register, `minute ${minutes(x.start.at, at)} from the run's start (${x.start.from}): ${str(first.generation)}${listing ? ", the listing phase" : ""}, job ${str(first.job)}`, [str(first.job)]),
+    );
+  }
+
+  // 14. Whole-image extractions (wholeExtraction).
+  {
+    const whole = [...jobs].filter(([, j]) => wholeExtraction(j));
+    const words = whole.map(([id, j]) => `${id} (${str(j.spec?.kind)}${j.spec?.tool ? ` ${str(j.spec.tool)}` : j.spec?.recipe ? ` ${str(j.spec.recipe)}` : ""}, ${j.committed === null ? "not committed" : `${j.files} files`})`);
+    rows.push(!c.have.journal ? no(14, "count", JOURNAL, `no ${JOURNAL}`) : yes(14, whole.length, "count", JOURNAL, `${whole.length} job(s) wrote out the whole of what they read (no members named, and whole: true or ${LARGE_FILES} output files or more)${words.length ? `: ${words.join(", ")}` : ""}`, whole.map(([id]) => id)));
+  }
+  return rows;
+}
+
+/**
+ * When the run started: budget.json's started_at (written when its team is made, before the kickoff; a resume keeps it),
+ * else the store journal's store_opened line (the kickoff opening the store).
+ */
+async function runStart(c: Context): Promise<{ at: number | null; from: string }> {
+  const budget = await readFile(join(c.S, "budget.json"), "utf8").then((t) => JSON.parse(t) as Rec).catch(() => null);
+  const at = ms(budget?.started_at);
+  if (at !== null) return { at, from: "budget.json started_at" };
+  const opened = c.journal.find((l) => l.type === "store_opened");
+  return { at: opened ? ms(opened.at) : null, from: "the journal's store_opened" };
+}
+
 // --- one run --------------------------------------------------------------------------------------
 
 /** `now`: when a grant's status is read for a run still going (tests fix it); a run that ended is read at its end. */
@@ -1272,8 +1695,11 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
   if (!c.have.finish) c.notes.push("no finish register (a run from before readiness was recorded): the tail is measured from the first answers");
   const endAt = ms(outcome.at);
   const traced = c.have.trace && !unreadable;
-  const fr = frictionMetrics(traced ? events : [], c.journal, { calls: await gatewayRequests(S) });
+  const calls = await gatewayRequests(S);
+  const fr = frictionMetrics(traced ? events : [], c.journal, { calls });
   const sight = traced && c.have.ledger ? firstSightings(events, sightingAnswers(c, scope)) : undefined;
+  const measures = measuresOf(c, fr, traced, sight);
+  const started = await runStart(c);
   const m: RunMetrics = {
     format: METRICS_FORMAT,
     run: basename(S),
@@ -1301,7 +1727,8 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     ...(c.have.trace && !unreadable ? { skills: skillMetrics(events) } : {}),
     ...(traced ? { harness: fr } : {}),
     ...(sight ? { first_sighting: sight } : {}),
-    measures: measuresOf(c, fr, traced, sight),
+    measures,
+    section8: section8Of(c, { f: fr, events: traced ? events : [], traced, sight, calls, scope, start: started, harness: measures }),
     notes: c.notes,
   };
   if (!m.cost.source) m.notes.push("no per-call token record (no model gateway log, no Pi sessions, and no seat total with calls on the trace): cost per question is not measured");
@@ -1429,6 +1856,233 @@ export async function compareRuns(aDir: string, bDir: string): Promise<Compariso
   };
 }
 
+// --- the arms of the notes experiment -----------------------------------------------------------------
+
+/**
+ * `--arms` sets the runs of the notes experiment (`--skill-cards`) side by side by arm: inject,
+ * the forced arm (a lead opened or claimed comes back with the rules of the notes that fit it), against on, the
+ * control. Per arm: its runs, the cards given, the share of wrong formats in the first tool call after a card against
+ * the other tool calls, refusals per accepted record, and the section 8 rows that bear on the notes. Whether the arms
+ * differ is judged only on two runs or more of each, and only when every run of one arm is on one side of every run of
+ * the other: anything less is said, never read as a difference.
+ */
+export const ARMS_FORMAT = "dfirswarm-metrics-arms/1";
+
+export type Arm = "inject" | "on" | "off" | "unknown";
+
+/** The section 8 rows the arms set side by side: refusals, compactions, plain values, high versions changed, first sighting. */
+export const ARMS_ROWS = [6, 8, 10, 11, 12] as const;
+
+/**
+ * The cards a run gave and the tool calls around them, from its trace. A card arms its seat: a tool's card for that
+ * tool's next call, a lead's card for the seat's next tool call. A tool call is a job_run that names a tool, or a pack
+ * or forged tool called as itself (its row says forged). A wrong format is a call refused before it ran (job_run with
+ * no job: its arguments were not taken) or a tool called as itself that exited 2 (a usage error).
+ */
+export type CardCalls = {
+  cards: number;
+  lead_cards: number;
+  injected: number;
+  after_card: { calls: number; wrong: number };
+  other: { calls: number; wrong: number };
+};
+
+export function cardCalls(events: readonly P.SwarmEvent[]): CardCalls {
+  const out: CardCalls = { cards: 0, lead_cards: 0, injected: 0, after_card: { calls: 0, wrong: 0 }, other: { calls: 0, wrong: 0 } };
+  // Per seat: the tools whose card waits for its next call, and whether a lead's card waits for the next tool call.
+  const armed = new Map<string, { tools: Set<string>; lead: boolean }>();
+  for (const e of events) {
+    if (!e.agent || e.agent === "system") continue;
+    const a = (e.args && typeof e.args === "object" ? e.args : {}) as Rec;
+    const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+    const seat = armed.get(e.agent) ?? { tools: new Set<string>(), lead: false };
+    armed.set(e.agent, seat);
+    if (e.tool === "skill_card") {
+      out.cards += 1;
+      if (str(a.lead) || str(r.kind).startsWith("lead")) {
+        out.lead_cards += 1;
+        if (r.kind === "lead_injected") out.injected += 1;
+        seat.lead = true;
+      } else if (str(a.tool)) seat.tools.add(str(a.tool));
+      continue;
+    }
+    const tool = e.tool === "job_run" ? str(a.tool) : r.forged === true ? e.tool : "";
+    if (!tool) continue;
+    const wrong = e.tool === "job_run" ? r.ok === false && !r.job : r.ok === false && r.exit_code === 2;
+    const after = seat.lead || seat.tools.has(tool);
+    const side = after ? out.after_card : out.other;
+    side.calls += 1;
+    if (wrong) side.wrong += 1;
+    if (after) {
+      seat.lead = false;
+      seat.tools.delete(tool);
+    }
+  }
+  return out;
+}
+
+export type ArmRun = {
+  run: string;
+  run_dir: string;
+  arm: Arm;
+  /** Where the arm was read: the run registry's skill_cards (beside the runs, or --registry), else the trace's lead cards. */
+  arm_from: "registry" | "trace" | "none";
+  /** Whether the run had its packs' notes: the registry's packs and pack_skills, else the trace's skills_index rows. */
+  packs: boolean | null;
+  cards: CardCalls;
+  record: { accepted: number; refused: number } | null;
+  section8: Section8Row[];
+};
+
+export type ArmSide = {
+  runs: string[];
+  cards: number;
+  lead_cards: number;
+  injected: number;
+  after_card: { calls: number; wrong: number; share: number | null };
+  other: { calls: number; wrong: number; share: number | null };
+  record: { accepted: number; refused: number; per_accepted: number | null };
+  /** Each run's figure of each row of ARMS_ROWS, by run name. */
+  rows: Record<string, Record<string, number | null>>;
+  plain: { plain: number; established: number; share: number | null };
+  high_versions_changed: number;
+};
+
+export type ArmsComparison = {
+  format: typeof ARMS_FORMAT;
+  compared_at: string;
+  runs: ArmRun[];
+  arms: Partial<Record<Arm, ArmSide>>;
+  /** Inject against on: whether the difference in wrong formats after a card can be judged, and the words that say it. */
+  verdict: { judged: boolean; words: string; inject: number[]; on: number[] };
+  /** Section 8's row 8 across the runs given: compactions per seat-hour with packs over without. */
+  packs: { with: string[]; without: string[]; with_mean: number | null; without_mean: number | null; ratio: number | null; words: string };
+  notes: string[];
+};
+
+async function registryRuns(file: string): Promise<Rec[] | null> {
+  try {
+    const r = JSON.parse(await readFile(file, "utf8")) as { runs?: Rec[] } | Rec[];
+    return Array.isArray(r) ? r : Array.isArray(r.runs) ? r.runs : null;
+  } catch {
+    return null;
+  }
+}
+
+const ratioOf = (n: number, of: number): number | null => (of ? Math.round((n / of) * 100) / 100 : null);
+const mean = (xs: number[]): number | null => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 100) / 100 : null);
+
+/** The runs of the notes experiment by arm (ArmsComparison). `registry`: the run registry; by default registry.json beside each run. */
+export async function compareArms(dirs: readonly string[], o: { registry?: string } = {}): Promise<ArmsComparison> {
+  const notes: string[] = [];
+  const runs: ArmRun[] = [];
+  for (const dir of dirs) {
+    const S = resolve(dir);
+    const real = (() => {
+      try {
+        return realpathSync(S);
+      } catch {
+        return S;
+      }
+    })();
+    const m = await measureRun(S);
+    const { events, unreadable } = await P.readEventLogChecked(S);
+    const trace = unreadable ? [] : events;
+    const file = o.registry ?? join(dirname(S), "registry.json");
+    const entry = ((await registryRuns(file)) ?? []).reverse().find((r) => typeof r.sandbox === "string" && existsSync(r.sandbox) && realpathSync(r.sandbox) === real) ?? null;
+    const cards = cardCalls(trace);
+    let arm: Arm = "unknown";
+    let from: ArmRun["arm_from"] = "none";
+    const said = str(entry?.skill_cards);
+    if (said === "on" || said === "off" || said === "inject") {
+      arm = said;
+      from = "registry";
+      if (said !== "inject" && cards.injected) notes.push(`${m.run}: the registry says ${said}, and the trace holds ${cards.injected} lead card(s) with their rules (inject's): read as the registry says`);
+    } else if (cards.injected) {
+      arm = "inject";
+      from = "trace";
+    } else if (cards.lead_cards) {
+      arm = "on";
+      from = "trace";
+    }
+    if (from === "none") notes.push(`${m.run}: its arm is not recorded (no registry record names its skill_cards, and its trace holds no lead card to tell inject from on)`);
+    const regPacks = entry && Array.isArray(entry.packs) ? (entry.packs.length > 0 && str(entry.pack_skills) !== "off") : null;
+    const packs = regPacks ?? packsOnTrace(trace).packs;
+    runs.push({ run: m.run, run_dir: S, arm, arm_from: from, packs, cards, record: m.harness ? { accepted: m.harness.record.accepted, refused: m.harness.record.refused } : null, section8: m.section8 });
+  }
+  const arms: ArmsComparison["arms"] = {};
+  for (const r of runs) {
+    const side = (arms[r.arm] ??= { runs: [], cards: 0, lead_cards: 0, injected: 0, after_card: { calls: 0, wrong: 0, share: null }, other: { calls: 0, wrong: 0, share: null }, record: { accepted: 0, refused: 0, per_accepted: null }, rows: {}, plain: { plain: 0, established: 0, share: null }, high_versions_changed: 0 });
+    side.runs.push(r.run);
+    side.cards += r.cards.cards;
+    side.lead_cards += r.cards.lead_cards;
+    side.injected += r.cards.injected;
+    for (const k of ["after_card", "other"] as const) {
+      side[k].calls += r.cards[k].calls;
+      side[k].wrong += r.cards[k].wrong;
+    }
+    if (r.record) {
+      side.record.accepted += r.record.accepted;
+      side.record.refused += r.record.refused;
+    }
+    side.rows[r.run] = Object.fromEntries(ARMS_ROWS.map((n) => [String(n), r.section8.find((x) => x.n === n)?.figure ?? null]));
+    const plain = r.section8.find((x) => x.n === 10);
+    if (plain?.parts) {
+      side.plain.plain += plain.parts.n;
+      side.plain.established += plain.parts.of;
+    }
+    side.high_versions_changed += r.section8.find((x) => x.n === 11)?.figure ?? 0;
+  }
+  for (const side of Object.values(arms)) {
+    side.after_card.share = ratioOf(side.after_card.wrong, side.after_card.calls);
+    side.other.share = ratioOf(side.other.wrong, side.other.calls);
+    side.record.per_accepted = ratioOf(side.record.refused, side.record.accepted);
+    side.plain.share = ratioOf(side.plain.plain, side.plain.established);
+  }
+  return { format: ARMS_FORMAT, compared_at: new Date().toISOString(), runs, arms, verdict: armsVerdict(runs), packs: packsRatio(runs), notes };
+}
+
+/** Inject against on, on the wrong-format share of the first call after a card, run by run. */
+function armsVerdict(runs: readonly ArmRun[]): ArmsComparison["verdict"] {
+  const of = (arm: Arm) => runs.filter((r) => r.arm === arm);
+  const shares = (arm: Arm) => of(arm).filter((r) => r.cards.after_card.calls > 0).map((r) => ratioOf(r.cards.after_card.wrong, r.cards.after_card.calls)!);
+  const inject = shares("inject");
+  const on = shares("on");
+  const out = (judged: boolean, words: string) => ({ judged, words, inject, on });
+  for (const arm of ["inject", "on"] as const) {
+    if (!of(arm).length) return out(false, `cannot be judged: no ${arm} run among those given`);
+  }
+  for (const arm of ["inject", "on"] as const) {
+    if (of(arm).length < 2) return out(false, `cannot be judged: ${arm} has ${of(arm).length} run; the experiment asks two or more of each arm`);
+  }
+  for (const [arm, list] of [["inject", inject], ["on", on]] as const) {
+    if (list.length < 2) return out(false, `cannot be judged: ${list.length} ${arm} run(s) made a tool call after a card; two or more of each arm are needed`);
+  }
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const span = (xs: number[]) => (Math.min(...xs) === Math.max(...xs) ? pct(xs[0]!) : `${pct(Math.min(...xs))}-${pct(Math.max(...xs))}`);
+  if (Math.max(...inject) < Math.min(...on)) return out(true, `inject lower in every run (${span(inject)} against ${span(on)} wrong formats in the first call after a card): a difference these runs show`);
+  if (Math.min(...inject) > Math.max(...on)) return out(true, `inject higher in every run (${span(inject)} against ${span(on)} wrong formats in the first call after a card): a difference these runs show`);
+  return out(true, `the arms' runs overlap (inject ${span(inject)}, on ${span(on)} wrong formats in the first call after a card): no difference these runs can show`);
+}
+
+/** Section 8's row 8 across runs: the mean compactions per seat-hour of the runs with packs over the mean of those without. */
+function packsRatio(runs: readonly ArmRun[]): ArmsComparison["packs"] {
+  const fig = (r: ArmRun) => r.section8.find((x) => x.n === 8)?.figure ?? null;
+  const withRuns = runs.filter((r) => r.packs === true && fig(r) !== null);
+  const without = runs.filter((r) => r.packs === false && fig(r) !== null);
+  const a = mean(withRuns.map((r) => fig(r)!));
+  const b = mean(without.map((r) => fig(r)!));
+  const ratio = a !== null && b ? Math.round((a / b) * 100) / 100 : null;
+  const unknown = runs.filter((r) => r.packs === null).map((r) => r.run);
+  const words =
+    !withRuns.length || !without.length
+      ? `not measured: no run ${!withRuns.length ? "with" : "without"} packs among those given${unknown.length ? ` (not recorded for ${unknown.join(", ")})` : ""}`
+      : ratio === null
+        ? `not measured: the runs without packs made no compaction (${b} per seat-hour)`
+        : `${ratio} times: ${a} per seat-hour with packs (${withRuns.map((r) => r.run).join(", ")}) against ${b} without (${without.map((r) => r.run).join(", ")})`;
+  return { with: withRuns.map((r) => r.run), without: without.map((r) => r.run), with_mean: a, without_mean: b, ratio, words };
+}
+
 // --- the tables -------------------------------------------------------------------------------------
 
 function table(rows: string[][]): string[] {
@@ -1491,6 +2145,10 @@ export function metricsText(m: RunMetrics): string {
     lines.push("", "Harness measures (docs/usage.md, \"Harness measures\"):");
     lines.push(...table([["Measure", "Value"], ...m.measures.map((x) => [x.measure, x.value])]));
   }
+  if (m.section8?.length) {
+    lines.push("", "Section 8 (the improvement plan's measures for the verification runs):");
+    lines.push(...table([["#", "Measure", "Value"], ...m.section8.map((x) => [`${x.n}.`, x.measure, x.value])]));
+  }
   if (m.cost.per_question.length) {
     lines.push("", "Cost per question (tokens apportioned by lead):");
     lines.push(...table([["Question", "Tokens", "USD", "Leads"], ...m.cost.per_question.map((q) => [qname(q), String(q.tokens), String(q.usd), q.leads.join(" ")])]));
@@ -1521,6 +2179,35 @@ export function compareText(c: Comparison): string {
   return `${lines.join("\n")}\n`;
 }
 
+export function armsText(a: ArmsComparison): string {
+  const order: Arm[] = ["inject", "on", ...(["off", "unknown"] as const).filter((x) => a.arms[x])];
+  const sides = order.map((arm) => a.arms[arm]);
+  const of = (n: number, calls: number) => `${n} of ${calls}${calls ? ` (${Math.round((n / calls) * 100)}%)` : ""}`;
+  const cell = (s: ArmSide | undefined, f: (s: ArmSide) => string) => (s ? f(s) : "no run");
+  const byRun = (s: ArmSide, n: number) => s.runs.map((r) => `${r} ${s.rows[r]?.[String(n)] ?? "-"}`).join(", ");
+  const label = (n: number) => `${n}. ${SECTION8_MEASURES[n - 1]}`;
+  const lines = [`Arms: ${a.runs.length} run(s) of the notes experiment by --skill-cards arm (inject: a lead comes back with its notes' rules; on: the control)`, ""];
+  lines.push(
+    ...table([
+      ["Measure", ...order],
+      ["Runs", ...sides.map((s) => cell(s, (x) => x.runs.join(", ")))],
+      ["Cards given", ...sides.map((s) => cell(s, (x) => `${x.cards} (${x.lead_cards} a lead's, ${x.injected} of them with the notes' rules)`))],
+      ["Wrong format, first call after a card", ...sides.map((s) => cell(s, (x) => of(x.after_card.wrong, x.after_card.calls)))],
+      ["Wrong format, other tool calls", ...sides.map((s) => cell(s, (x) => of(x.other.wrong, x.other.calls)))],
+      ["Refusals per accepted record", ...sides.map((s) => cell(s, (x) => `${x.record.per_accepted ?? "-"} (${x.record.refused} for ${x.record.accepted})`))],
+      [label(8), ...sides.map((s) => cell(s, (x) => byRun(x, 8)))],
+      [label(10), ...sides.map((s) => cell(s, (x) => (x.plain.established ? of(x.plain.plain, x.plain.established) : "no established answer")))],
+      [label(11), ...sides.map((s) => cell(s, (x) => `${x.high_versions_changed} (${byRun(x, 11)})`))],
+      [`${label(12)} (max)`, ...sides.map((s) => cell(s, (x) => byRun(x, 12)))],
+    ]),
+  );
+  lines.push("", "A wrong format: a tool call refused before it ran (job_run's arguments not taken), or a tool called as itself that exited 2 (a usage error).");
+  lines.push(`Inject against on: ${a.verdict.words}.`);
+  lines.push(`Section 8, row 8 (compactions per seat-hour, with packs over without): ${a.packs.words}.`);
+  if (a.notes.length) lines.push("", ...a.notes.map((x) => `Note: ${x}`));
+  return `${lines.join("\n")}\n`;
+}
+
 // --- the command --------------------------------------------------------------------------------------
 
 function isRunDir(p: string): boolean {
@@ -1534,7 +2221,30 @@ function isRunDir(p: string): boolean {
 async function main(argv: string[]): Promise<number> {
   const json = argv.includes("--json");
   const args = argv.filter((a) => a !== "--json");
-  const usage = "usage: metrics.ts <run-dir> [--json] | metrics.ts --compare <run-dir-A> <run-dir-B> [--json]\n";
+  const usage = "usage: metrics.ts <run-dir> [--json] | metrics.ts --compare <run-dir-A> <run-dir-B> [--json] | metrics.ts --arms <run-dir>... [--registry FILE] [--json]\n";
+  if (args[0] === "--arms") {
+    const rest = args.slice(1);
+    const at = rest.indexOf("--registry");
+    const registry = at >= 0 ? rest[at + 1] : undefined;
+    if (at >= 0 && (!registry || registry.startsWith("--"))) {
+      process.stderr.write(usage);
+      return 2;
+    }
+    const dirs = at >= 0 ? [...rest.slice(0, at), ...rest.slice(at + 2)] : rest;
+    if (!dirs.length || dirs.some((d) => d.startsWith("--"))) {
+      process.stderr.write(usage);
+      return 2;
+    }
+    for (const d of dirs) {
+      if (!isRunDir(d)) {
+        process.stderr.write(`metrics.ts: ${d} is not a run directory\n`);
+        return 2;
+      }
+    }
+    const a = await compareArms(dirs, registry ? { registry } : {});
+    process.stdout.write(json ? `${JSON.stringify(a, null, 2)}\n` : armsText(a));
+    return 0;
+  }
   if (args[0] === "--compare") {
     const [a, b] = args.slice(1);
     if (!a || !b || args.length !== 3) {

@@ -9897,22 +9897,29 @@ cmd_context() {
 }
 
 # Process metrics from a run's own registers (scripts/metrics.ts, docs/usage.md
-# "Metrics"), or two runs of one goal compared question by question. Read
-# only: nothing is written into either run.
+# "Metrics"), two runs of one goal compared question by question, or the runs
+# of the notes experiment set side by side by their --skill-cards arm (each
+# run's arm read from its registry record). Read only: nothing is written into
+# any run.
 cmd_metrics() {
-  local compare=0 json=() ids=()
+  local compare=0 arms=0 json=() ids=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --compare) compare=1; shift ;;
+      --arms) arms=1; shift ;;
       --json) json=(--json); shift ;;
       -*) die_usage "metrics: unknown option $1" ;;
       *) ids+=("$1"); shift ;;
     esac
   done
-  if [[ "$compare" -eq 1 ]]; then
+  if [[ "$compare" -eq 1 && "$arms" -eq 1 ]]; then
+    die_usage "metrics takes --compare or --arms, not both"
+  elif [[ "$compare" -eq 1 ]]; then
     [[ ${#ids[@]} -eq 2 ]] || die_usage "metrics --compare takes two run ids"
+  elif [[ "$arms" -eq 1 ]]; then
+    [[ ${#ids[@]} -ge 1 ]] || die_usage "metrics --arms takes one run id or more"
   else
-    [[ ${#ids[@]} -eq 1 ]] || die_usage "metrics takes one run id (or --compare <id-A> <id-B>)"
+    [[ ${#ids[@]} -eq 1 ]] || die_usage "metrics takes one run id (or --compare <id-A> <id-B>, or --arms <id>...)"
   fi
   ensure_registry
   local id sandbox dirs=()
@@ -9921,7 +9928,9 @@ cmd_metrics() {
     [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
     dirs+=("$sandbox")
   done
-  if [[ "$compare" -eq 1 ]]; then
+  if [[ "$arms" -eq 1 ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" --arms "${dirs[@]}" --registry "$REGISTRY" ${json[@]+"${json[@]}"}
+  elif [[ "$compare" -eq 1 ]]; then
     node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" --compare "${dirs[@]}" ${json[@]+"${json[@]}"}
   else
     node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" "${dirs[0]}" ${json[@]+"${json[@]}"}
@@ -12172,10 +12181,15 @@ cmd_help() {
                                            quick and unreviewed negatives, coverage, under-claiming (partial answers
                                            whose asked parts are all established), offers, done calls and refusals,
                                            the tail to the end, acquisition gaps, interpretations, reversals by cause,
-                                           tokens per question, duplicates, the network
+                                           tokens per question, duplicates, the network; the harness measures; and the
+                                           improvement plan's section 8 table, each of its 14 measures a figure or why not
   metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
                                            other run established, a shared negative on partial coverage, and a partial
                                            answer whose asked parts are all established, flagged
+  metrics --arms <id>... [--json]          the runs of the notes experiment by --skill-cards arm, inject against on:
+                                           cards given, wrong formats in the first tool call after a card and in the
+                                           others, refusals per accepted record, the section 8 rows on the notes; and
+                                           whether the arms differ, judged on two runs or more of each
 Every metric's definition is in docs/usage.md (Metrics).
 EOF
       ;;
