@@ -473,11 +473,70 @@ test("a seat at work whose evidence job ended after its last record holds the fi
   await job(r.S, "j000004", "r.txt", { requester: { agent: "a2" }, spec: { kind: "recipe" }, finished_at: later });
   const held = await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now());
   assert.equal(held.length, 1, JSON.stringify(held));
-  assert.match(held[0]!, /^a1 is at work and its job j000002 ended after its last record \(20\d\d-.*\): ask it to record what that job showed, or wait for it$/);
+  assert.match(held[0]!, /^a1 is at work and its job j000002 ended after its last record \(20\d\d-.*\): what that job showed is on no record yet: ask it to record what it holds, or wait for it$/);
   // Silent past the stale limit: not at work, not held.
   assert.deepEqual(await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now() + 2 * L.leadStaleMs()), []);
   // Done: not held.
   await mkdir(join(r.S, "done", "agents"), { recursive: true });
   await writeFile(join(r.S, "done", "agents", "a1.done"), "");
   assert.deepEqual(await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now()), []);
+});
+
+test("unrecorded work holds the coordinator's done by seat and job, the seat is asked once, and the hold ends when it records or a grace after it was asked (B5)", async () => {
+  const r = await run("fp-unrec-done");
+  await established(r);
+  await new Promise((res) => setTimeout(res, 5));
+  const later = new Date().toISOString();
+  await job(r.S, "j000002", "out.txt", { requester: { agent: "a1" }, spec: { kind: "command", command: "decode" }, finished_at: later });
+  // The gate holds the done: one defect, naming the seat and its job, with how it ends.
+  const run1 = { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  const gate = await finishGate(r.S, run1);
+  const d = gate.defects.find((x) => x.code === "unrecorded_work") as { code: string; seat: string; job: string; since: string; what: string; fix: string } | undefined;
+  assert.ok(d, JSON.stringify(gate.defects));
+  assert.equal(d!.seat, "a1");
+  assert.equal(d!.job, "j000002");
+  assert.match(d!.what, /^a1 is at work and its job j000002 ended after its last record/);
+  assert.match(d!.fix, /anything it records ends the hold, as its done or its going does, and a hold a done named lapses 10 minute\(s\) after it/);
+  const verdict = P.finishLineVerdict({ ...run1, gate }, false);
+  assert.equal(verdict.proceed, false);
+  assert.equal((verdict as { failing: string }).failing, "unrecorded_work j000002");
+  assert.match((verdict as { reason: string }).reason, /a1 is at work and its job j000002 ended after its last record/);
+  // The done asks the seat, once a hold: a done refused again posts nothing new.
+  const post = (a: { tag: string; body: string; to: string; key: string; via: string }) => P.systemPost(r.S, a);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), ["a1"]);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), []);
+  const asks = (await P.readInbox({ sandboxRoot: r.S, agentId: "a1" }, {})).posts.filter((p) => p.tag === "ask" && /a0 called done, and the finish waits for you/.test(p.body));
+  assert.equal(asks.length, 1, JSON.stringify(asks));
+  assert.equal(asks[0]!.to, "a1");
+  assert.match(asks[0]!.body, /Record now every value you hold and have not recorded: .*as a candidate \(record_candidate: question, value, ref\)/);
+  // A check held on unrecorded work is not taken again for its revision: what ends the hold moves no part of it.
+  const revision = (await P.stateRevision(r.S)).revision;
+  await F.recordCheck(r.S, "a0", revision, { proceed: false, reason: "held" }, { ...run1, gate });
+  assert.equal(await F.checkAt(r.S, revision), null);
+  // The check that named the hold is when the seat was asked: past the grace, the hold lapses and is a warning.
+  const snap = await L.leadsSnapshot(r.S);
+  const [h] = await F.unrecordedHolds(r.S, snap);
+  assert.ok(h?.asked && h.lapsed === false, JSON.stringify(h));
+  // A seat that stays at work past the grace (the stale limit set longer than the grace): lapsed, not released.
+  process.env.SWARM_LEAD_STALE_SEC = "3600";
+  try {
+    const [gone] = await F.unrecordedHolds(r.S, snap, Date.now() + F.unrecordedGraceMs() + 1000);
+    assert.equal(gone?.lapsed, true, JSON.stringify(gone));
+  } finally {
+    delete process.env.SWARM_LEAD_STALE_SEC;
+  }
+  process.env.SWARM_UNRECORDED_GRACE_SEC = "0";
+  try {
+    const lapsed = await finishGate(r.S, run1);
+    assert.ok(!lapsed.defects.some((x) => x.code === "unrecorded_work"), JSON.stringify(lapsed.defects));
+    assert.ok((lapsed.warnings ?? []).some((w) => /^a1 was asked at .* to record what its job j000002 showed and has recorded nothing since: the finish went on without it$/.test(w)), JSON.stringify(lapsed.warnings));
+  } finally {
+    delete process.env.SWARM_UNRECORDED_GRACE_SEC;
+  }
+  // The seat records: the hold is released.
+  await new Promise((res) => setTimeout(res, 10));
+  const f = await P.recordEntry(r.a1, { kind: "finding", ...FINDING, value: "the decoded block holds the second account", source: "the decode job", evidence: "out.txt line 1", refs: ["job:j000002/out.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(f.ok, JSON.stringify(f));
+  const after = await finishGate(r.S, run1);
+  assert.ok(!after.defects.some((x) => x.code === "unrecorded_work"), JSON.stringify(after.defects));
 });

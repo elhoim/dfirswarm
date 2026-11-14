@@ -61,8 +61,11 @@ export type QuestionDefect = { code: "open_question" | "question_answer" | "stal
 /** An addition committed whose effects (its ledger entry, its request, the leads and answers it reopens, its board post) are not all recorded yet. */
 export type AdditionDefect = { code: "addition_incomplete"; import: string; what: string; fix: string };
 
+/** A seat at work whose job of evidence ended after its last record (`since`): extensions/finish.ts unrecordedHolds. */
+export type UnrecordedDefect = { code: "unrecorded_work"; seat: string; job: string; since: string; what: string; fix: string };
+
 export type FinishGate = {
-  defects: Array<L.LeadDefect | QuestionDefect | AdditionDefect>;
+  defects: Array<L.LeadDefect | QuestionDefect | AdditionDefect | UnrecordedDefect>;
   /** Why a run that meets its checks is examination-limited, each in words; empty when it answered everything. */
   limited: string[];
   /** Each goal question and how it stands, with what blocks the ones not answered. */
@@ -136,6 +139,18 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         fix: "the hub records it at its next round; with no hub running, swarm.sh evidence <run> list records it",
       });
     }
+    // A seat still at work whose evidence work ended after its last record (B5): what that work showed is on no record
+    // yet, and a done now ends the run without it. The seat is asked (the done posts the ask); the hold ends when it
+    // records, is done or goes, and lapses a grace after the first done that named it, when it is said as a warning.
+    const F = await import("../extensions/finish.ts");
+    const lapsed: string[] = [];
+    for (const h of await F.unrecordedHolds(sandbox, snap).catch(() => [] as Awaited<ReturnType<typeof F.unrecordedHolds>>)) {
+      if (h.lapsed) {
+        lapsed.push(`${h.seat} was asked at ${h.asked} to record what its job ${h.job} showed and has recorded nothing since: the finish went on without it`);
+        continue;
+      }
+      defects.push({ code: "unrecorded_work", seat: h.seat, job: h.job, since: h.since, what: F.unrecordedWhat(h), fix: F.unrecordedFix(h) });
+    }
     const limiting = lead.limiting;
     const limited: string[] = [];
     // What the answers check said about each section, passing or not.
@@ -145,7 +160,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     // Each section's disposition under the bar, as the answers check found it.
     const dispositions = new Map<string, string>();
     const holding: string[] = [];
-    const warnings: string[] = [];
+    const warnings: string[] = [...lapsed];
     let sawAnswers = false;
     for (const c of run?.checks ?? []) {
       const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[]; dispositions?: Record<string, string>; warnings?: string[] } | undefined;

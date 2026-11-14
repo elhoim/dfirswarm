@@ -130,3 +130,55 @@ export function textHolds(lowerText: string, key: string): boolean {
     from = i + 1;
   }
 }
+
+// --- the asked format, sighted (B5) ---------------------------------------------------------------
+
+/** A question still open (in scope, not withdrawn, no standing answer) and its words, where its asked format is read from. */
+export type OpenQuestion = { section: string; text: string };
+
+/** How much of a result's text is searched for an asked format. */
+const SIGHT_TEXT_MAX = 512 * 1024;
+
+/**
+ * A pattern that finds an asked format inside a result's text, or null when the format says too little to be worth a
+ * line: a single digest, address, port or address of mail, or free words alone, is in nearly every listing a job
+ * prints, so only a format of several pieces with one that is not free words (Name_md5(file), ip:port,
+ * md5(a)_md5(b)) or a clock of several placeholders (DD-MM-YYYY-HH-MM) is looked for. A free-words piece is one run of
+ * characters with no space or separator in it here.
+ */
+export function formatScanner(questionText: string): { format: string; re: RegExp } | null {
+  const known = scanners.get(questionText);
+  if (known !== undefined) return known;
+  const f = questionFormat(questionText);
+  const distinctive = f && f.pieces.length ? (f.pieces.length >= 2 ? f.pieces.some((p) => p.kind !== "text") : f.pieces[0]!.kind === "clock" && /[-.]/.test(f.format)) : false;
+  const body = f && distinctive ? f.pieces.map((p) => `${p.join}${p.kind === "text" ? "[^\\s|,;\"'<>()\\[\\]{}_:/@]+" : `(?:${p.re})`}`).join("") : null;
+  const out = f && body ? { format: f.format, re: new RegExp(`(?<![0-9A-Za-z])${body}(?![0-9A-Za-z])`, "i") } : null;
+  if (scanners.size > 256) scanners.clear();
+  scanners.set(questionText, out);
+  return out;
+}
+/** Each question's scanner, by its words: a question's words change only with its revision. */
+const scanners = new Map<string, { format: string; re: RegExp } | null>();
+
+/**
+ * The open questions whose asked format a result's text holds: each question once, with its format. The value that
+ * matched is never returned, so nothing that says it can carry it on (the line to the seat, the trace row).
+ */
+export function sightedFormats(text: string, open: readonly OpenQuestion[]): Array<{ section: string; format: string }> {
+  const t = String(text ?? "").slice(0, SIGHT_TEXT_MAX);
+  if (!t) return [];
+  const out: Array<{ section: string; format: string }> = [];
+  for (const q of open) {
+    const s = formatScanner(q.text);
+    if (s && s.re.test(t)) out.push({ section: q.section, format: s.format });
+  }
+  return out;
+}
+
+/** The one line a seat is told when a result it read holds a string in an open question's asked format. */
+export function sightedLine(hits: ReadonlyArray<{ section: string; format: string }>): string | null {
+  if (!hits.length) return null;
+  const each = hits.map((h) => `${h.section} (${h.format})`).join(", ");
+  const ids = hits.map((h) => h.section.replace(/^question:/, "")).join(", ");
+  return `This result holds a string in the form ${hits.length === 1 ? "an open question asks for" : "open questions ask for"}: ${each}, with no answer yet. If it is the answer, record it: as the answer, as a finding with answers: [${ids}] if another seat holds the lead, or, not yet verified, as a candidate (record_candidate: question, value, ref).`;
+}

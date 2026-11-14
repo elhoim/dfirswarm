@@ -8,7 +8,7 @@ Each coded rule of the ledger: a defect holds the finish line, a warning is said
 
 | Code | Raised in | Design | Tests | Fixtures |
 | --- | --- | --- | --- | --- |
-| `no_answer` | `citationRefusal` (ledger-rules.ts), `ledgerGate` (ledger-rules.ts) | protocol "The codes the answers check names" | rules/no_answer.test.ts | — |
+| `no_answer` | `citationRefusal` (ledger-rules.ts), `ledgerGate` (ledger-rules.ts) | protocol "The codes the answers check names" | record-kind-tools.test.ts, rules/no_answer.test.ts | — |
 | `answer_support` | `ledgerGate` (ledger-rules.ts), `checkLedgerAnswers` (check-answers.ts) | protocol "The codes the answers check names" | coverage-carry.test.ts, limitation-failed-job.test.ts, negative-bar.test.ts | — |
 | `answer_disputed` | `ledgerGate` (ledger-rules.ts) | protocol "Ledger (`record`, `ledger`, `ledger/`)"; protocol "The codes the answers check names" | downgrade.test.ts, review-correction.test.ts | — |
 | `no_critic_act` | `ledgerGate` (ledger-rules.ts) | protocol "The codes the answers check names"; protocol "Event log (`traces/events.jsonl`)" | contract-fixtures.test.ts, finish-prepare.test.ts, premises.test.ts, review-correction.test.ts | accepted-excused |

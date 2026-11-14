@@ -404,88 +404,21 @@ Ledger (only when `record` is in your tool list)
   source, evidence)`; every indicator as kind=ioc. Peers see them with `ledger`, and the harness
   renders ledger/ledger.md — the timeline, the indicators, the findings, the answers — after every
   record. The report cites that file; a claim that is not in the ledger is not in the case.
-- The kinds recorded most have a tool of their own, with that kind's fields and rules only:
-  `record_finding`, `record_answer`, `record_coverage`, `record_limitation`, `record_absence`
-  (when they are in your tool list; `record(kind=…)` takes every kind). A refusal names every
+- Each kind's fields and rules are in its tool's description, not here: `record` takes every
+  kind (event, ioc, finding, absence, hypothesis, limitation, coverage, answer) and says each
+  one's rules; when your tool list has `record_finding`, `record_answer`, `record_coverage`,
+  `record_limitation` and `record_absence`, each carries one kind's fields, its required list and
+  its rules only. Read the description before your first entry of a kind. A refusal names every
   defect of the entry at once, each with what to send: fix them all and call once more. What was
   plainly meant is taken and said in the reply ("Taken as meant"): a ref written as the shell
   shows it (`store/jobs/j000149/out/x` or `job:j000149/out/x` for `job:j000149/x`), `question:9`
   for `9` in `answers`, the one kind the fields allow when `kind` is left out.
-- A finding is an observation and what you make of it, recorded while the artefact is open.
-  `value` is what you saw, fact only; `source` where; `evidence` how a reader re-derives it (the
-  job or tool, the query, the scope); `refs` the run's objects it rests on; `basis` observed or
-  inferred; `indicates` what the observation means and the step from one to the other, one to
-  three sentences; `confidence` high, medium or low, with `confidence_why`: where the data came
-  from, whether the method is reliable for it, how specific the observation is, and whether your
-  sources depend on each other. Confidence is the quality of the evidence, not a count: one
-  authoritative record can be high; three copies of one thing are one source. When `basis` is
-  inferred, `alternatives` lists what else could explain it, each rejected with why or left open;
-  `alternatives_none_why` says you considered none — never invent one. A finding resting on the
-  kept output of a job that did not succeed needs `qualifies`: why those bytes are still usable;
-  it can never support a claim that something is absent. "Unknown" is an answer; a guess recorded
-  as a finding is not. Before you choose among several places a value could be carried in (files,
-  streams, fields, look-alike payloads), record one finding with `carriers [{carrier, state:
-  decoded | undecodable | not_examined, why}]`, a row each: an answer may not say that nothing
-  remains open while a row is not examined. A payload that calls itself fake, test or decoy is a
-  decoy candidate: record its finding with `decoy` (what in it says so); no answer rests on it
-  alone unless `decoy_check` names the machine check that shows it is the answer all the same. A
-  file in a vendor's path with the vendor's timestamps is not case data.
-- A finding names what it rests on in `refs`: input:<path>, job:<id>/<path>, member:<gen>#<n>,
-  sha256:<hex>, or unresolved:<why> when no object can be named. Each ref is checked when you
-  record; a file only in your own work/ is not an object of the run, so run the work as a job
-  and cite job:. To add refs to a finding already recorded without them, record it again with
-  its refs: it becomes the correction.
+- A value you hold for a question and cannot stand behind yet goes on the ledger at once:
+  `record_candidate(question, value, ref)`. Every seat's header names it; it is not an answer, and
+  the finish counts none. A value that is in your context alone is lost when the run ends.
 - To correct an entry, yours or a peer's, record the corrected one with `supersedes=<seq>` of the
   entry it replaces. Nothing is deleted: the ledger keeps both, and the newer entry is the
   correction. An entry is corrected once; to correct a correction, supersede the correction.
-- `kind=absence` records a search that found nothing, when that matters to the case: `value` is
-  what was looked for, `source` what was searched, and `evidence` the query, the tool and its
-  version, and the scope (allocated files only, or unallocated space and slack too, and the time
-  range). "Not found" holds only for that query and that scope. It is optional: an empty grep on
-  the way to something else is not an entry. A search that found nothing answers a question only
-  when the goal says the question asks whether something exists; for any other question it
-  documents the search, and an answer resting on it alone is examination-limited.
-- A negative needs a positive control. An absence, or a finding that reports a search's empty
-  result ("0 hits", "not found", "No … found"), that rests on your own script or shell line (the
-  output of a command job, not of a pack tool that reports what it covered) names its control:
-  `control {ref, found}`, a job in which the same scanner, with the same pattern and layout, found
-  a planted or known value. Without one it is refused: a search that could not have matched reads
-  the same as one that found nothing, and a grep over a compressed or encrypted container is not
-  a search of its content. A negative about pictures holds for the images you read: the hub lists
-  them from the trace (`images_read`) and names the images of the same job you were never handed;
-  an answer resting on it is held (`negative_images_unread`) until they are read and the entry is
-  recorded again.
-- `kind=coverage` says what a negative was searched over, before the answer that rests on it:
-  `value` the proposition searched for, `refs` the objects searched, `time_range`,
-  `search_method`, `settings`, `coverage_actual` (what was actually covered), `skipped` and
-  `failures` ("none", with how you know), `result_refs` (the absences, limitations, findings and
-  job outputs the search produced), `alternatives` (what is still open), and
-  `detection_opportunity` {trace_expected: yes|no|unknown, why}: would the event have left a trace
-  in these sources, given what was collected and what they keep. The harness adds whether the jobs
-  behind it were given every object it names (complete or partial): it counts objects, it never
-  judges relevance. `areas` {allocated, deleted, unallocated, slack, secondary}, each searched,
-  skipped or not_applicable, says which parts of the stored data the search reached (live data,
-  deleted entries, unallocated space, slack, and secondary sources: copies, backups, snapshots,
-  another log of the same thing), with what was skipped and why in `skipped`. A question that asks
-  for a complete set ("every file", "all connections", "each account", a complete list; `questions`
-  shows it) is answered established or partial only on a coverage record for it that names its
-  areas: without one the finish line holds the answer (`completeness_uncovered`). Behind a
-  not_determinable, `acquisition_ask` (R-<n>) or `acquisition_none_why` says whether a source the
-  evidence does not hold was asked for. `looked_for` is required (or `looked_for_none_why`, when
-  no literal form exists): the literal strings a hit would contain were the answer in the evidence
-  (the name, the identifier, the address, the keyword). The hub then searches every output the
-  run already holds for them (every job's output and logs, every import, the evidence added late
-  included, the captures, tool-output/), case-insensitive, in UTF-8 and UTF-16LE: an export or a
-  listing made an hour ago often holds the row a narrow search missed. A negative waits for the
-  sweep; a hit in an object the record does not name holds it until you examine that object,
-  record what it showed (a finding, an event or a limitation whose refs name the object, or one
-  absence whose refs list several, written after the sweep) and record the coverage again naming
-  it with those entries in `result_refs`, or revise the answer. Naming a hit object in refs without
-  such an entry does not clear it: the finish line keeps holding it and names each object. A sweep
-  its budget left partial holds it too, unless the operator accepts the question's limits.
-- `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
-  `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
-  finding: a report weighs its conclusions against them.
 - Say what an entry is for: `answers` names the goal sections it answers; `rel` links it to
   another entry it supports, contradicts, duplicates or is derived from; `sensitive` marks a
   credential, key or personal data (and from then on no name, `doing` label or question may carry
@@ -502,23 +435,9 @@ Ledger (only when `record` is in your tool list)
   (E-205) is bound to its question by the hub all the same (question:N), and the reply says so.
 - `kind=answer` is the swarm's answer to one question of the goal (`section=question:<n>`), or
   its `summary` or `narrative`, written from the ledger, not from memory. For a question, `value`
-  is the asked string alone, in the format the question asks (its Format line): the first line of
-  `value` is what is graded, so it holds the answer and nothing else, no sentence, no label, no
-  second candidate. `qualifier` holds whatever qualifies it (a candidate, a second reading, what
-  is open), and a reply's format note asks for the form, never for a guess. A partial answer with
-  a part open gives in `value` only the piece of the format that is established, or leaves it
-  empty; nothing is asked for the open part. A revision that lowers the confidence or the result
-  keeps `value`: a doubt, a dispute or a best_candidate review changes confidence, result and
-  parts, never the asked string; `value` changes only with `value_changed_because`, naming the
-  entry (`E-<seq>`) that shows it wrong. Other readings go in `candidates [{value, state, why,
-  by?}]`: a revision carries every candidate of the answer it corrects, the readings disputes of
-  it give, and its earlier value when it lowers the confidence or answers an objection; a
-  candidate leaves only as `ruled_out` with `by`, the job (`job:<id>/<path>`) or the entry
-  resting on one whose result excludes it. `alternatives_open` may say that nothing remains open
-  only when no candidate is open and no carrier table or partial coverage record the answer cites
-  shows one unexamined; an answer that chose among several carriers names them in
-  `carrier_names`, and is recorded established only once the carrier table it cites has a row
-  for each.
+  is the asked string alone, in the format the question asks: its first line is what is graded,
+  and what qualifies it goes in `qualifier` (the rules of value, qualifier, candidates and carriers
+  are `record`'s and `record_answer`'s).
   `reasoning` says how the entries lead to it, citing `E-<seq>` for every claim; for a question also
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
   (the limitation entries that bound it), `alternatives_open` and `would_change`. The run records
@@ -794,6 +713,9 @@ Done
   no_objection, or objection with why, and sections: the numbers or headings of the sections you
   reviewed; none named is the whole report), say what is still open, or wait. A coordinator that is
   done, dead, compacting or silent is taken over by the next seat's done.
+- When the coordinator calls done while a job of yours ended after your last record, the finish
+  waits for you and you are asked on the board: record every value you hold (an answer, a
+  finding, or a candidate). Anything you record ends the wait; it lapses ten minutes after the ask.
 - An ack binds each section it covered by that section's digest: when the report is published
   again it carries over while those sections are unchanged, and your header says when one you
   reviewed changed; then review only those (`finish` ack with those sections). Never ack again a

@@ -1434,37 +1434,101 @@ async function closeChanged(sandboxRoot: string, s: L.LeadsSnapshot, all: string
   return after.filter((w) => changed.has(w.section));
 }
 
+/** How long a seat a done named for what it has not recorded has to record it before the finish goes on without it (SWARM_UNRECORDED_GRACE_SEC, 600). */
+export function unrecordedGraceMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SWARM_UNRECORDED_GRACE_SEC?.trim();
+  return (raw && /^\d+$/.test(raw) ? Number(raw) : 600) * 1000;
+}
+
+/**
+ * A seat at work whose evidence work ended after its last record (unrecordedHolds): the done waits for it.
+ * - `job`: the newest job of evidence (a command or tool job that ended ok) that ended after the seat's last record;
+ * - `last`: the seat's last record (a ledger entry it wrote or co-wrote, an attest, a dispute), or null for none;
+ * - `since`: the key the hold is asked and lapses by, the seat's last record; a record moves it, and a new hold begins;
+ * - `asked`: when a finish-line check first named this hold (the done that asked the seat); `lapsed` once the grace
+ *   since has passed: the finish then goes on without it, and says so as a warning.
+ */
+export type UnrecordedHold = { seat: string; job: string; ended: string; last: string | null; since: string; asked?: string; lapsed?: boolean };
+
 /**
  * The seats still at work (on the team, neither done nor marked dead, with a working row on the trace within the stale
- * limit) whose newest ended job of evidence (a command or tool job that ended ok) ended after their newest ledger entry:
- * one item a seat. In the run s082123 a seat had computed an answer at minute 152 and never recorded it, and the run was
- * stopped with the value in its context alone; a finish that does not wait for such a seat ends without it.
+ * limit) whose evidence work ended after their last record: one hold a seat. In the run s082123 a seat had computed an
+ * answer at minute 152 and never recorded it, and the run was stopped with the value in its context alone; a finish
+ * that does not wait for such a seat ends without it. It holds the done (scripts/finish-gate.ts, unrecorded_work) and
+ * cannot hold it for ever: a seat that records anything, is done, is marked dead or falls silent past the stale limit
+ * releases it, and a hold a done named lapses `unrecordedGraceMs` after that done (the finish log's check that first
+ * named it), when it turns a warning.
  */
-export async function unrecordedWork(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<string[]> {
+export async function unrecordedHolds(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<UnrecordedHold[]> {
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
   if (!ids.length) return [];
-  const act = await L.recentActivity(sandboxRoot, L.leadStaleMs(), now);
-  const lastEntry = new Map<string, number>();
-  for (const e of s.ledger.entries) {
-    const at = Date.parse(e.at ?? "");
-    if (!Number.isFinite(at)) continue;
-    for (const by of [e.by, ...((e as { authors?: string[] }).authors ?? [])]) if (by) lastEntry.set(by, Math.max(lastEntry.get(by) ?? 0, at));
-  }
-  const out: string[] = [];
+  const stale = L.leadStaleMs();
+  const act = await L.recentActivity(sandboxRoot, stale, now);
+  const lastRecord = new Map<string, number>();
+  const saw = (by: string | undefined, raw: string | undefined) => {
+    const at = Date.parse(raw ?? "");
+    if (by && Number.isFinite(at)) lastRecord.set(by, Math.max(lastRecord.get(by) ?? 0, at));
+  };
+  for (const e of s.ledger.entries) for (const by of [e.by, ...((e as { authors?: string[] }).authors ?? [])]) saw(by, e.at);
+  for (const a of await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[])) saw(a.by, a.at);
+  for (const d of await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[])) saw(d.by, d.at);
+  const st = await readFinish(sandboxRoot).catch(() => null);
+  const grace = unrecordedGraceMs();
+  const out: UnrecordedHold[] = [];
   for (const id of ids) {
     if (["done", "dead"].some((m) => existsSync(join(sandboxRoot, "done", "agents", `${id}.${m}`)))) continue;
     const row = act.get(id);
-    if (!row?.last || now - row.last >= L.leadStaleMs()) continue;
-    let newest: { id: string; at: number } | null = null;
+    if (!row?.last || now - row.last >= stale) continue;
+    const last = lastRecord.get(id) ?? 0;
+    let newest: { job: string; at: number } | null = null;
     for (const j of s.jobs) {
       if (j.agent !== id || (j.kind !== "command" && j.kind !== "tool") || j.status !== "ok" || !j.finished_at) continue;
       const at = Date.parse(j.finished_at);
-      if (Number.isFinite(at) && (!newest || at > newest.at)) newest = { id: j.id, at };
+      if (Number.isFinite(at) && at > last && (!newest || at > newest.at)) newest = { job: j.id, at };
     }
-    if (!newest || newest.at <= (lastEntry.get(id) ?? 0)) continue;
-    out.push(`${id} is at work and its job ${newest.id} ended after its last record (${lastEntry.has(id) ? new Date(lastEntry.get(id)!).toISOString() : "none"}): ask it to record what that job showed, or wait for it`);
+    if (!newest) continue;
+    const since = last ? new Date(last).toISOString() : "none";
+    const named = st?.checks.find((c) => ((c.run as { gate?: { defects?: Array<{ code?: string; seat?: string; since?: string }> } } | undefined)?.gate?.defects ?? []).some((d) => d.code === "unrecorded_work" && d.seat === id && d.since === since));
+    const askedAt = named ? Date.parse(named.at) : NaN;
+    out.push({ seat: id, job: newest.job, ended: new Date(newest.at).toISOString(), last: last ? since : null, since, ...(Number.isFinite(askedAt) ? { asked: named!.at, lapsed: now - askedAt >= grace } : {}) });
   }
   return out;
+}
+
+/** What a hold says, as an item: the seat, the work, its last record, and what ends the wait. */
+export function unrecordedWhat(h: UnrecordedHold, grace = unrecordedGraceMs()): string {
+  const until = h.asked ? `; asked at ${h.asked}, the finish waits until ${new Date(Date.parse(h.asked) + grace).toISOString()}` : "";
+  return `${h.seat} is at work and its job ${h.job} ended after its last record (${h.last ?? "none"}): what that job showed is on no record yet${until}`;
+}
+
+/** How a hold ends, as a fix: the seat records, or goes, or the grace passes. */
+export function unrecordedFix(h: Pick<UnrecordedHold, "seat">, grace = unrecordedGraceMs()): string {
+  return `${h.seat} is asked on the board to record what it holds: a value for a question as the answer, as a finding with answers: [n], or unverified as a candidate (record_candidate: question, value, ref); anything it records ends the hold, as its done or its going does, and a hold a done named lapses ${Math.round(grace / 60_000)} minute(s) after it`;
+}
+
+/** The holds as readiness lists them: the ones that have not lapsed, one item a seat. */
+export async function unrecordedWork(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<string[]> {
+  return (await unrecordedHolds(sandboxRoot, s, now)).filter((h) => !h.lapsed).map((h) => `${unrecordedWhat(h)}: ask it to record what it holds, or wait for it`);
+}
+
+/**
+ * The ask a done makes of each seat its finish line named for unrecorded work (B5): one post to that seat, once for
+ * each of its holds (keyed by the seat and its last record, so a done refused again posts nothing new). The seat is
+ * told what the hold is, what to record, and when the finish goes on without it. Posts made, by seat.
+ */
+export async function askUnrecorded(sandboxRoot: string, by: string, defects: ReadonlyArray<{ code: string; seat?: string; job?: string; since?: string; what?: string }>, post: (args: { tag: string; body: string; to: string; key: string; via: string }) => Promise<unknown>): Promise<string[]> {
+  const asked: string[] = [];
+  for (const d of defects) {
+    if (d.code !== "unrecorded_work" || !d.seat) continue;
+    const key = `unrecorded:${d.seat}:${String(d.since ?? "none").replace(/[^A-Za-z0-9:._-]/g, "")}`;
+    const body =
+      `${by} called done, and the finish waits for you: ${d.what ?? `your work ended after your last record`}. ` +
+      `Record now every value you hold and have not recorded: a value for a question as its answer if you hold its lead, as a finding with answers: [n] if not, or, if it is not verified, as a candidate (record_candidate: question, value, ref); and what that work showed that bears on the case. ` +
+      `What is not on the ledger when the run ends is lost. Anything you record ends the wait; if that work showed nothing worth a record, the finish goes on without you ${Math.round(unrecordedGraceMs() / 60_000)} minute(s) after this ask.`;
+    const r = await post({ tag: "ask", to: d.seat, key, via: by, body }).catch(() => null);
+    if (r && !(r as { existing?: boolean }).existing) asked.push(d.seat);
+  }
+  return asked;
 }
 
 async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revision: string): Promise<Readiness> {
@@ -1694,7 +1758,44 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
     const own = ownReviewWords(await reportReview(sandboxRoot).catch(() => null), me);
     act += own ?? " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
   }
-  return `Finish: ${state}; ${who}.${act}`;
+  // The candidates (B5): values a seat holds and has not verified, named to every seat, counted by nothing at the finish.
+  const candidates = await candidatesAt(sandboxRoot, r.revision).catch(() => null);
+  return `Finish: ${state}; ${who}.${act}${candidates ? ` ${candidates}` : ""}`;
+}
+
+/**
+ * The candidates line of a header (B5, ledger-rules.ts CandidateMark): each standing candidate (a hypothesis with the
+ * candidate mark, open, not superseded) for a question whose standing answer does not already give that value, with
+ * the question, the value, its entry, who holds it and where it was read. At most eight, each value cut at 80
+ * characters; null with none. They are not answers, and nothing at the finish counts them.
+ */
+export function candidatesLine(entries: readonly P.LedgerEntry[]): string | null {
+  const replaced = P.supersededBy(entries as P.LedgerEntry[]);
+  const answered = new Map<string, string>();
+  for (const e of entries) if (e.kind === "answer" && !replaced.has(e.seq) && e.section) answered.set(String(e.section), answerLineKey(String(e.value ?? "")));
+  const items: string[] = [];
+  for (const e of entries) {
+    if (e.kind !== "hypothesis" || !(e as P.LedgerEntry & P.CandidateMark).candidate || replaced.has(e.seq) || (e.status ?? "open") !== "open") continue;
+    const q = `question:${P.sectionKey(String((e.answers ?? [])[0] ?? ""))}`;
+    const value = String(e.value ?? "");
+    if (answered.get(q) === answerLineKey(value)) continue;
+    items.push(`${q} "${value.length > 80 ? `${value.slice(0, 77)}...` : value}" (E-${e.seq} by ${e.by}${e.refs?.[0] ? `, read at ${e.refs[0]}` : ""})`);
+  }
+  if (!items.length) return null;
+  return `Candidates (values held and not verified: not answers, and the finish counts none; verify one and record the answer): ${items.slice(0, 8).join("; ")}${items.length > 8 ? `; and ${items.length - 8} more (ledger kind hypothesis)` : ""}.`;
+}
+
+/** The candidates line at a revision of the registers (the ledger is part of it): read once a revision. */
+const candidatesCache = new Map<string, string | null>();
+async function candidatesAt(sandboxRoot: string, revision: string): Promise<string | null> {
+  const key = `${sandboxRoot}\u0000${revision}`;
+  if (revision && candidatesCache.has(key)) return candidatesCache.get(key)!;
+  const line = candidatesLine(await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]));
+  if (revision) {
+    candidatesCache.set(key, line);
+    if (candidatesCache.size > 64) candidatesCache.delete(candidatesCache.keys().next().value!);
+  }
+  return line;
 }
 
 // --- checks, one per revision ------------------------------------------------------------------
@@ -1702,7 +1803,15 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
 /** The check recorded for a revision, if any: a done at the same revision takes it instead of running the finish line again. */
 export async function checkAt(sandboxRoot: string, revision: string): Promise<FinishState["checks"][number] | null> {
   if (!revision) return null;
-  return (await readFinish(sandboxRoot)).checks.filter((c) => c.revision === revision).at(-1) ?? null;
+  // A check held on unrecorded work is not taken again (B5): what ends that hold (a seat falling silent, its grace
+  // passing) moves no part of the revision, so the finish line is run again for each done while it holds.
+  return (await readFinish(sandboxRoot)).checks.filter((c) => c.revision === revision && !heldOnUnrecorded(c.run)).at(-1) ?? null;
+}
+
+/** Whether a finish-line run's gate held the done on a seat's unrecorded work. */
+export function heldOnUnrecorded(run: unknown): boolean {
+  const defects = (run as { gate?: { defects?: Array<{ code?: unknown }> } } | null | undefined)?.gate?.defects;
+  return Array.isArray(defects) && defects.some((d) => d?.code === "unrecorded_work");
 }
 
 /** Record what the finish line said at a revision (whole: the run the verdict was made from). */
@@ -1715,26 +1824,131 @@ export async function recordCheck(sandboxRoot: string, by: string, revision: str
 }
 
 /**
- * Where the finish stands, for any seat (finish status): readiness, the
- * coordinator, the last check, the report's review, and what is late
- * against the report. What is late needs the lease's boundary: before a
- * coordinator's prepare (or done) there is none, and nothing is listed.
+ * The question a report's heading or a table row's first cell names: `1`, `1. What ...`, `Q1`, `Q-1`, `Question 1`,
+ * `question:1`. Null for any other heading (Summary, Timeline, Method).
  */
+export function reportQuestionOf(text: string): string | null {
+  const t = text.replace(/[*_`]/g, "").trim();
+  const m = /^question:([A-Za-z0-9._-]+)/i.exec(t) ?? /^(?:§\s*)?(\d{1,3})(?:[.):](?:\s|$)|$)/.exec(t) ?? /^(?:Q|Question)\s*-?\s*(\d{1,4})\b/i.exec(t);
+  return m ? `question:${m[1]}` : null;
+}
+
+/** A line of a report or a ledger value as the two are compared: its first line's words, without marks, citations, edge punctuation or case. */
+export function answerLineKey(line: string): string {
+  return firstLine(line)
+    .replace(/\s*[([]\s*E-\d+(?:\s*[,;]\s*E-\d+)*\s*[)\]]/g, "")
+    .replace(/[*`]|__/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\s"'“”]+|[\s.;,"'“”]+$/g, "")
+    .toLowerCase();
+}
+
+/** A line that labels the answer ("Answer: x", "**Answer:** x", "- A: x"): what follows the label, or null. */
+function labelledAnswer(line: string): string | null {
+  const m = /^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*(?:answer|a)\s*(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?\s*(.*)$/i.exec(line);
+  return m ? m[1]!.replace(/^(?:\*\*|__)\s*/, "").trim() : null;
+}
+
+/** A line that only frames a section (the question repeated, a quote, a rule, a table's separator): never its answer. */
+function framing(line: string): boolean {
+  const t = line.trim();
+  return !t || /^>/.test(t) || /^(?:[-*_]\s*){3,}$/.test(t) || /^\|?\s*:?-{3,}/.test(t) || /^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*(?:question|q)\s*(?:\*\*|__)?\s*[:：]/i.test(t);
+}
+
 /**
- * A report held against the ledger: each question's standing answer whose value's first line the report does not hold,
- * and each E-<n> the report cites that the ledger does not have. A run's report held six exact strings its ledger had
- * as sentences (s082123), another cited E-97 in a ledger that ended at E-95, a third said "pending" twelve minutes
- * after the answer was recorded. Pure: `answers` are the standing answers, `maxSeq` the ledger's last entry.
+ * The answer a report gives each question, as a reader takes it: in a section whose heading names the question, the
+ * line labelled as its answer, else its first line that says something (the question repeated, a quote and a rule are
+ * passed over); in a table, the row whose first cell names the question, its second cell. The first one a question
+ * has counts.
  */
-export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number): string[] {
+export function reportAnswers(report: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const lines = report.split(/\r?\n/);
+  let fenced = false;
+  let current: { q: string; level: number; lines: string[] } | null = null;
+  const close = () => {
+    if (!current || out.has(current.q)) return;
+    const said = current.lines.filter((l) => !framing(l));
+    const labelled = current.lines.map(labelledAnswer).find((x) => x !== null && x !== "");
+    const first = labelled ?? said.find((l) => !/^\s*\|/.test(l)) ?? said[0];
+    if (first !== undefined) out.set(current.q, first);
+  };
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (fenced) continue;
+    const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (h) {
+      const level = h[1]!.length;
+      const q = reportQuestionOf(h[2]!);
+      if (q || !current || level <= current.level) {
+        close();
+        current = q ? { q, level, lines: [] } : null;
+      }
+      continue;
+    }
+    const row = /^\s*\|(.+)\|\s*$/.exec(line);
+    if (row) {
+      const cells = row[1]!.split("|").map((c) => c.trim());
+      const q = cells.length >= 2 ? reportQuestionOf(cells[0]!) : null;
+      if (q && !out.has(q) && cells[1]) {
+        out.set(q, cells[1]);
+        continue;
+      }
+    }
+    current?.lines.push(line);
+  }
+  close();
+  return out;
+}
+
+/** How many dated events a report says its timeline holds ("42 dated events", "a timeline of 42 events", "42 events on the timeline"); null when it says none. */
+export function reportEventCount(report: string): number | null {
+  const flat = report.replace(/[*_`]/g, "").replace(/\s+/g, " ");
+  const m =
+    /\b(\d{1,6}) dated events?\b/i.exec(flat) ??
+    /\btimeline (?:of|with|holds|has|lists) (\d{1,6}) (?:dated )?events?\b/i.exec(flat) ??
+    /\b(\d{1,6}) (?:dated )?events? (?:on|in) the (?:timeline|ledger)\b/i.exec(flat);
+  return m ? Number(m[1]) : null;
+}
+
+/** The ledger's dated events that stand: kind event, a time that parses, not superseded. Only these are counted. */
+export function datedEvents(entries: readonly P.LedgerEntry[], replaced: ReadonlySet<number> | ReadonlyMap<number, unknown>): number {
+  return entries.filter((e) => e.kind === "event" && !replaced.has(e.seq) && Number.isFinite(Date.parse(String(e.ts ?? "")))).length;
+}
+
+/**
+ * A report held against the ledger, section by section (B7). Each question's answer in the report (reportAnswers: the
+ * line its section leads with, or its table row) is compared with the first line of the question's standing answer's
+ * value, without marks, citations or case; a question answered in one and not the other is named too. A count of dated
+ * events the report states is held to the ledger's standing dated events (an undated or superseded event is not one).
+ * And each E-<n> the report cites that the ledger does not have. A run's report held six exact strings its ledger had
+ * as sentences (s082123), another cited E-97 in a ledger that ended at E-95, a third said "pending" twelve minutes after
+ * the answer was recorded. Finding the value anywhere in the report is not enough: a report whose section 5 leads with
+ * a sentence and quotes the value further down is graded on the sentence. Pure: `answers` are the standing answers,
+ * `maxSeq` the ledger's last entry, `dated` its standing dated events when known.
+ */
+export function reportAgainstLedger(report: string, answers: ReadonlyArray<{ section: string; seq: number; value: string }>, maxSeq: number, dated?: number): string[] {
   const out: string[] = [];
-  const flat = report.replace(/[*_`]/g, "").replace(/\s+/g, " ").toLowerCase();
+  const said = reportAnswers(report);
+  const cut = (x: string) => (x.length > 120 ? `${x.slice(0, 117)}...` : x);
+  const standing = new Map(answers.map((a) => [a.section, a]));
   for (const a of answers) {
     const first = firstLine(a.value);
     if (!first) continue;
-    const want = first.replace(/[*_`]/g, "").replace(/\s+/g, " ").toLowerCase();
-    if (!flat.includes(want)) out.push(`the report does not hold ${a.section}'s standing answer (E-${a.seq}): its value's first line, ${first.length > 120 ? `${first.slice(0, 117)}...` : first}, is not in it; the report and the ledger must say the same, so bring one to the other`);
+    const line = said.get(a.section);
+    if (line === undefined) {
+      out.push(`the report has no section for ${a.section}, whose standing answer is E-${a.seq} (${cut(first)}): give it a section that leads with that answer`);
+      continue;
+    }
+    if (answerLineKey(line) !== answerLineKey(first)) out.push(`the report's section for ${a.section} leads with "${cut(firstLine(line))}", and its standing answer E-${a.seq} is "${cut(first)}": the report and the ledger must say the same, so bring one to the other`);
   }
+  for (const [q, line] of said) {
+    if (standing.has(q) || !answerLineKey(line)) continue;
+    out.push(`the report's section for ${q} leads with "${cut(firstLine(line))}", and the ledger has no standing answer for ${q}: record it, or say in the report that it is not answered`);
+  }
+  const count = reportEventCount(report);
+  if (dated !== undefined && count !== null && count !== dated) out.push(`the report says its timeline holds ${count} dated event${count === 1 ? "" : "s"}, and the ledger has ${dated} standing dated event${dated === 1 ? "" : "s"} (an undated or superseded event is not counted)`);
   const cited = new Set([...report.matchAll(/\bE-(\d{1,6})\b/g)].map((m) => Number(m[1])));
   const missing = [...cited].filter((n) => n > maxSeq || n < 1).sort((x, y) => x - y);
   if (missing.length) out.push(`the report cites ${missing.slice(0, 10).map((n) => `E-${n}`).join(", ")}${missing.length > 10 ? ` and ${missing.length - 10} more` : ""}, which the ledger does not have (its last entry is E-${maxSeq})`);
@@ -1749,9 +1963,15 @@ export async function reportCheck(sandboxRoot: string, report: string | null | u
   const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
   const replaced = P.supersededBy(entries);
   const answers = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && String(e.section ?? "").startsWith("question:")).map((e) => ({ section: String(e.section), seq: e.seq, value: String(e.value ?? "") }));
-  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0));
+  return reportAgainstLedger(Buffer.from(bytes.bytes).toString("utf8"), answers, entries.reduce((m, e) => Math.max(m, e.seq), 0), datedEvents(entries, replaced));
 }
 
+/**
+ * Where the finish stands, for any seat (finish status): readiness, the
+ * coordinator, the last check, the report's review, and what is late
+ * against the report. What is late needs the lease's boundary: before a
+ * coordinator's prepare (or done) there is none, and nothing is listed.
+ */
 export async function finishStatus(ctx: P.SwarmContext): Promise<Record<string, unknown>> {
   const r = await readiness(ctx.sandboxRoot);
   const st = await readFinish(ctx.sandboxRoot);

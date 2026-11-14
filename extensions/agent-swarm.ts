@@ -212,7 +212,7 @@ import {
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
+import { askUnrecorded, checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
 import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
@@ -221,7 +221,7 @@ import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
 import { cropPng, pngForModel } from "./png-scale.ts";
 import { coerceArgs } from "./forged-args.ts";
-import { sightingDigest } from "./sighting.ts";
+import { sightedFormats, sightedLine, sightingDigest, type OpenQuestion } from "./sighting.ts";
 
 /** How long a read made before a model call may take before the call goes out on the last known value. */
 const PRECALL_DEADLINE_MS = 1500;
@@ -236,6 +236,32 @@ let lastInputsSweepAt = 0;
 /** How often a pane re-reads what is installed. An install is a rare event. */
 const TOOLCHAIN_INTERVAL_MS = 30_000;
 let lastToolchainAt = 0;
+
+/** The record tools of one kind each (B2): offered to the weak model class only (recordKindToolsFor). */
+export const KIND_TOOL_NAMES = ["record_finding", "record_answer", "record_coverage", "record_limitation", "record_absence"] as const;
+
+/**
+ * The model families of the weak class (B2): the open-weight families. On the Batman III runs their seats had 30-45% of
+ * their record and attest calls refused, six to nine times the rest (S-01), and a tool a kind, with that kind's fields
+ * and its real required list, is for them. A family is read from the model's id, at its start or after a separator.
+ */
+const WEAK_FAMILIES = /(?:^|[/:_.-])(?:deepseek|glm|qwen|qwq|kimi|moonshot|minimax|llama|mistral|mixtral|codestral|devstral|magistral|gemma|gpt-oss|phi-?\d|nemotron|hermes|olmo|granite|yi-|internlm|baichuan|ernie|hunyuan|seed-oss)/i;
+/** Providers that serve local, open-weight models only: every model they serve is of the weak class. */
+const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "cpp", "vllm", "sglang", "localmock"]);
+
+/**
+ * Whether a seat is offered the kinds' own record tools (B2): the weak class is, the rest are declared `record` alone.
+ * SWARM_RECORD_KIND_TOOLS says otherwise for every seat (all, none); a session that names no model keeps them.
+ */
+export function recordKindToolsFor(model: { provider?: string; id?: string } | undefined, env: NodeJS.ProcessEnv = process.env): { offer: boolean; why: string } {
+  const set = env.SWARM_RECORD_KIND_TOOLS?.trim().toLowerCase();
+  if (set === "all" || set === "none") return { offer: set === "all", why: `SWARM_RECORD_KIND_TOOLS=${set}` };
+  if (!model?.id) return { offer: true, why: "the session names no model, so the kinds' tools stay" };
+  const name = `${model.provider ?? ""}/${model.id}`;
+  if (LOCAL_PROVIDERS.has(String(model.provider ?? "").toLowerCase())) return { offer: true, why: `${name} is served locally: the weak class` };
+  if (WEAK_FAMILIES.test(model.id)) return { offer: true, why: `${name} is of an open-weight family: the weak class` };
+  return { offer: false, why: `${name} is not of the weak class: record alone, whose description carries every kind's rules` };
+}
 
 /** Tools this extension owns. Everything else is a Pi built-in we only trace. */
 export const SWARM_TOOLS = new Set([
@@ -269,6 +295,7 @@ export const SWARM_TOOLS = new Set([
   "record_coverage",
   "record_limitation",
   "record_absence",
+  "record_candidate",
   "ledger",
   "attest",
   "dispute",
@@ -699,6 +726,18 @@ export default function (pi: ExtensionAPI) {
   const jobHinted = new Set<string>();
   /** The sensitive jobs this seat was told about already (docs/adr/0018): the note on a read is once per seat and job. */
   const toldSensitive = new Set<string>();
+  /** When this seat was last told that a result held an open question's asked format, by question (B5): again only after FORMAT_TOLD_MS. */
+  const toldFormat = new Map<string, number>();
+  const FORMAT_TOLD_MS = 30 * 60_000;
+  /** The open questions (in scope, not withdrawn, no standing answer) and their words, read at most once a minute. */
+  let openQuestionsRead: { at: number; list: OpenQuestion[] } | null = null;
+  async function openQuestionsNow(cwd: string): Promise<OpenQuestion[]> {
+    if (openQuestionsRead && Date.now() - openQuestionsRead.at < 60_000) return openQuestionsRead.list;
+    const v = (await questionsView(ctxFrom(cwd, agentId), { view: "list" })) as { questions?: Array<{ section?: unknown; text?: unknown; scope?: unknown; answer?: unknown; withdrawn?: unknown }> };
+    const list = (v.questions ?? []).filter((q) => q.scope === "in_scope" && !q.withdrawn && !q.answer && typeof q.text === "string" && typeof q.section === "string").map((q) => ({ section: q.section as string, text: q.text as string }));
+    openQuestionsRead = { at: Date.now(), list };
+    return list;
+  }
   let jobsOffered: boolean | undefined;
   /** When this agent was steered for its own cap, if it was. */
   let agentCapSteeredAt: number | null = null;
@@ -2255,6 +2294,22 @@ export default function (pi: ExtensionAPI) {
         for (const job of fresh) toldSensitive.add(job);
         content = [...(Array.isArray(content) ? content : []), { type: "text", text: SENSITIVE_READ_NOTE }];
         contentChanged = true;
+      }
+    }
+    // A result read from the evidence (a job's answer, a file, a shell's output, a pack or forged tool's) that holds a
+    // string in an open question's asked format (B5): the seat is told in one line which question it may answer, once a
+    // question in FORMAT_TOLD_MS. The line names the question and its format, never the value, and so does the trace row.
+    if (agentId && !isError && Array.isArray(content) && (["job_run", "job_status", "read", "bash", "powershell", "grep"].includes(name) || loadedTools.has(name))) {
+      const text = content.map((p) => (p?.type === "text" && typeof p.text === "string" ? p.text : "")).join("\n");
+      const now = Date.now();
+      const open = text ? await openQuestionsNow(ctx.cwd).catch(() => [] as OpenQuestion[]) : [];
+      const hits = sightedFormats(text, open).filter((h) => now - (toldFormat.get(h.section) ?? 0) >= FORMAT_TOLD_MS);
+      const line = sightedLine(hits);
+      if (line) {
+        for (const h of hits) toldFormat.set(h.section, now);
+        content = [...content, { type: "text", text: line }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "format_sighted", { tool: name }, { ok: true, questions: hits.map((h) => h.section) }).catch(() => undefined);
       }
     }
     // Pi takes a tool's failure only from a throw: an `isError: true` in what
@@ -3904,7 +3959,11 @@ export default function (pi: ExtensionAPI) {
       "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable; looked_for (the literal strings a hit would contain, which the hub then searches for in every output the run holds) or looked_for_none_why; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
       "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
       "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is cited in premises [{id: P-<n>, rev, stance: assumed}] when the register holds it (questions view premises), or named in reasoning, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge), parts [{id, part, status: established | open, refs, open_by?}] (required on a partial answer, with at least one open part bounded by R-<n>, L-<n> or E-<seq>), premise_tested {outcome, refs} (a question that presumes an event, its presumes in the register or a person's question framed as a proposition: before answering it, test whether the event happened at all, against the rival \"the question's premise is not supported\"; if the evidence does not support it the answer is premise_not_supported, and a clue that fits the question's frame is a candidate to test against that rival, not an answer), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
-      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report. A refusal names every defect of the entry at once, each with what to send: fix them all and call once more. An answer's value is the asked string alone (what qualifies it goes in qualifier). The kinds used most have a tool of their own with that kind's fields and rules only: record_finding, record_answer, record_coverage, record_limitation, record_absence.",
+      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report. A refusal names every defect of the entry at once, each with what to send: fix them all and call once more. An answer's value is the asked string alone (what qualifies it goes in qualifier). The kinds used most have a tool of their own with that kind's fields and rules only: record_finding, record_answer, record_coverage, record_limitation, record_absence; a value for a question you cannot verify yet is record_candidate's (question, value, ref). " +
+      "Each kind's rules beyond its fields are here, not in the prompt. A finding: \"unknown\" is one, a guess is not; before choosing among several places a value could be carried in (files, streams, fields, look-alike payloads), record one finding with carriers [{carrier, state: decoded | undecodable | not_examined, why}], a row each; a payload that calls itself fake, a test or a vendor's sample is a decoy candidate, marked decoy (what in it says so), and no answer rests on it alone unless decoy_check names the machine check that shows it is the answer all the same; a file in a vendor's path with the vendor's timestamps is not case data; to add refs to an entry recorded without them, record it again with its refs. " +
+      "A negative (an absence, or a finding that reports a search's empty result) resting on your own script or shell line (a command job, not a pack tool that reports what it covered) names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value, or it is refused; a search over a compressed or encrypted container is not a search of its content; one about pictures holds for the images you read (images_read: the hub names the images of the same job you were not handed, and an answer resting on it is held until they are read). An absence holds only for its query and scope, and answers a question only when the goal says the question asks whether something exists. " +
+      "A coverage record's looked_for strings are searched in every output the run holds: a hit in an object the record does not name holds the negative until you record what that object showed and record the coverage again with those entries in result_refs; a sweep its budget left partial holds it too, unless the operator accepts the question's limits. " +
+      "An answer's first line of value is what is graded: no sentence, no label, no second candidate. A partial answer with a part open gives in value only the piece of the format that is established, or leaves it empty. A revision that lowers confidence or result keeps value: value changes only with value_changed_because naming the entry (E-<seq>) that shows it wrong. Other readings go in candidates [{value, state: open | ruled_out | decoy, why, by?}]: a revision carries every candidate of the answer it corrects, and one leaves only ruled_out, by the job or entry whose result excludes it. alternatives_open says nothing remains open only when no candidate is open and no carrier table or partial coverage record it cites shows one unexamined; an answer that chose among several carriers names them in carrier_names, and is established only once the carrier table it cites has a row for each.",
     promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
@@ -3939,7 +3998,7 @@ export default function (pi: ExtensionAPI) {
       description:
         "Record a finding in the swarm's ledger, while the artefact is open: an observation and what you make of it. value is what you saw, fact only, one sentence; source where (a path, a log, a registry key); evidence how a reader re-derives it (the command, the query, the record id, the hash); refs the objects it rests on. basis is observed or inferred; confidence comes with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count); indicates says what the observation means and the step from one to the other, one to three sentences. " +
         "An inferred finding lists alternatives [{explanation, status: rejected | open, why}], or says in alternatives_none_why why none was considered: never invent one. A ref whose job did not succeed needs qualifies [{ref, why}] (ref may name the job, job:<id>, for every ref of the entry from it), and such bytes never show that something is absent. answers names the question it bears on (\"3\"): an answer can rest only on an entry that names its question. " +
-        "A finding that says what was NOT found (no hit, none, not present) and rests on your own script or shell line names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value. One about pictures holds for the images you read: the hub names the images of the same job you were not handed. Before choosing among several places a value could be carried in, record one finding with carriers [{carrier, state: decoded | undecodable | not_examined, why}], a row each. A payload that declares itself fake, a test or a vendor's sample is marked decoy (what in it says so). " +
+        "A finding that says what was NOT found (no hit, none, not present) and rests on your own script or shell line names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value. One about pictures holds for the images you read: the hub names the images of the same job you were not handed. Before choosing among several places a value could be carried in, record one finding with carriers [{carrier, state: decoded | undecodable | not_examined, why}], a row each. A payload that declares itself fake, a test or a vendor's sample is marked decoy (what in it says so), and no answer rests on it alone; a file in a vendor's path with the vendor's timestamps is not case data. \"Unknown\" is a finding; a guess recorded as one is not. To add refs to a finding recorded without them, record it again with its refs: it becomes the correction. " +
         COMMON_WORDS,
       guidelines: ["Use record_finding for an observation and what it indicates; a dated event is record(kind=event), a search that found nothing record_absence, what could not be examined record_limitation.", "A negative from your own scanner names its control run; a finding names the question it bears on in answers."],
       schema: Type.Object({
@@ -4021,7 +4080,7 @@ export default function (pi: ExtensionAPI) {
       snippet: "Record what a negative was searched over, before the answer that rests on it",
       description:
         "Record what a search covered, before a bounded_negative or not_determinable answer on a material question rests on it (and for a question that asks for a complete set): value is the proposition the search tested; refs the objects it was over (a directory of a job's output or of the evidence counts); answers the questions it is for; time_range, search_method, settings, coverage_actual (what was actually covered), skipped and failures (\"none\", with how that is known); result_refs what the search produced: the entries (E-<seq>: absences, limitations, findings, events; never an answer or another coverage record) and the job outputs (job:<id>[/<path>]); alternatives, in words, what is still open; detection_opportunity {trace_expected: yes | no | unknown, why}: would the event have left a trace in these sources. " +
-        "looked_for is required, or looked_for_none_why: the literal strings a hit would contain (names, identifiers, addresses, keywords); the hub then searches every output the run holds for them, and a hit in an object the record does not name holds a negative until that object is examined. areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable. The hub adds whether the jobs behind it were given every object it names (complete or partial). Another seat reviews it (attest with review) before a negative resting on it may stand. " +
+        "looked_for is required, or looked_for_none_why: the literal strings a hit would contain (names, identifiers, addresses, keywords); the hub then searches every output the run holds for them, and a hit in an object the record does not name holds a negative until you record what that object showed (a finding, an event or a limitation naming it, or one absence listing several) and record the coverage again with those entries in result_refs: naming the object in refs alone does not clear it, and a sweep its budget left partial holds it too, unless the operator accepts the question's limits. areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable. The hub adds whether the jobs behind it were given every object it names (complete or partial). Another seat reviews it (attest with review) before a negative resting on it may stand. " +
         COMMON_WORDS,
       guidelines: ["Before a negative answer or a not_determinable one on a material question, record_coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace."],
       schema: Type.Object({
@@ -4079,7 +4138,7 @@ export default function (pi: ExtensionAPI) {
       snippet: "Record a search that found nothing, with what it was over and its control",
       description:
         "Record a search that found nothing, when that matters to the case (an empty grep on the way to something else is not an entry): value is what was looked for and not found, one sentence; source what was searched (the path, image, log or artefact: \"not found\" is only ever \"not found there\"); evidence the query, the tool and its version, and the scope (allocated files only, or unallocated space and slack too, and the time range); refs the objects searched and the job that searched them; completion how far the search got (complete, partial, failed). " +
-        "An absence that rests on your own script or shell line (a command job, not a pack tool that reports what it covered) names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value (plant one in a copy, or run it over a file known to hold one); a search that could not have matched reads the same as one that found nothing. A search over a compressed or encrypted container is not a search of its content. One about pictures holds for the images you read: the hub names the images of the same job you were not handed, and an answer resting on the entry is held until they are read. The output of a job that did not succeed cannot show an absence: record it with completion partial or failed, and what was not reached with record_limitation. " +
+        "An absence that rests on your own script or shell line (a command job, not a pack tool that reports what it covered) names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value (plant one in a copy, or run it over a file known to hold one); a search that could not have matched reads the same as one that found nothing. A search over a compressed or encrypted container is not a search of its content. One about pictures holds for the images you read: the hub names the images of the same job you were not handed, and an answer resting on the entry is held until they are read. The output of a job that did not succeed cannot show an absence: record it with completion partial or failed, and what was not reached with record_limitation. An absence answers a question only when the goal says the question asks whether something exists; for any other it documents the search, and an answer resting on it alone is examination-limited. " +
         COMMON_WORDS,
       guidelines: ["An absence holds for the query and the scope it names, and one from your own scanner names the control run that shows the scanner could have matched."],
       schema: Type.Object({
@@ -4118,6 +4177,53 @@ export default function (pi: ExtensionAPI) {
       },
     });
   }
+
+  // The kinds' own tools are the weak class's (B2): a seat of another class is declared `record` alone, whose description
+  // carries every kind's rules, and not five more definitions of about 47 KB. Decided on the seat's model when the
+  // session starts and again when the model changes; the trace says which and why (record_tools).
+  // The kinds' tools the session's allowlist made active, read once: only those are ever put back.
+  let kindAllowed: string[] | null = null;
+  const applyKindTools = async (model: { provider?: string; id?: string } | undefined, cwd: string | undefined) => {
+    const decision = recordKindToolsFor(model);
+    try {
+      const active = pi.getActiveTools();
+      kindAllowed ??= active.filter((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n));
+      const next = decision.offer ? [...new Set([...active, ...kindAllowed])] : active.filter((n) => !(KIND_TOOL_NAMES as readonly string[]).includes(n));
+      if (next.length !== active.length || next.some((n, i) => n !== active[i])) pi.setActiveTools(next);
+    } catch {
+      // an older Pi without the active-tool calls keeps whatever --tools gave it
+    }
+    if (cwd && agentId) await logEvent(cwd, agentId, "record_tools", { model: model?.id ? `${model.provider ?? ""}/${model.id}` : null }, { ok: true, kind_tools: decision.offer, why: decision.why }).catch(() => undefined);
+  };
+  pi.on("session_start", async (_event, ctx) => applyKindTools((ctx as { model?: { provider?: string; id?: string } }).model, (ctx as { cwd?: string }).cwd));
+  pi.on("model_select", async (event, ctx) => applyKindTools((event as { model?: { provider?: string; id?: string } }).model, (ctx as { cwd?: string }).cwd));
+
+  // A candidate in one call (B5): a value for one question that is not verified yet, and the object it was read from.
+  // It is a hypothesis about that question (ledger-rules.ts CandidateMark), named in every header and counted by nothing
+  // at the finish: what a seat holds is on the ledger at once, not left in its context for the lead's holder to write.
+  const candidateSchema = Type.Object({
+    question: Type.String({ description: "The question the value may answer: its number, or question:<n>" }),
+    value: Type.String({ description: "The value as read, alone, in the form the question asks" }),
+    ref: Type.String({ description: "The object it was read from: job:<id>/<path>, input:<path>, import:<id>/<path>, member:<gen>#<n> or sha256:<hex>" }),
+    why: Type.Optional(Type.String({ description: "What is still open: why it is not an answer yet" })),
+  });
+  pi.registerTool({
+    name: "record_candidate",
+    label: "Record a candidate",
+    description:
+      "Record, in one call, a value you hold for a question and cannot stand behind yet: the question, the value, and the object it was read from (ref). It goes on the ledger as a candidate (a hypothesis about that question, status open), every seat's header names it, and the finish counts it for nothing: the answer is still to be recorded, by the lead's holder or by you, once it is verified. Record it the moment you hold the value rather than keeping it in your context: a value that is not on the ledger when the run ends is lost.",
+    promptSnippet: "Record a value for a question that is not verified yet: question, value, ref",
+    promptGuidelines: ["A value for a question you hold and cannot verify yet goes on the ledger at once with record_candidate (question, value, ref); the answer follows once it is verified."],
+    parameters: candidateSchema,
+    prepareArguments: (args: unknown) => argsForValidator(candidateSchema, args) as never,
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const p = params as { question?: unknown; value?: unknown; ref?: unknown; why?: unknown };
+      const q = String(p.question ?? "").trim().replace(/^question:/i, "");
+      const ref = String(p.ref ?? "").trim();
+      const why = typeof p.why === "string" && p.why.trim() ? `; still open: ${p.why.trim()}` : "";
+      return runRecord("record_candidate", { kind: "hypothesis", status: "open", candidate: true, value: p.value, answers: q ? [q] : [], refs: ref ? [ref] : [], source: ref || undefined, evidence: `a candidate value for question:${q}, as read at ${ref}${why}` }, toolCtx);
+    },
+  });
 
   pi.registerTool({
     name: "ledger",
@@ -4944,6 +5050,8 @@ export default function (pi: ExtensionAPI) {
         }).catch(() => undefined);
         if (!verdict.proceed) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: verdict.reason }).catch(() => undefined);
+          // A seat the gate holds the done for, for work it has not recorded, is asked for what it holds: once a hold (B5).
+          await askUnrecorded(toolCtx.cwd, agentId, run?.gate?.defects ?? [], (a) => systemPost(toolCtx.cwd, a)).catch(() => []);
           return {
             content: [{ type: "text" as const, text: verdict.reason }],
             details: { ok: false, reason: verdict.reason, failing: verdict.failing, passed: run?.passed ?? 0, total: run?.total ?? 0 },
