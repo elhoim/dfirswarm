@@ -3,10 +3,12 @@
 # other_runs_load, the arguments of `vm.ts capacity`), read from the registry
 # and the starts' claims: a run whose hub lives; a run still in its kickoff
 # (the catalogue, the image pull: no hub yet), known by its launcher in its
-# record; a start that has no record yet, by its claim (in the temporary area,
-# so a refused start leaves nothing under runs/).
-# Three starts launched together each count the ones before them. A launcher
-# that ended, or a pid now another process's, counts nothing. No VM.
+# record; a start that has no record yet, by its claim (in the harness's home,
+# so a refused start leaves nothing under runs/, keyed by the runs directory as
+# the file system has it). Three starts launched together each count the ones
+# before them, and two starts whose TMPDIR, TZ and spelling of the runs
+# directory differ count each other. A launcher that ended, or a pid now
+# another process's, counts nothing. No VM.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/capacity-kickoff.XXXXXX")"
@@ -14,9 +16,10 @@ PIDS=()
 trap 'for p in ${PIDS[@]+"${PIDS[@]}"}; do { kill "$p"; wait "$p"; } >/dev/null 2>&1 || true; done; rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
-export TMPDIR="$TMP/tmp"; mkdir -p "$TMPDIR"
-eval "$(sed -n '/^proc_started()/p; /^kickoffs_dir()/p; /^launcher_alive()/,/^}/p; /^kickoff_claim()/,/^}/p; /^other_runs_load()/,/^}/p' "$ROOT/scripts/swarm.sh")"
-declare -F other_runs_load kickoff_claim launcher_alive proc_started kickoffs_dir >/dev/null || fail "the functions were not found in swarm.sh"
+export TMPDIR="$TMP/tmp" DFIRSWARM_HOME="$TMP/home"; mkdir -p "$TMPDIR"
+FUNCS='/^proc_started()/p; /^resolve_path_nocreate()/,/^}/p; /^kickoffs_dir()/,/^}/p; /^launcher_alive()/,/^}/p; /^kickoff_claim()/,/^}/p; /^other_runs_load()/,/^}/p'
+eval "$(sed -n "$FUNCS" "$ROOT/scripts/swarm.sh")"
+declare -F other_runs_load kickoff_claim launcher_alive proc_started kickoffs_dir resolve_path_nocreate >/dev/null || fail "the functions were not found in swarm.sh"
 
 RUNS_DIR="$TMP/runs"; REGISTRY="$RUNS_DIR/registry.json"; mkdir -p "$RUNS_DIR"
 # A process that lives (its output away from any command substitution) or one that has ended, by its pid in LAST.
@@ -45,6 +48,11 @@ other_runs_load "" >/dev/null
 [[ "$OTHER_RUNS_KICKING" -eq 1 ]] || fail "the run in its kickoff is not said to be: $OTHER_RUNS_KICKING"
 out="$(other_runs_load sb)"
 [[ "$out" == "--others-memory $(( 2*4096 + 16384 )) --others-cpus 8 --others-runs 1" ]] || fail "a run is counted beside itself: $out"
+# The launcher's start time in its record, read by a start whose shell has another time zone: the same launcher.
+for tz in Asia/Tokyo America/Los_Angeles UTC; do
+  TZ="$tz" other_runs_load "" >/dev/null
+  [[ "$OTHER_RUNS_KICKING" -eq 1 ]] || fail "a start in TZ $tz does not see the run in its kickoff: $(TZ="$tz" other_runs_load "")"
+done
 pass "the registry: a run whose hub lives and a run still in its kickoff are counted; an ended launcher, a reused pid, a dead hub and a stopped run are not"
 
 # Starts with no record yet: their claims. A claim of a launcher already in a record is not counted twice.
@@ -71,11 +79,11 @@ rm -rf "$RUNS_DIR" "$KD"; mkdir -p "$RUNS_DIR"; echo '{"runs": []}' > "$REGISTRY
 # Each stands in for a launcher: it claims, counts the others, says what it counted, and stays (as a kickoff does).
 for i in 1 2 3; do
   bash -c '
-    eval "$(sed -n "/^proc_started()/p; /^kickoffs_dir()/p; /^launcher_alive()/,/^}/p; /^kickoff_claim()/,/^}/p; /^other_runs_load()/,/^}/p" "$1/scripts/swarm.sh")"
+    eval "$(sed -n "$4" "$1/scripts/swarm.sh")"
     RUNS_DIR="$2"; REGISTRY="$2/registry.json"
     kickoff_claim 2 2 4096 2 2 8192
     other_runs_load "" > "$3"
-    exec sleep 300' _ "$ROOT" "$RUNS_DIR" "$TMP/start$i.out" >/dev/null 2>&1 </dev/null &
+    exec sleep 300' _ "$ROOT" "$RUNS_DIR" "$TMP/start$i.out" "$FUNCS" >/dev/null 2>&1 </dev/null &
   PIDS+=("$!")
   for _ in $(seq 1 50); do [[ -s "$TMP/start$i.out" || ( "$i" -eq 1 && -e "$TMP/start$i.out" ) ]] && break; sleep 0.1; done
 done
@@ -86,6 +94,37 @@ done
 out="$(other_runs_load "")"
 [[ "$out" == "--others-memory $(( 3 * (2*4096 + 2*8192) )) --others-cpus $(( 3 * 8 )) --others-runs 3" ]] || fail "three starts in their kickoff: $out"
 pass "three starts launched together: the second counts the first, the third both, while none has a record or a hub"
+
+# Two starts on one runs directory from two shells: another TMPDIR, another TZ, and the directory named another way
+# (through a link, with a dot and a trailing slash). Each counts the other.
+rm -rf "$RUNS_DIR" "$KD"; mkdir -p "$RUNS_DIR"; echo '{"runs": []}' > "$REGISTRY"
+ln -s "$RUNS_DIR" "$TMP/runs-link"
+mkdir -p "$TMP/tmpA" "$TMP/tmpB"
+i=0
+for spec in "$TMP/tmpA|America/Los_Angeles|$TMP/runs-link" "$TMP/tmpB|Asia/Tokyo|$TMP/./runs/"; do
+  i=$((i + 1))
+  IFS='|' read -r tdir tz rdir <<<"$spec"
+  TMPDIR="$tdir" TZ="$tz" bash -c '
+    eval "$(sed -n "$4" "$1/scripts/swarm.sh")"
+    RUNS_DIR="$2"; REGISTRY="$2/registry.json"
+    kickoff_claim 2 2 4096 2 2 8192
+    other_runs_load "" > "$3"
+    exec sleep 300' _ "$ROOT" "$rdir" "$TMP/shell$i.out" "$FUNCS" >/dev/null 2>&1 </dev/null &
+  PIDS+=("$!")
+  for _ in $(seq 1 50); do [[ -e "$TMP/shell$i.out" ]] && break; sleep 0.1; done
+done
+[[ "$(cat "$TMP/shell2.out")" == "--others-memory $(( 2*4096 + 2*8192 )) --others-cpus 8 --others-runs 1" ]] || fail "a start from another shell did not count the first: $(cat "$TMP/shell2.out")"
+out="$(TMPDIR="$TMP/tmpC" TZ=Europe/Istanbul RUNS_DIR="$RUNS_DIR/" other_runs_load "")"
+[[ "$out" == "--others-memory $(( 2 * (2*4096 + 2*8192) )) --others-cpus 16 --others-runs 2" ]] || fail "a third shell does not count both: $out"
+[[ -z "$(find "$TMP/tmpA" "$TMP/tmpB" -mindepth 1)" ]] || fail "a claim was written in a temporary area: $(find "$TMP/tmpA" "$TMP/tmpB" -mindepth 1)"
+pass "two starts on one runs directory count each other whatever their TMPDIR, TZ and spelling of the directory"
+
+# Claims left for other runs directories by launchers that ended go when any start reads its own.
+mkdir -p "$DFIRSWARM_HOME/kickoffs/123456789"
+dead; printf '{"pid": %s, "started": "x", "memory_mib": 1, "cpus": 1}\n' "$LAST" > "$DFIRSWARM_HOME/kickoffs/123456789/$LAST.json"
+other_runs_load "" >/dev/null
+[[ ! -e "$DFIRSWARM_HOME/kickoffs/123456789/$LAST.json" ]] || fail "an ended launcher's claim for another runs directory was left"
+pass "an ended launcher's claim for another runs directory is removed by the next start that counts"
 
 # The kickoff writes its launcher into the run's record, and claims before it asks vm.ts capacity.
 grep -q 'kickoff: {pid: \$kickoff_pid, started: \$kickoff_started}' "$ROOT/scripts/swarm.sh" || fail "the run's record does not name its launcher"

@@ -3157,7 +3157,9 @@ finish_contract() { # <sandbox>
 }
 
 # A process's start time as ps gives it: with its pid, it names that process and never a later one given the same pid.
-proc_started() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# In UTC and the C locale: ps writes it in the reader's time zone and language, so a start whose shell had another TZ
+# read a live launcher's time as another time and counted it as ended.
+proc_started() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
 # Whether <pid> is still the launcher that began at <started>.
 launcher_alive() { # <pid> <started>
   [[ -n "${1:-}" && -n "${2:-}" ]] && kill -0 "$1" 2>/dev/null && [[ "$(proc_started "$1")" == "$2" ]]
@@ -3165,17 +3167,25 @@ launcher_alive() { # <pid> <started>
 
 # A start's claim on this host, written before it asks whether it fits and kept up to date until its registry record
 # names its launcher: three starts launched together each count the ones before them, though none has a record or a
-# hub yet. <launcher pid>.json in a directory of the temporary area named for the runs directory (a refused start
-# leaves nothing under runs/); a claim whose launcher has ended is nothing, and is removed by whoever reads it.
-kickoffs_dir() { printf '%s/dfirswarm-kickoffs/%s\n' "${TMPDIR:-/tmp}" "$(printf '%s' "$RUNS_DIR" | cksum | cut -d' ' -f1)"; }
+# hub yet. <launcher pid>.json in a directory of the harness's home (beside its hubs; a refused start leaves nothing
+# under runs/) named for the runs directory as the file system has it, its links and its spelling resolved: two starts
+# on one runs directory meet there whatever their TMPDIR, TZ or way of naming it. A claim whose launcher has ended is
+# nothing, and is removed by whoever reads it.
+kickoffs_dir() {
+  printf '%s/kickoffs/%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}" "$(resolve_path_nocreate "$RUNS_DIR" | cksum | cut -d' ' -f1)"
+}
 kickoff_claim() { # <seats> <seat vCPUs> <seat MiB> <workers> <worker vCPUs> <worker MiB>
-  local dir
+  local dir claim try
   dir="$(kickoffs_dir)"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  claim="$(jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson n "${1:-0}" --argjson c "${2:-0}" --argjson m "${3:-0}" --argjson w "${4:-0}" --argjson wc "${5:-0}" --argjson wm "${6:-0}" \
-    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}' \
-    > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null || true
+    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}')" || return 0
+  # Twice: another start's sweep may take an old empty directory away between the mkdir and the write.
+  for try in 1 2; do
+    mkdir -p "$dir" 2>/dev/null || return 0
+    printf '%s\n' "$claim" > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null && return 0
+  done
+  return 0
 }
 
 # The memory and vCPUs the other microVM runs going on this host may ask for, as arguments of `vm.ts capacity`:
@@ -3213,6 +3223,16 @@ other_runs_load() { # <this run's id, or empty>
       rm -f "$f" 2>/dev/null || true
     fi
   done
+  # The claims left for other runs directories by launchers that ended (a start refused after it claimed) go too, and
+  # a directory of them empty for an hour: nothing else would read them.
+  local area
+  area="$(dirname "$(kickoffs_dir)")"
+  for f in "$area"/*/*.json; do
+    [[ -f "$f" ]] || continue
+    kpid="${f##*/}"; kpid="${kpid%.json}"
+    if [[ "$kpid" =~ ^[0-9]+$ ]] && ! kill -0 "$kpid" 2>/dev/null; then rm -f "$f" 2>/dev/null || true; fi
+  done
+  if [[ -d "$area" ]]; then find "$area" -mindepth 1 -maxdepth 1 -type d -empty -mmin +60 -exec rmdir {} + 2>/dev/null || true; fi
   OTHER_RUNS_ARGS=""
   [[ "$runs" -gt 0 ]] && OTHER_RUNS_ARGS="--others-memory $mem --others-cpus $cpus --others-runs $runs"
   OTHER_RUNS_KICKING="$kicking"
@@ -6446,6 +6466,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # The record names this launcher now (kickoff.pid): its claim has said all it had to.
+  [[ "$isolation" == "microvm" ]] && rm -f "$(kickoffs_dir)/$$.json" 2>/dev/null
+  true
   # What the run was started with, for swarm.sh resume: outside the run,
   # 0600, in a directory denied to the panes where the guard can deny it (a
   # VM mounts none of runs/). The notify command is never in it: it is kept
