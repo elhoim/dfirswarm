@@ -211,6 +211,7 @@ import {
 } from "./board.ts";
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
+import { weakClassReason } from "./model-class.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
 import { askUnrecorded, checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
 import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
@@ -242,25 +243,16 @@ let lastToolchainAt = 0;
 export const KIND_TOOL_NAMES = ["record_finding", "record_answer", "record_coverage", "record_limitation", "record_absence"] as const;
 
 /**
- * The model families of the weak class (B2): the open-weight families. On the Batman III runs their seats had 30-45% of
- * their record and attest calls refused, six to nine times the rest (S-01), and a tool a kind, with that kind's fields
- * and its real required list, is for them. A family is read from the model's id, at its start or after a separator.
- */
-const WEAK_FAMILIES = /(?:^|[/:_.-])(?:deepseek|glm|qwen|qwq|kimi|moonshot|minimax|llama|mistral|mixtral|codestral|devstral|magistral|gemma|gpt-oss|phi-?\d|nemotron|hermes|olmo|granite|yi-|internlm|baichuan|ernie|hunyuan|seed-oss)/i;
-/** Providers that serve local, open-weight models only: every model they serve is of the weak class. */
-const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "cpp", "vllm", "sglang", "localmock"]);
-
-/**
- * Whether a seat is offered the kinds' own record tools (B2): the weak class is, the rest are declared `record` alone.
- * SWARM_RECORD_KIND_TOOLS says otherwise for every seat (all, none); a session that names no model keeps them.
+ * Whether a seat is offered the kinds' own record tools (B2): the weak class (model-class.ts) is, the rest are declared
+ * `record` alone. SWARM_RECORD_KIND_TOOLS says otherwise for every seat (all, none); a session that names no model keeps them.
  */
 export function recordKindToolsFor(model: { provider?: string; id?: string } | undefined, env: NodeJS.ProcessEnv = process.env): { offer: boolean; why: string } {
   const set = env.SWARM_RECORD_KIND_TOOLS?.trim().toLowerCase();
   if (set === "all" || set === "none") return { offer: set === "all", why: `SWARM_RECORD_KIND_TOOLS=${set}` };
   if (!model?.id) return { offer: true, why: "the session names no model, so the kinds' tools stay" };
   const name = `${model.provider ?? ""}/${model.id}`;
-  if (LOCAL_PROVIDERS.has(String(model.provider ?? "").toLowerCase())) return { offer: true, why: `${name} is served locally: the weak class` };
-  if (WEAK_FAMILIES.test(model.id)) return { offer: true, why: `${name} is of an open-weight family: the weak class` };
+  const weak = weakClassReason(name);
+  if (weak) return { offer: true, why: `${name} is ${weak}: the weak class` };
   return { offer: false, why: `${name} is not of the weak class: record alone, whose description carries every kind's rules` };
 }
 

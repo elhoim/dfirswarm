@@ -40,6 +40,7 @@ import { dirname, join, resolve } from "node:path";
 import * as NB from "./negative-bar.ts";
 import * as O from "./offers.ts";
 import * as PR from "./preparation.ts";
+import { modelClass } from "./model-class.ts";
 import * as P from "./protocol.ts";
 import * as SW from "./store-sweep.ts";
 
@@ -93,19 +94,8 @@ export const LEAD_MAX_NEEDS = 20;
 export const LEAD_MAX_ANSWERS = 8;
 /** The most questions a lead opened by a seat of the weak model class may name, unless the run sets its own. */
 export const LEAD_WEAK_MAX_ANSWERS = 3;
-/**
- * The open-weight model families and the locally served providers: the weak
- * model class. Their teams opened 11 to 20 leads a run, several questions to
- * a lead, lived 25 to 96 minutes with them and took 0 to 2 offers; the
- * closed frontier models opened many narrow leads and took 5 to 22.
- */
-const WEAK_MODEL_SEGMENT = /^(deepseek|qwen|qwq|glm|chatglm|zai|z-ai|kimi|moonshot|moonshotai|minimax|llama|meta-llama|mistral|mistralai|mixtral|codestral|devstral|magistral|gemma|phi|gpt-oss|nemotron|olmo|hermes|nousresearch|yi|01-ai|internlm|baichuan|ernie|hunyuan|seed-oss|granite|command-r|falcon|smollm|lmstudio|ollama|vllm|llamacpp|llama\.cpp|local)(?:$|[-_.:\d])/;
-/** A model's class from its name (provider/model, any routing prefix): "weak" for an open-weight or locally served model, else "strong"; null when unknown. */
-export function modelClass(model: string | null | undefined): "weak" | "strong" | null {
-  const m = String(model ?? "").trim().toLowerCase();
-  if (!m) return null;
-  return m.split("/").some((seg) => WEAK_MODEL_SEGMENT.test(seg)) ? "weak" : "strong";
-}
+/** A model's class from its name (provider/model, any routing prefix); the one definition is in model-class.ts. */
+export { modelClass };
 /** A seat's model class, from team.json; null for the operator, the harness, or a seat whose model is not recorded. */
 export async function seatModelClass(sandboxRoot: string, agent: string): Promise<"weak" | "strong" | null> {
   if (!agent || agent === P.SYSTEM_AGENT || agent === "operator") return null;
