@@ -1524,7 +1524,7 @@ export async function askUnrecorded(sandboxRoot: string, by: string, defects: Re
     const body =
       `${by} called done, and the finish waits for you: ${d.what ?? `your work ended after your last record`}. ` +
       `Record now every value you hold and have not recorded: a value for a question as its answer if you hold its lead, as a finding with answers: [n] if not, or, if it is not verified, as a candidate (record_candidate: question, value, ref); and what that work showed that bears on the case. ` +
-      `What is not on the ledger when the run ends is lost. Anything you record ends the wait; if the work showed nothing, say so here. The finish goes on without you ${Math.round(unrecordedGraceMs() / 60_000)} minute(s) after this ask.`;
+      `What is not on the ledger when the run ends is lost. Anything you record ends the wait; if that work showed nothing worth a record, the finish goes on without you ${Math.round(unrecordedGraceMs() / 60_000)} minute(s) after this ask.`;
     const r = await post({ tag: "ask", to: d.seat, key, via: by, body }).catch(() => null);
     if (r && !(r as { existing?: boolean }).existing) asked.push(d.seat);
   }
