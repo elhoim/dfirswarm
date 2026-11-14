@@ -824,11 +824,17 @@ function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<
  * Windows, CurrentVersion, ControlSet00n, Control, Software for regkv), not of one note's form.
  */
 export function commonWords(notes: readonly CardNote[]): (w: string) => boolean {
+  const known = commonCache.get(notes);
+  if (known) return known;
   const bound = Math.max(2, notes.length / 4);
   const df = new Map<string, number>();
   for (const n of notes) for (const w of n.words ?? []) df.set(w, (df.get(w) ?? 0) + 1);
-  return (w) => (df.get(w) ?? 0) > bound;
+  const common = (w: string) => (df.get(w) ?? 0) > bound;
+  commonCache.set(notes, common);
+  return common;
 }
+/** A tool's notes are one array of the card index for the run: their common words are counted once. */
+const commonCache = new WeakMap<readonly CardNote[], (w: string) => boolean>();
 
 /**
  * The note a call matches, among the notes that name its tool (or the program its command runs): the call gives a value
