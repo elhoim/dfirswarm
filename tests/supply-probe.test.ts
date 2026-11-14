@@ -136,6 +136,11 @@ test("the command: a passing probe makes the required capability met in toolbox.
   const sb = mkdtempSync(join(tmpdir(), "sp-"));
   writeFileSync(join(sb, "toolbox.json"), JSON.stringify({ preset: "dfir", present: [], missing: [], requires: [{ capability: "qr-decode", met: false, by: [], wanted: ["zbarimg"], use: "decode QR symbols" }, { capability: "ocr", met: false, by: [], wanted: ["tesseract"], use: "ocr" }] }));
   const hub = await fakeHub(sb, () => `${PROBE_PAYLOAD}\n`);
+  // The contract as the kickoff renders it, before any program can be supplied.
+  const goal = join(sb, "goal.md");
+  writeFileSync(goal, "## Goal\n\nx\n\n## Definition of done\n\nd\n");
+  execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "render-contract.ts"), join(ROOT, "prompts", "swarm.md.template"), join(sb, "SWARM.md"), goal, "`a0`", "5", "60", "1", "sw1", sb]);
+  const kickoffMd = readFileSync(join(sb, "SWARM.md"), "utf8");
   try {
     const cli = (...a: string[]) => new Promise<{ code: number; out: string }>((resolve) => {
       execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "supply-probe.ts"), sb, ...a], { encoding: "utf8" }, (err, out) => resolve({ code: err ? Number((err as { code?: number }).code ?? 1) : 0, out }));
@@ -149,7 +154,7 @@ test("the command: a passing probe makes the required capability met in toolbox.
     assert.equal(tb.requires[0]!.met, true);
     assert.deepEqual(tb.requires[0]!.by, ["import:mat-0001"]);
     assert.match(String(hub.posts.at(-1)?.body), /qr-decode: WORKS/);
-    // The contract names the supply as what meets it, and an untested one beside a capability not met.
+    // An untested supply is recorded and told to every seat.
     const u = await cli("mat-0002", "--untested", "the run has no hub with a job service to test it in", "--provides", "ocr", "--hub-admin", hub.socket);
     assert.equal(u.code, 0, u.out);
     const uo = JSON.parse(u.out) as { untested: boolean; posted: boolean; requires: { met: number } };
@@ -161,12 +166,12 @@ test("the command: a passing probe makes the required capability met in toolbox.
     const rec = JSON.parse(readFileSync(join(sb, "supplied-capabilities.json"), "utf8")) as Record<string, Record<string, unknown>>;
     assert.ok(Array.isArray(rec["mat-0001"]!.probes));
     assert.equal(rec["mat-0002"]!.untested, "the run has no hub with a job service to test it in");
-    const goal = join(sb, "goal.md");
-    writeFileSync(goal, "## Goal\n\nx\n\n## Definition of done\n\nd\n");
-    execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "render-contract.ts"), join(ROOT, "prompts", "swarm.md.template"), join(sb, "SWARM.md"), goal, "`a0`", "5", "60", "1", "sw1", sb]);
-    const md = readFileSync(join(sb, "SWARM.md"), "utf8");
-    assert.match(md, /\| qr-decode \| `import:mat-0001` \(supplied by the operator; its known-answer test passed in a worker job\) \|/);
-    assert.match(md, /\| ocr \| not met \(none of `tesseract`\); supplied `import:mat-0002` is NOT tested \(the run has no hub with a job service to test it in\): its silence says nothing \|/);
+    // What a seat gets of a supply: the contract, rendered once at kickoff (before), is the same file after both
+    // supplies and names the board as where a supply is said; the board has both posts, to everyone.
+    assert.equal(readFileSync(join(sb, "SWARM.md"), "utf8"), kickoffMd, "a supply changed the contract");
+    assert.match(kickoffMd, /\| qr-decode \| not met \(none of `zbarimg`\) \| decode QR symbols \|/);
+    assert.match(kickoffMd, /This table is the kickoff's and is not updated: a program supplied after the start is said on the board \(SUPPLIED PROGRAM TESTED, or NOT TESTED\)/);
+    assert.deepEqual(hub.posts.slice(-2).map((p) => [p.to, String(p.body).split(":")[0]]), [["all", "SUPPLIED PROGRAM TESTED"], ["all", "SUPPLIED PROGRAM NOT TESTED"]]);
     const bad = await cli("mat-0003", "--untested", "");
     assert.equal(bad.code, 2, "an empty reason is a usage error");
   } finally {
