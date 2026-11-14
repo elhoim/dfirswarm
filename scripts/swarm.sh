@@ -3900,7 +3900,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   local seal_herdr=1
   # The derived catalogue's ceiling of generations a run (--derived-limit;
   # SWARM_DERIVED_LIMIT the default, 50 without either): recorded with the
@@ -8445,8 +8445,9 @@ vm_ref_for_profile() { # <profile>
 # The job images of a run: each pack's own profile (images/recipe.py
 # profile-for), and the one holding every pack as the default. An image this
 # host does not hold is pulled; one that cannot be had is left out, and its
-# packs' jobs run in the default, said. Sets job_images_json (profile -> ref)
-# and pack_profiles_json (pack id -> profile).
+# packs' jobs run in the default, said. Sets job_images_json (profile -> ref),
+# pack_profiles_json (pack id -> profile) and job_image_digests_json (profile ->
+# the digest this host holds under that reference, as it was read here).
 plan_job_images() { # <pack dirs, one per line> <default job image>
   local dirs="$1" default_ref="$2" d id profile ref digest default_profile
   local images='{}' packs='{}'
@@ -8469,7 +8470,8 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
   # Each image on this host, or pulled now, before the clock starts; a
   # kickoff that starts no agent (--no-start, a check) looks for none, as it
   # does not for the agents' own image.
-  local have='{}' p
+  local have='{}' p seen_digests='{}'
+  job_image_digests_json='{}'
   if [[ "${start_agents:-1}" -ne 1 || "${CHECK_ONLY:-0}" -eq 1 ]]; then
     job_images_json="$images"
     pack_profiles_json="$packs"
@@ -8484,6 +8486,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
     if [[ -n "$digest" || "${CHECK_ONLY:-0}" -eq 1 ]]; then
       have="$(jq -c --arg p "$p" --arg r "$ref" '. + {($p): $r}' <<<"$have")"
+      [[ -n "$digest" ]] && seen_digests="$(jq -c --arg p "$p" --arg d "$digest" '. + {($p): $d}' <<<"$seen_digests")"
     elif [[ "$p" == "$default_profile" ]]; then
       echo "BLOCKER: the job image $ref, which holds every pack of the run, is not on this host and could not be pulled; build it (images/README.md) or pass --image." >&2
       return 1
@@ -8492,6 +8495,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
   done
   job_images_json="$have"
+  job_image_digests_json="$seen_digests"
   pack_profiles_json="$(jq -c --argjson have "$have" --arg dflt "$default_profile" 'with_entries(.value = (if $have[.value] then .value else $dflt end))' <<<"$packs")"
 }
 
@@ -8543,7 +8547,7 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
 cmd_image_for() {
   local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason jobs=1 brain_base=1 jobs_json='[]'
   # plan_job_images looks for no image when nothing is started.
-  local start_agents=0 job_images_json='{}' pack_profiles_json='{}'
+  local start_agents=0 job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
@@ -9649,32 +9653,35 @@ launch_vm_agents() {
 }
 
 # What each job image can do (scripts/image-capabilities.ts). The cache keeps each image's last result by its
-# reference, so the next run's contract can say it before a seat reads it.
+# digest (plan_job_images reads each one's), so the next run of the same image can say it in its contract before a seat
+# reads it, and an image rebuilt under the same name is not shown an earlier one's.
 image_capabilities_cache() { printf '%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}/image-capabilities"; }
 
 # Before the contract is rendered: job-capabilities.json as pending, with an earlier run's result for an image of the
-# same reference, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
+# same digest, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
 seed_job_capabilities() { # <sandbox> <job images JSON>
-  local sandbox="$1" images="${2:-}"
+  local sandbox="$1" images="${2:-}" digests="${job_image_digests_json:-}"
   [[ -n "$images" ]] || images='{}'
+  [[ -n "$digests" ]] || digests='{}'
   [[ -z "${resume_of:-}" ]] || return 0
   [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off && "${isolation:-}" == microvm && "${jobs:-1}" -eq 1 ]] || return 0
   [[ "$(jq 'length' <<<"$images" 2>/dev/null || echo 0)" -gt 0 ]] || return 0
   rm -f "$sandbox/job-capabilities.json"
-  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
 }
 
 # As soon as the hub's job service is up, before the seats' VMs are made: one known-answer probe job an image, in the
 # background, run from the run's frozen copy. The seats get the result on the board (as early as a job can give it,
 # often before their first inbox) and in job-capabilities.json. SWARM_IMAGE_CAPABILITIES=off skips it.
 start_image_capabilities() { # <sandbox> <hub dir> <run record JSON>
-  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles
+  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles digests="${job_image_digests_json:-}"
+  [[ -n "$digests" ]] || digests='{}'
   [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off ]] || return 0
   images="$(jq -c '.isolation.jobs.images // {}' <<<"$record" 2>/dev/null || echo '{}')"
   cap_profiles="$(jq -r 'keys | join(",")' <<<"$images" 2>/dev/null || true)"
   [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]] || return 0
   ( node --experimental-strip-types --no-warnings "$(run_script "$hub_dir" scripts/image-capabilities.ts)" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" \
-      --images "$images" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
+      --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
   echo "Capabilities: each job image ($cap_profiles) is being tested now with known-answer probes; the seats are told on the board (job-capabilities.json), and SWARM.md says it"
 }
 

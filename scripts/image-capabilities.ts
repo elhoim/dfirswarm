@@ -2,15 +2,17 @@
  * What each job image of a run can do, found by known-answer probes run in
  * a worker VM of that image right after kickoff, and told to the seats.
  *
- *   image-capabilities.ts <sandbox> --hub-admin SOCKET --profiles disk,re,full [--images JSON] [--cache DIR]
- *   image-capabilities.ts <sandbox> --seed --images JSON [--cache DIR]
+ *   image-capabilities.ts <sandbox> --hub-admin SOCKET --profiles disk,re,full [--images JSON] [--digests JSON] [--cache DIR]
+ *   image-capabilities.ts <sandbox> --seed --images JSON [--digests JSON] [--cache DIR]
  *
  * The seed (before the contract is rendered) writes job-capabilities.json as
- * pending, with what an earlier run found in each image of the same name
- * (--cache, one file an image), so SWARM.md says what the images can do, and
- * that this run tests them again, before a seat reads it. The probe (started
- * as soon as the hub is up, before the seats' VMs) writes the result there
- * and in the cache, and posts it to every seat.
+ * pending, with what an earlier run found in each image of the same digest
+ * (--cache, one file an image, named for its digest; --digests gives each
+ * profile's, as the kickoff read it), so SWARM.md says what the images can do,
+ * and that this run tests them again, before a seat reads it. An image rebuilt
+ * under the same name is another image: an earlier run's result is not its.
+ * The probe (started as soon as the hub is up, before the seats' VMs) writes
+ * the result there and in the cache, and posts it to every seat.
  *
  * The seats of eight runs spent 25 to 30 jobs a run finding out what their
  * images held, and still believed wrong things: `objdump` is in every image
@@ -27,7 +29,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { probeQrBase64, PROBE_PAYLOAD, type HubCall } from "./supply-probe.ts";
 
-export type Capability = { id: string; what: string; ok: boolean; by?: string; said?: string; in_this_image?: string };
+/**
+ * One capability of an image: `ok` when the known answer was read; `untested` (and not ok) when the probe could not
+ * set up its test here (the OCR engine is there, and nothing renders the line it is tested on), which says nothing
+ * of whether the image can do it; otherwise it does not, and `said` says why.
+ */
+export type Capability = { id: string; what: string; ok: boolean; untested?: boolean; by?: string; said?: string; in_this_image?: string };
 
 /** The line the OCR probe renders and must read back. */
 export const OCR_LINE = "known answer 4217";
@@ -85,7 +92,7 @@ export function probeScript(qrPngBase64: string, o: { runRoot?: string } = {}): 
     "  then",
     `    o="$(tesseract ocr.png stdout --psm 7 2>/dev/null | tr -s ' \\n\\t' '   ' | sed 's/^ *//; s/ *$//')"`,
     `    if [ "$o" = "${OCR_LINE}" ]; then say ocr ok tesseract; else say ocr no "tesseract is there and read the known line \\"${OCR_LINE}\\" as \\"$o\\""; fi`,
-    '  else say ocr no "tesseract is there; no Pillow here renders the known line it is tested on, so it was not tested"; fi',
+    '  else say ocr untested "tesseract is there, and no Pillow here renders the known line it is tested on: whether it reads text was not tested"; fi',
     'else say ocr no "no OCR engine: text in a picture is read by eye (the read tool) only"; fi',
     'if python3 -c "import brotli;assert brotli.decompress(brotli.compress(b\'x\'))==b\'x\'" 2>/dev/null; then say brotli ok "python3 brotli"; else say brotli no "no brotli: a br-encoded cache body is not inflated here"; fi',
     'if python3 -c "import numpy" 2>/dev/null; then say numpy ok "python3 numpy"; else say numpy no "no numpy"; fi',
@@ -112,9 +119,9 @@ const WHAT: Record<string, string> = {
 export function readProbe(stdout: string): Capability[] {
   const out: Capability[] = [];
   for (const line of stdout.split("\n")) {
-    const m = /^cap (\S+) (ok|no) (.*)$/.exec(line.trim());
+    const m = /^cap (\S+) (ok|no|untested) (.*)$/.exec(line.trim());
     if (!m) continue;
-    out.push({ id: m[1]!, what: WHAT[m[1]!] ?? m[1]!, ok: m[2] === "ok", ...(m[2] === "ok" ? { by: m[3]!.trim() } : { said: m[3]!.trim() }) });
+    out.push({ id: m[1]!, what: WHAT[m[1]!] ?? m[1]!, ok: m[2] === "ok", ...(m[2] === "untested" ? { untested: true } : {}), ...(m[2] === "ok" ? { by: m[3]!.trim() } : { said: m[3]!.trim() }) });
   }
   return out;
 }
@@ -144,53 +151,63 @@ export function withPackTools(byProfile: ByProfile): ByProfile {
   return out;
 }
 
-/** One line an image: what works and with what, and what does not. */
+/** One line an image: what works and with what, what does not, and what could not be tested there (never said absent). */
 export function capabilityLines(byProfile: ByProfile): string[] {
   return Object.entries(byProfile).map(([profile, caps]) => {
     if (!Array.isArray(caps)) return `- ${profile}: not tested (${caps.error})`;
     const yes = caps.filter((c) => c.ok).map((c) => `${c.what} (${c.by})`);
-    const no = caps.filter((c) => !c.ok).map((c) => `${c.what}: ${c.said}`);
-    return `- ${profile}: WORKS: ${yes.join("; ") || "none of the tested"}. DOES NOT: ${no.join("; ") || "none of the tested"}.`;
+    const no = caps.filter((c) => !c.ok && !c.untested).map((c) => `${c.what}: ${c.said}`);
+    const unknown = caps.filter((c) => !c.ok && c.untested).map((c) => `${c.what}: ${c.said}`);
+    return `- ${profile}: WORKS: ${yes.join("; ") || "none of the tested"}. DOES NOT: ${no.join("; ") || "none of the tested"}.${unknown.length ? ` NOT TESTED (not known either way): ${unknown.join("; ")}.` : ""}`;
   });
 }
 
-/** The post the seats get: per image, what works and with what, and what does not. */
+/** The post the seats get: per image, what works and with what, what does not, and what was not tested. */
 export function capabilitiesPost(byProfile: ByProfile): string {
-  return `JOB IMAGE CAPABILITIES, each tested in a worker VM of that image with an input whose answer is known (job_run profile: <name> picks the image; your own VM is not a job image and holds less):\n${capabilityLines(byProfile).join("\n")}\nA capability that does not work in any image is not there: do not probe for it again, ask the operator for a program (a request), or use a pack tool that does not need it. The whole is in job-capabilities.json.`;
+  return `JOB IMAGE CAPABILITIES, each tested in a worker VM of that image with an input whose answer is known (job_run profile: <name> picks the image; your own VM is not a job image and holds less):\n${capabilityLines(byProfile).join("\n")}\nA capability that does not work in any image is not there: do not probe for it again, ask the operator for a program (a request), or use a pack tool that does not need it. One NOT TESTED is not known either way: it is not missing, try it on your own input in a job before you rely on it or say it is not there. The whole is in job-capabilities.json.`;
 }
 
-/** The file name an image's cached result has: its reference, with every character a file name cannot take replaced. */
-export const cacheName = (ref: string) => `${ref.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
+/**
+ * The file name an image's cached result has: its digest (sha256:<hex>), with every character a file name cannot take
+ * replaced. Never its reference: a tag names whatever was last built or pulled under it.
+ */
+export const cacheName = (digest: string) => `${digest.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
 
-type CacheEntry = { image: string; profile: string; at: string; capabilities: Capability[] };
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+type CacheEntry = { image: string; digest: string; profile: string; at: string; capabilities: Capability[] };
 
 /**
- * job-capabilities.json before the probe: pending, with what an earlier run found in each image of the same reference.
- * A cached line is said to be an earlier run's (when, and which image) until this run's own result replaces it.
+ * job-capabilities.json before the probe: pending, with what an earlier run found in each image of the same digest
+ * (`digests`, profile to digest, as the kickoff read it on this host; a profile with none has no earlier result). A
+ * cached line is said to be an earlier run's (when, and which image) until this run's own result replaces it.
  */
-export async function seedCapabilities(sandbox: string, images: Record<string, string>, cacheDir: string | null): Promise<Record<string, unknown>> {
+export async function seedCapabilities(sandbox: string, images: Record<string, string>, cacheDir: string | null, digests: Record<string, string | null> = {}): Promise<Record<string, unknown>> {
   const cached: Record<string, { image: string; tested_at: string }> = {};
   const found: ByProfile = {};
   for (const [profile, ref] of Object.entries(images)) {
     if (!cacheDir) break;
-    const e = await readFile(join(cacheDir, cacheName(ref)), "utf8").then((t) => JSON.parse(t) as CacheEntry).catch(() => null);
-    if (!e || e.image !== ref || !Array.isArray(e.capabilities) || !e.capabilities.length) continue;
+    const digest = digests[profile];
+    if (!digest || !DIGEST.test(digest)) continue;
+    const e = await readFile(join(cacheDir, cacheName(digest)), "utf8").then((t) => JSON.parse(t) as CacheEntry).catch(() => null);
+    if (!e || e.digest !== digest || !Array.isArray(e.capabilities) || !e.capabilities.length) continue;
     found[profile] = e.capabilities;
-    cached[profile] = { image: ref, tested_at: String(e.at) };
+    cached[profile] = { image: ref, digest, tested_at: String(e.at) };
   }
   const rec = { pending: true, seeded_at: new Date().toISOString(), profiles: Object.keys(images), images: found, cached };
   await writeFile(join(sandbox, "job-capabilities.json"), `${JSON.stringify(rec, null, 2)}\n`);
   return rec;
 }
 
-/** Each image's result kept for the next run of the same image (only what was tested whole). */
-export async function cacheCapabilities(cacheDir: string, images: Record<string, string>, raw: ByProfile): Promise<void> {
+/** Each image's result kept for the next run of the same image, by its digest (only what was tested whole). */
+export async function cacheCapabilities(cacheDir: string, images: Record<string, string>, raw: ByProfile, digests: Record<string, string | null> = {}): Promise<void> {
   await mkdir(cacheDir, { recursive: true });
   const at = new Date().toISOString();
   for (const [profile, caps] of Object.entries(raw)) {
     const ref = images[profile];
-    if (!ref || !Array.isArray(caps) || !caps.length) continue;
-    await writeFile(join(cacheDir, cacheName(ref)), `${JSON.stringify({ image: ref, profile, at, capabilities: caps } satisfies CacheEntry, null, 2)}\n`);
+    const digest = digests[profile];
+    if (!ref || !digest || !DIGEST.test(digest) || !Array.isArray(caps) || !caps.length) continue;
+    await writeFile(join(cacheDir, cacheName(digest)), `${JSON.stringify({ image: ref, digest, profile, at, capabilities: caps } satisfies CacheEntry, null, 2)}\n`);
   }
 }
 
@@ -228,19 +245,21 @@ async function main(argv: string[]): Promise<number> {
   const profiles = (opt("--profiles") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const cacheDir = opt("--cache") ?? null;
   let images: Record<string, string> = {};
+  let digests: Record<string, string | null> = {};
   try {
     images = JSON.parse(opt("--images") ?? "{}") as Record<string, string>;
+    digests = JSON.parse(opt("--digests") ?? "{}") as Record<string, string | null>;
   } catch {
-    console.error("image-capabilities: --images takes a JSON object of profile to image reference");
+    console.error("image-capabilities: --images takes a JSON object of profile to image reference, --digests one of profile to digest");
     return 2;
   }
   if (sandbox && rest.includes("--seed")) {
-    const rec = await seedCapabilities(sandbox, images, cacheDir);
+    const rec = await seedCapabilities(sandbox, images, cacheDir, digests);
     console.log(JSON.stringify(rec));
     return 0;
   }
   if (!sandbox || !admin || !profiles.length) {
-    console.error("usage: image-capabilities.ts <sandbox> --hub-admin SOCKET --profiles NAME[,NAME] [--images JSON] [--cache DIR]\n       image-capabilities.ts <sandbox> --seed --images JSON [--cache DIR]");
+    console.error("usage: image-capabilities.ts <sandbox> --hub-admin SOCKET --profiles NAME[,NAME] [--images JSON] [--digests JSON] [--cache DIR]\n       image-capabilities.ts <sandbox> --seed --images JSON [--digests JSON] [--cache DIR]");
     return 2;
   }
   const call: HubCall = (fn, arg) =>
@@ -258,7 +277,7 @@ async function main(argv: string[]): Promise<number> {
   const result = withPackTools(raw);
   // This run's own result replaces the seed (pending, and an earlier run's lines) whole.
   await writeFile(join(sandbox, "job-capabilities.json"), `${JSON.stringify({ at: new Date().toISOString(), profiles, images: result }, null, 2)}\n`);
-  if (cacheDir) await cacheCapabilities(cacheDir, images, raw).catch(() => undefined);
+  if (cacheDir) await cacheCapabilities(cacheDir, images, raw, digests).catch(() => undefined);
   await call("systemPost", { tag: "result", to: "all", key: "job-capabilities", body: capabilitiesPost(result) }).catch(() => undefined);
   console.log(JSON.stringify(result));
   return 0;

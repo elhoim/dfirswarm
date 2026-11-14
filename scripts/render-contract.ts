@@ -608,7 +608,8 @@ function capabilitiesSection(sandbox: string): string {
       `${lines.length ? "This run's own result" : "The result"} is posted to everyone on the board as JOB IMAGE CAPABILITIES within ` +
         "minutes of the start, and written to `job-capabilities.json`" +
         (lines.length ? ", which then replaces the lines above." : "; it is not in yet.") +
-        " A capability that does not work in any image is not there: ask the operator for a program, or use a pack tool that does not need it.",
+        " A capability that does not work in any image is not there: ask the operator for a program, or use a pack tool that does not need it." +
+        " One NOT TESTED is not known either way: try it in a job before you say it is not there.",
       "",
     );
   }
