@@ -2708,12 +2708,16 @@ export class Hub {
             this.reply(socket, { ok: false, error: "not in this run" }, true);
             return false;
           }
+          const kind = typeof msg.kind === "string" ? msg.kind : undefined;
           const delivered = this.prompt(agent, String(msg.text ?? ""), {
             deliver: msg.deliver === "steer" ? "steer" : "followUp",
-            kind: typeof msg.kind === "string" ? msg.kind : undefined,
+            kind,
             queue: msg.queue === true,
           });
-          this.reply(socket, { ok: delivered, delivered }, true);
+          // The hub's own reason when it did not put the words on a link: the watchdog logs it and counts nothing (A5).
+          const paused = Boolean(this.pausedAt) && !["stop_steer", "resume", "paused"].includes(kind ?? "");
+          const queued = !delivered && !paused && msg.queue === true;
+          this.reply(socket, { ok: delivered || queued, delivered, ...(queued ? { queued: true } : {}), ...(delivered || queued ? {} : { reason: paused ? "the run is paused: its seats take no prompt until it goes on" : `${agent} is not linked to the hub (its process ended, or its link is down)` }) }, true);
           return false;
         }
         case "status":

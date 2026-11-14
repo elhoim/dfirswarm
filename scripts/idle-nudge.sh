@@ -61,11 +61,29 @@
 # per silence on the board and the trace (`call_stalled`); a prompt would not
 # reach it until the call returns.
 #
+# A lead's holder keeps no question waiting (leads.ts seatStallLeads): a seat
+# in one call with nothing on its session or the trace past
+# SWARM_LEAD_SEAT_STALL_SEC (900) has its leads marked stale and offered to
+# the seat that waited longest; a seat silent that long and not working (its
+# turn ended, its link down), with no job of its own to finish, has its leads
+# freed. A seat recorded dead has its leads freed at once.
+#
+# The platform is read before anything is asked of a seat (leads-cli.ts
+# platform, every minute, in any run): when the harness's store (no job
+# sealed for 15 minutes while finished jobs wait for their seal) or its hub
+# (every health sample of the last ten minutes slow) is what holds the run
+# still, one post says so to the seats and asks nothing of them, the
+# operator is told on this log, the trace and the notify hook, and no seat is
+# nudged, regrouped or has its leads moved until it clears.
+#
 # Usage:
 #   idle-nudge.sh --sandbox DIR [--idle-sec 180] [--news-sec 45] [--interval 30]
 #                 [--max-nudges 3] [--local-first-turn-sec 600]
 #                 [--wait-idle-sec 600] [--compact-stall-sec 1200]
 #                 [--call-stall-sec 2400] [--once]
+#
+# A prompt counts against a seat's budget only when the hub (or Herdr) took
+# it; one refused is logged with the refusal's own words and tried again.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -291,12 +309,12 @@ unread_for() {
   printf '%s\n' "$total"
 }
 
-log_event() { # log_event <agent> <idle> <ok> <count> [why]
+log_event() { # log_event <agent> <idle> <ok> <count> [why] [reason refused]
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   local line
-  line="$(jq -cn --arg ts "$ts" --arg agent "$1" --argjson idle "$2" --argjson ok "$3" --argjson n "$4" --arg why "${5:-idle}" \
-    '{ts: $ts, agent: "system", tool: "idle_nudge", args: {agent: $agent, idle_seconds: $idle, why: $why}, result: {ok: $ok, nudges: $n}}')"
+  line="$(jq -cn --arg ts "$ts" --arg agent "$1" --argjson idle "$2" --argjson ok "$3" --argjson n "$4" --arg why "${5:-idle}" --arg reason "${6:-}" \
+    '{ts: $ts, agent: "system", tool: "idle_nudge", args: {agent: $agent, idle_seconds: $idle, why: $why}, result: ({ok: $ok, nudges: $n} + (if $reason != "" then {reason: $reason} else {} end))}')"
   # Through the collector, so this line is chained like every other. Appending
   # here directly used to break the chain for the *next* line the collector
   # wrote, which with this watchdog on by default meant a run reporting its
@@ -484,6 +502,11 @@ regroup_check() {
   local out ts line
   out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" regroup "$SANDBOX" 2>/dev/null || true)"
   [[ "$(jq -r '.posted // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  # The platform was the stall, said by the regroup's own reading of it first: the operator is told as below.
+  if [[ "$(jq -r '.kind // ""' <<<"$out")" == platform ]]; then
+    platform_said "$(jq -c '{stall: true, said: true, cause, post, since, late, commit_gap_minutes, hub_p99_max_ms}' <<<"$out")"
+    return 0
+  fi
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, kind: ($r.kind // "all_hands"), count: $r.count, post: $r.post, next_minutes: $r.next_minutes, to: ($r.to // null)}}')"
   trace_emit "$ROOT" "$SANDBOX" "$line"
@@ -492,6 +515,49 @@ regroup_check() {
   else
     echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
   fi
+}
+
+# The platform's health, before anything is asked of a seat (D7), in any run:
+# once a minute, leads-cli.ts platform reads the jobs waiting for their seal,
+# the store journal's last seal and the hub's health rows. A stall it says
+# for the first time is told to the operator here: the log, the trace (a
+# regroup row of kind platform, with its cause) and the notify hook
+# (platform_stall). While one stands (traces/platform-stall.json), no seat is
+# nudged, regrouped, or has its leads moved: the seats were told it is not
+# their work.
+PLATFORM_STATE="$SANDBOX/traces/platform-stall.json"
+PLATFORM_CHECK_SEC="${SWARM_PLATFORM_CHECK_SEC:-60}"
+platform_said() { # <platformCheck answer, said now>
+  local r="$1" ts line cause
+  cause="$(jq -r '.cause // "?"' <<<"$r")"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$r" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, kind: "platform", cause: $r.cause, post: $r.post, late_jobs: ($r.late // null), commit_gap_minutes: ($r.commit_gap_minutes // null), hub_p99_max_ms: ($r.hub_p99_max_ms // null)}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  case "$cause" in
+    store) echo "idle-nudge: PLATFORM STALL, the store: no job sealed for $(jq -r '.commit_gap_minutes' <<<"$r") minutes while $(jq -r '.late' <<<"$r") finished job(s) wait for their seal; the seats were told it is not their work (#$(jq -r '.post // "?"' <<<"$r")), and none is nudged until it clears" >&2 ;;
+    hub) echo "idle-nudge: PLATFORM STALL, the hub: its event loop late by up to $(jq -r '.hub_p99_max_ms' <<<"$r") ms in every sample of the last ten minutes; the seats were told it is not their work (#$(jq -r '.post // "?"' <<<"$r")), and none is nudged until it clears" >&2 ;;
+    *) echo "idle-nudge: PLATFORM STALL, the store and the hub: no job sealed for $(jq -r '.commit_gap_minutes' <<<"$r") minutes while $(jq -r '.late' <<<"$r") finished job(s) wait for their seal, and the hub's event loop late by up to $(jq -r '.hub_p99_max_ms' <<<"$r") ms; the seats were told it is not their work (#$(jq -r '.post // "?"' <<<"$r")), and none is nudged until it clears" >&2 ;;
+  esac
+  bash "$ROOT/scripts/notify.sh" "$SANDBOX" platform_stall "$(jq -c '{reason: .cause, late_jobs: (.late // null), commit_gap_minutes: (.commit_gap_minutes // null), hub_p99_max_ms: (.hub_p99_max_ms // null)}' <<<"$r")" >/dev/null 2>&1 </dev/null || true
+}
+platform_check() {
+  local mark="$SANDBOX/traces/idle-nudge.platform" now last out
+  now="$(date +%s)"
+  last="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ $((now - last)) -ge "$PLATFORM_CHECK_SEC" ]] || return 0
+  echo "$now" > "$mark"
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" platform "$SANDBOX" 2>/dev/null || true)"
+  if [[ "$(jq -r '.stall == true and .said == true' <<<"$out" 2>/dev/null)" == true ]]; then
+    platform_said "$out"
+  elif [[ -n "$(jq -r '.cleared.cause // empty' <<<"$out" 2>/dev/null)" ]]; then
+    echo "idle-nudge: the platform stall ($(jq -r '.cleared.cause' <<<"$out"), since $(jq -r '.cleared.since' <<<"$out")) has cleared: the seats are watched again" >&2
+  fi
+  return 0
+}
+# The stall standing now, as last read: its cause, or nothing.
+platform_hold() {
+  jq -r 'if (.said_at // null) != null and (.cleared_at // null) == null then .cause else empty end' "$PLATFORM_STATE" 2>/dev/null || true
 }
 
 # The seats' subscription tokens in a microVM run, renewed on the host at
@@ -671,13 +737,34 @@ report_stalled_call() { # <agent id> <silent seconds>
 # Words in front of an agent: through the hub for a VM, through Herdr otherwise.
 # An agent in a turn (one that is waiting) is steered: a follow-up would wait
 # for a turn end that does not come. Herdr's typed words steer a working pane.
-prompt_agent() { # <agent id> <text> [followUp|steer]
+# Whether the words were taken is the answer's own: PROMPT_REASON holds the
+# hub's reason (or Herdr's words) when they were not, PROMPT_QUEUED says the
+# hub keeps them for the seat's next hello (queue).
+PROMPT_REASON=""
+PROMPT_QUEUED=false
+prompt_agent() { # <agent id> <text> [followUp|steer] [kind] [queue: true|false]
+  local out rc line
+  PROMPT_REASON=""
+  PROMPT_QUEUED=false
   if [[ -n "$HUB_ADMIN" ]]; then
-    node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" \
-      "$(jq -nc --arg a "$1" --arg t "$2" --arg d "${3:-followUp}" '{op: "prompt", agent: $a, text: $t, kind: "idle_nudge", deliver: $d}')" >/dev/null 2>&1
+    out="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" \
+      "$(jq -nc --arg a "$1" --arg t "$2" --arg d "${3:-followUp}" --arg k "${4:-idle_nudge}" --argjson q "${5:-false}" '{op: "prompt", agent: $a, text: $t, kind: $k, deliver: $d} + (if $q then {queue: true} else {} end)')" 2>&1)"
+    rc=$?
   else
-    "$HERDR" agent prompt "$1" "$2" >/dev/null 2>&1
+    out="$("$HERDR" agent prompt "$1" "$2" 2>&1)"
+    rc=$?
   fi
+  line="$(printf '%s\n' "$out" | grep -m1 '^{' || true)"
+  if [[ "$rc" -eq 0 ]]; then
+    [[ "$(jq -r '.queued // false' <<<"$line" 2>/dev/null)" == true ]] && PROMPT_QUEUED=true
+    return 0
+  fi
+  PROMPT_REASON="$(jq -r '.reason // .error // empty' <<<"$line" 2>/dev/null || true)"
+  [[ -n "$PROMPT_REASON" ]] || PROMPT_REASON="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g; s/ $//' | cut -c1-300)"
+  if [[ -z "$PROMPT_REASON" ]]; then
+    if [[ -n "$HUB_ADMIN" ]]; then PROMPT_REASON="the hub refused it and said nothing (exit $rc)"; else PROMPT_REASON="herdr refused it and said nothing (exit $rc)"; fi
+  fi
+  return 1
 }
 
 STATE="$SANDBOX/traces/idle-nudge.state"
@@ -749,7 +836,13 @@ ensure_hub() {
 # message; nothing marked them, 40 prompts went to nobody, and the run sat dead for 33 to 43 minutes until it was
 # stopped by hand. A session that holds a line too large to load is set aside first, so the seat starts a fresh one:
 # the ledger, the leads, the board and the store are the run's memory, not the session.
-SEAT_DOWN_SEC="${SWARM_SEAT_DOWN_SEC:-180}"
+# Said down 60 s after the watchdog first sees its link down, read every SEAT_POLL_SEC between the passes: at most 70 s
+# from the link closing to seat_down and the relaunch, so a seat whose process was killed is back and linked again within
+# three minutes (180 s and the 30 s pass took 180 to 240 s). Each further try waits SEAT_RELAUNCH_WAIT_SEC for the one
+# before it to link.
+SEAT_DOWN_SEC="${SWARM_SEAT_DOWN_SEC:-60}"
+SEAT_POLL_SEC="${SWARM_SEAT_POLL_SEC:-10}"
+SEAT_RELAUNCH_WAIT_SEC="${SWARM_SEAT_RELAUNCH_WAIT_SEC:-180}"
 SEAT_RELAUNCH_MAX="${SWARM_SEAT_RELAUNCH_MAX:-3}"
 SEAT_LINE_MAX_BYTES="${SWARM_SEAT_LINE_MAX_BYTES:-8388608}"
 SEAT_DOWN_STATE="$SANDBOX/traces/seat-down.state"
@@ -773,7 +866,7 @@ session_poisoned() { # <id>
 }
 seat_down_check() {
   [[ -n "$HUB_STATUS" && -f "$HUB_STATUS" && -n "${HUB_DIR:-}" ]] || return 0
-  local id idx=-1 connected now first attempts last pane fresh retired all_gone=1 any=0
+  local id idx=-1 connected now first attempts last pane fresh retired all_gone=1 any=0 handoff handoff_from handed
   now="$(date +%s)"
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     idx=$((idx + 1)); any=1
@@ -790,7 +883,7 @@ seat_down_check() {
     if [[ "$attempts" -eq 0 ]]; then
       trace_system seat_down "$(jq -nc --arg a "$id" --argjson s "$((now - first))" '{agent: $a, down_seconds: $s}')" '{"ok":true}'
       echo "idle-nudge: $id's link to the hub has been down for $((now - first))s: its process has ended"
-    elif [[ $((now - last)) -lt "$SEAT_DOWN_SEC" ]]; then
+    elif [[ $((now - last)) -lt "$SEAT_RELAUNCH_WAIT_SEC" ]]; then
       continue
     fi
     if [[ "$attempts" -ge "$SEAT_RELAUNCH_MAX" ]]; then
@@ -799,6 +892,8 @@ seat_down_check() {
       trace_system seat_dead "$(jq -nc --arg a "$id" --argjson n "$attempts" '{agent: $a, relaunches: $n}')" '{"ok":true}'
       echo "idle-nudge: $id did not come back after $attempts relaunch(es): recorded dead (done/agents/$id.dead)"
       seat_down_set "$id"
+      # Its leads go back to the register at once: a dead seat holds nothing.
+      lead_stall_act "$id" dead "$((now - first))"
       continue
     fi
     fresh=false
@@ -808,9 +903,18 @@ seat_down_check() {
     fi
     pane="$(jq -r --argjson i "$idx" '.panes[$i] // empty' "$SANDBOX/layout.json" 2>/dev/null || true)"
     if [[ -n "$pane" && -f "$HUB_DIR/launch-$id.sh" ]] && "$HERDR" pane run "$pane" "sh $HUB_DIR/launch-$id.sh" >/dev/null 2>&1; then
-      prompt_agent "$id" "The harness started you again: your process had ended.$([[ "$fresh" == true ]] && printf ' Your earlier conversation was set aside because it held a message too large to load, so you start with none of it.') Nothing of the run was lost: the ledger, the leads, the board and the store are as they were, and your own files are in work/$id/. Call inbox and leads to see what you hold, then go on with it. This message is the harness, not a person: do not answer it with a status." followUp || true
-      trace_system seat_relaunched "$(jq -nc --arg a "$id" --arg p "$pane" --argjson n "$((attempts + 1))" --argjson f "$fresh" '{agent: $a, pane: $p, attempt: $n, fresh_session: $f}')" '{"ok":true}'
-      echo "idle-nudge: started $id again in $pane (attempt $((attempts + 1)) of $SEAT_RELAUNCH_MAX$([[ "$fresh" == true ]] && printf ', with a fresh session: the old one held a line over %s bytes' "$SEAT_LINE_MAX_BYTES"))"
+      # Its hand-off is built from the run's records (leads-cli.ts relaunch-handoff, 2,000 characters at most): the leads it
+      # holds, its newest entries and its jobs, since its session may be gone. Kept by the hub for its next hello.
+      handoff="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" relaunch-handoff "$SANDBOX" "$id" $([[ "$fresh" == true ]] && printf -- '--fresh') 2>/dev/null || true)"
+      handoff_from=records
+      if [[ -z "$handoff" ]]; then
+        handoff_from=fallback
+        handoff="The harness started you again: your process had ended.$([[ "$fresh" == true ]] && printf ' Your earlier conversation was set aside because it held a message too large to load, so you start with none of it.') Nothing of the run was lost: the ledger, the leads, the board and the store are as they were, and your own files are in work/$id/. Call inbox and leads to see what you hold, then go on with it. This message is the harness, not a person: do not answer it with a status."
+      fi
+      handed=false
+      prompt_agent "$id" "$handoff" followUp relaunch true && handed=true
+      trace_system seat_relaunched "$(jq -nc --arg a "$id" --arg p "$pane" --argjson n "$((attempts + 1))" --argjson f "$fresh" '{agent: $a, pane: $p, attempt: $n, fresh_session: $f}')" "$(jq -nc --argjson h "$handed" --argjson q "$PROMPT_QUEUED" --arg from "$handoff_from" --argjson chars "${#handoff}" --arg why "$PROMPT_REASON" '{ok: true, handoff: {given: $h, queued: $q, from: $from, chars: $chars}} + (if $why != "" then {handoff_refused: $why} else {} end)')"
+      echo "idle-nudge: started $id again in $pane (attempt $((attempts + 1)) of $SEAT_RELAUNCH_MAX$([[ "$fresh" == true ]] && printf ', with a fresh session: the old one held a line over %s bytes' "$SEAT_LINE_MAX_BYTES")); its hand-off from the $handoff_from (${#handoff} characters) $([[ "$handed" == true ]] && { [[ "$PROMPT_QUEUED" == true ]] && echo "waits for its link" || echo "was given"; } || echo "was refused: $PROMPT_REASON")"
     else
       trace_system seat_relaunched "$(jq -nc --arg a "$id" --arg p "${pane:-}" --argjson n "$((attempts + 1))" '{agent: $a, pane: $p, attempt: $n}')" '{"ok":false,"reason":"the pane or the launch script is not there, or herdr refused"}'
       echo "idle-nudge: could not start $id again (pane ${pane:-unknown}, launch script $HUB_DIR/launch-$id.sh)" >&2
@@ -823,6 +927,79 @@ seat_down_check() {
     trace_system all_agents_dead '{}' '{"ok":true}'
     echo "idle-nudge: every seat is done or dead: done/ALL_AGENTS_DEAD written"
   fi
+}
+
+# The lead rule for a holder stuck in one call or silent (leads.ts seatStallLeads), from the clocks of this pass: a seat
+# whose pane works past LEAD_STALL_SEC has its leads offered, one that does not has them freed. Nothing for a seat
+# compacting (its leases hold through LEAD_COMPACTION_BOUND_MS) or with a job of its own still to finish. Once a silence
+# has nothing left to move (it holds no lead, or they were freed) it is not read again until the seat acts.
+LEAD_STALL_SEC="${SWARM_LEAD_SEAT_STALL_SEC:-900}"
+LEAD_STALL_MARK="$SANDBOX/traces/idle-nudge.leadstall"
+seat_status() { # <agent id>: working, idle, gone, or empty when unknown
+  if [[ -n "$HUB_STATUS" ]]; then
+    jq -r --arg id "$1" '.agents[$id].state // empty' "$HUB_STATUS" 2>/dev/null || true
+  else
+    "$HERDR" agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true
+  fi
+}
+lead_stall_act() { # <agent id> <call|silent|dead> <silent seconds>
+  local id="$1" kind="$2" secs="$3" out moved
+  out="$(SWARM_LEAD_SEAT_STALL_SEC="$LEAD_STALL_SEC" node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" seat-stall "$SANDBOX" "$id" "$kind" "$secs" 2>/dev/null || true)"
+  [[ "$(jq -r '.ok // false' <<<"$out" 2>/dev/null)" == true ]] || return 1
+  moved="$(jq -r '(.offered | length) + (.marked | length) + (.released | length)' <<<"$out")"
+  if [[ "$moved" -gt 0 ]]; then
+    trace_emit "$ROOT" "$SANDBOX" "$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg a "$id" --arg k "$kind" --argjson s "$secs" --argjson r "$out" '{ts: $ts, agent: "system", tool: "lead_stall", args: {agent: $a, kind: $k, silent_seconds: $s}, result: {ok: true, held: $r.held, offered: $r.offered, marked: $r.marked, released: $r.released, waiting: $r.waiting}}')"
+    case "$kind" in
+      call) echo "idle-nudge: $id has been in one call for $((secs / 60)) min holding $(jq -r '.held' <<<"$out") lead(s): $(jq -r '[(.offered[] | "\(.lead) offered to \(.to)"), (.waiting[] | "\(.) waits for an idle seat")] | join(", ")' <<<"$out")" ;;
+      silent) echo "idle-nudge: $id was silent $((secs / 60)) min: its lead(s) $(jq -r '.released | join(", ")' <<<"$out") freed for any seat" ;;
+      dead) echo "idle-nudge: $id was recorded dead: its lead(s) $(jq -r '.released | join(", ")' <<<"$out") freed for any seat" ;;
+    esac
+  fi
+  # Nothing more to move in this silence: it holds nothing, or its leads were freed.
+  [[ "$(jq -r '.held' <<<"$out")" == 0 || "$kind" != call ]] && return 2
+  return 0
+}
+lead_stall_check() { # the clocks of this pass on stdin's place: $1
+  [[ "$LEAD_STALL_SEC" -gt 0 && -s "$SANDBOX/leads/leads.jsonl" ]] || return 0
+  local id idle busy waiting since ended start now kind rc
+  now="$(date +%s)"
+  while read -r id idle busy waiting since ended; do
+    [[ -n "$id" && "$idle" =~ ^[0-9]+$ && "$idle" -ge "$LEAD_STALL_SEC" ]] || continue
+    [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
+    [[ "$since" -ge 0 ]] && continue
+    start=$((now - idle))
+    awk -v id="$id" -v s="$start" '$1 == id && ($2 - s < 120 && s - $2 < 120) { found = 1 } END { exit !found }' "$LEAD_STALL_MARK" 2>/dev/null && continue
+    has_open_job "$id" && continue
+    # Freed only when its pane says it is not working (idle, its link gone); working, or not known, it is offered: the
+    # holder keeps it by acting first.
+    case "$(seat_status "$id")" in
+      working | blocked | "") kind=call ;;
+      *) kind=silent ;;
+    esac
+    lead_stall_act "$id" "$kind" "$idle"
+    rc=$?
+    [[ "$rc" -eq 2 ]] && echo "$id $start" >> "$LEAD_STALL_MARK"
+  done <<<"$1"
+  return 0
+}
+
+# Between two passes the seats' links are read every SEAT_POLL_SEC (a VM run's), so that a seat whose process ended is
+# said and started again within its bound, not a pass later.
+nap() { # <seconds>
+  local left="$1" step
+  if [[ -z "$HUB_STATUS" || "$SEAT_POLL_SEC" -le 0 || "$SEAT_POLL_SEC" -ge "$left" ]]; then
+    sleep "$left"
+    return 0
+  fi
+  while [[ "$left" -gt 0 ]]; do
+    step="$SEAT_POLL_SEC"
+    [[ "$step" -gt "$left" ]] && step="$left"
+    sleep "$step"
+    left=$((left - step))
+    [[ -d "$SANDBOX" && ! -f "$SANDBOX/done/SWARM_DONE" && ! -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] || return 0
+    [[ -n "${HUB_DIR:-}" && -e "$HUB_DIR/.stop" ]] && return 0
+    seat_down_check
+  done
 }
 
 # Each line of the log says when (SWARM_LOG_TS=1, set where the kickoff starts the watchdog): a log without times could
@@ -850,27 +1027,38 @@ while :; do
     operator_requests_check
     secret_renewal_check
     [[ "$ONCE" -eq 1 ]] && exit 0
-    sleep "$INTERVAL"
+    nap "$INTERVAL"
     continue
   fi
-  coverage_hint
+  # The platform first: a stall of the harness's own is said to the operator, and the seats are asked nothing over it.
+  platform_check
   regroup_check
   secret_renewal_check
   yield_check
   operator_requests_check
+  held_for="$(platform_hold)"
+  if [[ -n "$held_for" ]]; then
+    # No nudge, no ask, no lead moved: the seats were told the stall is the platform's (once per stall, platform_said).
+    [[ "$ONCE" -eq 1 ]] && exit 0
+    nap "$INTERVAL"
+    continue
+  fi
+  coverage_hint
+  ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  clocks="$([[ -n "${ids// /}" ]] && agent_clocks $ids)"
+  lead_stall_check "$clocks"
   # --idle-sec 0: nobody is nudged; the stop policy above (the backstop, the
-  # pause's notice, the wake after an extension, the proposal of a stop) and
-  # the operator's requests are this watchdog's all the same.
+  # pause's notice, the wake after an extension, the proposal of a stop), the
+  # platform's health, the lead rule and the operator's requests are this
+  # watchdog's all the same.
   if [[ "$IDLE_SEC" -eq 0 ]]; then
     [[ "$ONCE" -eq 1 ]] && exit 0
-    sleep "$INTERVAL"
+    nap "$INTERVAL"
     continue
   fi
   US=0
   until_solved && US=1
-  ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"
-  # shellcheck disable=SC2086
-  clocks="$([[ -n "${ids// /}" ]] && agent_clocks $ids)"
   for id in $ids; do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     read -r idle busy waiting since ended <<<"$(awk -v id="$id" '$1 == id { print $2, $3, $4, $5, $6 }' <<<"$clocks")"
@@ -896,7 +1084,12 @@ while :; do
       deliver="steer"
     else
       [[ "$idle" -ge 0 ]] || continue
-      [[ "${ended:--1}" -ge 0 && "${ended:--1}" -lt "$COMPACT_GRACE_SEC" ]] && continue
+      # Just out of a compaction its hand-off is on its way and it has not ended a turn: it is not told it did
+      # (COMPACT_GRACE_SEC). Posts it has not read are still said, in words that claim nothing of its turn.
+      if [[ "${ended:--1}" -ge 0 && "${ended:--1}" -lt "$COMPACT_GRACE_SEC" ]]; then
+        [[ "$unread" -gt 0 ]] || continue
+        why="news"
+      fi
       if [[ "$unread" -gt 0 ]]; then
         [[ "$idle" -ge "$NEWS_SEC" ]] || continue
       else
@@ -936,7 +1129,7 @@ while :; do
       eback=$(( IDLE_SEC * (1 << (ek > 4 ? 4 : ek)) ))
       [[ "$eback" -gt 1800 ]] && eback=1800
       [[ $(( $(date +%s) - elast )) -ge "$eback" ]] || continue
-      set_err "$id" $((ek + 1)) "$(date +%s)"
+      # Counted once the retry is taken (below).
       etry=$((ek + 1))
     elif grep -q "^$id " "$ERRSTATE" 2>/dev/null; then
       # It worked since: the next error starts the backoff again.
@@ -969,8 +1162,8 @@ while :; do
     if [[ -n "$HUB_STATUS" ]] && [[ "$(jq -r --arg id "$id" '.agents[$id].connected | tostring' "$HUB_STATUS" 2>/dev/null || true)" == false ]]; then
       continue
     fi
+    # Counted only once the hub (or Herdr) takes it, below: a refused prompt is no nudge.
     n=$((n + 1))
-    set_count "$id" "$n" "$clock"
     minutes=$((clock / 60))
     # "0 posts you have not read" is worse than saying nothing.
     news_line=""
@@ -988,6 +1181,9 @@ while :; do
     elif [[ "$provider_error" -eq 1 ]]; then
       why="provider_error"
       text="Your last turn ended in a provider error. The harness tries you again up to ${MAX_NUDGES} times, each wait longer than the last, in case it has passed; if the provider refuses every seat, the run pauses instead. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} Try ${etry} of ${MAX_NUDGES}."
+    elif [[ "$why" == news ]]; then
+      # Just out of a compaction: posts wait for it, and nothing is said of a turn it has not ended.
+      text="${news_line}Read inbox before you go on, and answer what is asked of you; then go on from your hand-off's NEXT ACTION.${held:+ You still hold: ${held}.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     elif [[ "$why" == waiting ]]; then
       text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     else
@@ -995,13 +1191,16 @@ while :; do
     fi
     text="${text//Nudge ${n} of ${MAX_NUDGES}./$budget_words}"
     if prompt_agent "$id" "$text" "$deliver" >/dev/null 2>&1; then
+      set_count "$id" "$n" "$clock"
+      [[ "$provider_error" -eq 1 ]] && set_err "$id" "$etry" "$(date +%s)"
       log_event "$id" "$clock" true "$n" "$why"
       echo "idle-nudge: prompted $id after ${clock}s ${why} (nudge $n/$MAX_NUDGES)"
     else
-      log_event "$id" "$clock" false "$n" "$why"
-      echo "idle-nudge: could not prompt $id (not delivered: the seat is not linked to the hub, its pane is gone, or the hub did not answer in time)" >&2
+      # Not taken, not counted: the count stands where it was, and the next pass tries again.
+      log_event "$id" "$clock" false "$((n - 1))" "$why" "$PROMPT_REASON"
+      echo "idle-nudge: could not prompt $id ($why), not counted: $PROMPT_REASON" >&2
     fi
   done
   [[ "$ONCE" -eq 1 ]] && exit 0
-  sleep "$INTERVAL"
+  nap "$INTERVAL"
 done
