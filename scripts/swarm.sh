@@ -4764,21 +4764,8 @@ STRIP
     local _pd
     while read -r _pd; do
       [[ -n "$_pd" ]] || continue
-      "$ROOT/scripts/pack.sh" verify "$(basename "$_pd")" >/dev/null || {
+      installed_pack_check "$_pd" || {
         echo "BLOCKER: pack $(basename "$_pd") does not verify; install it again." >&2; exit 1; }
-      # An installed pack older than the one this checkout ships runs as it
-      # was installed: its tools and skills are the old ones, fixes and all.
-      local _id _have _ship _shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
-      _id="$(basename "$_pd")"
-      if [[ -f "$_shipped/$_id/pack.json" ]]; then
-        _have="$(jq -r '.version // empty' "$_pd/pack.json" 2>/dev/null)"
-        _ship="$(jq -r '.version // empty' "$_shipped/$_id/pack.json" 2>/dev/null)"
-        if [[ -n "$_have" && -n "$_ship" ]] && python3 -c 'import sys
-t = lambda v: tuple(int(x) for x in v.split("."))
-sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/null; then
-          echo "WARN: pack $_id is installed at $_have and this checkout ships $_ship; the run uses $_have. Update it with: scripts/pack.sh install $_shipped/$_id" >&2
-        fi
-      fi
     done <<< "$pack_dirs"
   fi
   PACK_SECRETS_ENV='{}'
@@ -10712,6 +10699,24 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
   esac
 }
 
+# An installed pack as a run is given it, at the kickoff and by pack-add: its files must match its own checksums
+# (scripts/pack.sh verify, whose problems go to stderr), and one older than the pack this checkout ships is said, since
+# the run takes it as it was installed: its tools and skills are the old ones, fixes and all. 1 when it does not verify.
+installed_pack_check() { # <installed pack dir>
+  local pd="$1" id have ship shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
+  id="$(basename "$pd")"
+  "$ROOT/scripts/pack.sh" verify "$id" >/dev/null || return 1
+  [[ -f "$shipped/$id/pack.json" ]] || return 0
+  have="$(jq -r '.version // empty' "$pd/pack.json" 2>/dev/null)"
+  ship="$(jq -r '.version // empty' "$shipped/$id/pack.json" 2>/dev/null)"
+  if [[ -n "$have" && -n "$ship" ]] && python3 -c 'import sys
+t = lambda v: tuple(int(x) for x in v.split("."))
+sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$have" "$ship" 2>/dev/null; then
+    echo "WARN: pack $id is installed at $have and this checkout ships $ship; the run uses $have. Update it with: scripts/pack.sh install $shipped/$id" >&2
+  fi
+  return 0
+}
+
 # A pack brought into a running run (E7): the memory pack, for a dump the catalogue finds inside an image after the
 # kickoff (the kickoff adds it only for a dump at the top of the inputs; hub-supervise.sh calls this when the job
 # service says a catalogue lists one), or another pack the operator names. The run's images, its seats' tool lists and
@@ -10720,8 +10725,9 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
 # image), its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its
 # packs, with when, by whom and why this one was added), the trace, and a post to every seat naming both. Under the
 # kickoff's rule: only a run that has packs, never a pack the operator excluded (--no-pack), never one this host has
-# not installed, never one that declares secrets (a job does not carry them). Exit 0 when the pack is in the run
-# (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
+# not installed or whose files no longer match its checksums (an older install is said, as the kickoff says it), never
+# one that declares secrets (a job does not carry them). Exit 0 when the pack is in the run (added now or before), 3
+# when a rule keeps it out (said), 2 on a usage error.
 #   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
 cmd_pack_add() {
   local id="${1:-}" pack="${2:-}" why="" by=operator
@@ -10771,6 +10777,14 @@ cmd_pack_add() {
     fi
     dirs+=("$d")
   done <<<"$resolved"
+  # Each pack it brings is held as the kickoff holds every pack, before anything is copied: its files match its own
+  # checksums (one changed since it was installed is not copied into a live run), and an older install is said.
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    installed_pack_check "$d" || {
+      echo "BLOCKER: $pack was not added to $id: pack $(basename "$d") does not verify against its own checksums (a file of it changed since it was installed). Install it again: scripts/pack.sh install packs/$(basename "$d")" >&2
+      exit 3
+    }
+  done
   local entries=() added=() names=() said=()
   for d in "${dirs[@]}"; do
     pid="$(jq -r '.id' "$d/pack.json")"
@@ -12925,8 +12939,9 @@ EOF
                                                   its notes as files under notes/<pack>/, the run's record and a post
                                                   to every seat. The run's images, tool lists and skill index stay as
                                                   they were started. Only a run that has packs; never a pack its
-                                                  kickoff excluded (--no-pack), one this host has not installed, or one
-                                                  that declares secrets: those exit 3, said. The harness runs it itself
+                                                  kickoff excluded (--no-pack), one this host has not installed or that
+                                                  does not verify against its checksums, or one that declares secrets:
+                                                  those exit 3, said. The harness runs it itself
                                                   (--by catalogue) for memory-forensics when a catalogue lists a dump
                                                   inside an image, which the kickoff could not see.
 EOF

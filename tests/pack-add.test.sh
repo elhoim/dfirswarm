@@ -46,6 +46,25 @@ out="$(swarm pack-add "$id" memory-forensics)" || fail "a second pack-add failed
 grep -q 'already among' <<<"$out" || fail "a second pack-add did not say it is there: $out"
 pass "tools seeded with their pack, notes read-only under notes/, the record and the board say so; a second add changes nothing"
 
+echo "# a pack whose files changed since it was installed is not added; an older install than the checkout's is said"
+out="$(kick --pack computer-forensics-base --label pt)" || fail "$out"
+idt="$(id_of pt)"; sbt="$(sandbox_of pt)"
+inst="$DFIRSWARM_HOME/packs/memory-forensics"
+chmod u+w "$inst/tools/minidump_map" "$inst/tools/minidump_map/run.py"
+printf '\n# changed after it was installed\n' >> "$inst/tools/minidump_map/run.py"
+rc=0; out="$(swarm pack-add "$idt" memory-forensics)" || rc=$?
+[[ "$rc" -eq 3 ]] && grep -q "BLOCKER: memory-forensics was not added to $idt: pack memory-forensics does not verify against its own checksums" <<<"$out" || fail "a changed pack ($rc): $out"
+[[ ! -e "$sbt/tools/minidump_map" && ! -e "$sbt/notes/memory-forensics" ]] || fail "a pack that does not verify was copied into the run"
+jq -e --arg id "$idt" '.runs[] | select(.id == $id) | [.packs[]?.id] | index("memory-forensics") == null' "$TMP/runs/registry.json" >/dev/null || fail "the record names a pack that was refused"
+ls "$sbt"/threads/main/*-system.md 2>/dev/null | xargs grep -l 'PACK ADDED' 2>/dev/null && fail "the seats were told of a refused pack"
+bash "$ROOT/scripts/pack.sh" install "$ROOT/packs/memory-forensics" --no-secrets >/dev/null || fail "reinstall"
+mkdir -p "$TMP/shipped/memory-forensics"
+jq '.version = "99.0.0"' "$ROOT/packs/memory-forensics/pack.json" > "$TMP/shipped/memory-forensics/pack.json"
+have="$(jq -r .version "$inst/pack.json")"
+out="$(SWARM_SHIPPED_PACKS="$TMP/shipped" swarm pack-add "$idt" memory-forensics)" || fail "pack-add of an older install failed: $out"
+grep -q "WARN: pack memory-forensics is installed at $have and this checkout ships 99.0.0; the run uses $have" <<<"$out" || fail "an older install is not said: $out"
+pass "a pack that does not verify is refused before anything is copied (exit 3); an install older than the checkout's is said, as the kickoff says it"
+
 echo "# the kickoff's rules: a run with no pack, a pack --no-pack excluded, a pack not installed"
 out="$(kick --label p2)" || fail "$out"
 rc=0; out="$(swarm pack-add "$(id_of p2)" memory-forensics)" || rc=$?
