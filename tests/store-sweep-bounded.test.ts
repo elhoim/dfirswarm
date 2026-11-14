@@ -404,3 +404,101 @@ test("a sweep that found 5,000 hits and left 200,000 objects writes a line under
   await writeFile(join(S, all.file.path), original);
   process.stdout.write(`# 5,000 hits and ${SW.unsearchedTotal(written)} unsearched: line ${Buffer.byteLength(lines[0]!)} B, hits file ${body.length} B in ${rows.length} rows, sweepWords ${Buffer.byteLength(words)} B, gate item ${Buffer.byteLength(d.what)} B, ledger.md +${grown} B, the sweeps' lock held ${sweepsLock.toFixed(1)} ms\n`);
 });
+
+/** How many hits each synthetic pass found: 20,000 by default; SWARM_SCALE_FULL=1 for 200,000. */
+const HELD_HITS = process.env.SWARM_SCALE_FULL === "1" ? 200_000 : 20_000;
+
+/**
+ * A record whose sweep took `passes` lines (passes, then a reading again), each naming a file of `hits` hits, as a
+ * long sweep of a large store leaves them: written beside a real first line, chained as the hub chains them.
+ */
+async function longSweep(S: string, a0: { sandboxRoot: string; agentId: string }, passes: number, hits: number): Promise<P.LedgerEntry> {
+  await hitJob(S, "j800000", 60, "mallory");
+  await planned(a0, "2");
+  const abs = ok(await rec(a0, { kind: "absence", value: "a remote tool", source: "the disk", evidence: "a search", refs: ["job:j000001/hits.txt"], control: { ref: "job:j000001/hits.txt", found: "the same search finds a planted row" }, answers: ["2"] })).entry;
+  const cov = ok(await rec(a0, coverage("2", ["input:disk.E01"], [`E-${abs.seq}`], { looked_for: ["mallory"] }))).entry;
+  await SW.awaitSweeps(S);
+  const first = SW.sweepOf(cov, await SW.readSweeps(S))!;
+  const file = join(S, SW.LEDGER_SWEEPS);
+  let head = first.hash!;
+  let body = "";
+  for (let k = 0; k < passes; k++) {
+    const { prev: _p, hash: _h, hits_all: _a, ...rest } = first as SW.SweepRecord & { hits_all?: unknown };
+    const many = Array.from({ length: hits }, (_, i) => ({ ref: `job:j8${String(k).padStart(5, "0")}/export/part${String(i % 50).padStart(2, "0")}/row-${String(i).padStart(6, "0")}.txt`, term: "mallory", count: 1 + (i % 3), first_offset: i % 4096, encodings: ["utf-8" as const] }));
+    const written = await SW.sweepLineAsWritten(S, { ...rest, hits: many, pass: k + 2, continues: head, at: new Date(Date.now() + k).toISOString() } as Omit<SW.SweepRecord, "prev" | "hash">);
+    const line = { ...written, prev: head } as SW.SweepRecord;
+    line.hash = SW.sweepHash(line, head);
+    head = line.hash;
+    body += `${JSON.stringify(line)}\n`;
+  }
+  await writeFile(file, `${await readFile(file, "utf8")}${body}`);
+  assert.equal(SW.verifySweepChain(await readFile(file, "utf8")).ok, true);
+  return cov;
+}
+
+test("after a restart, eight waits at once add under 100 MB of heap over a sweep of many passes, each naming a long list of hits: only each record's latest line is held whole (Plan 2, A3)", { timeout: 600_000 }, async () => {
+  const PASSES = 4;
+  const { S, a0 } = await run();
+  const cov = await longSweep(S, a0, PASSES, HELD_HITS);
+  // A fresh process is the restarted hub: it reads the sweeps when the first wait asks for the finish.
+  const script = `
+    const P = await import(${JSON.stringify(join(import.meta.dirname, "..", "extensions", "protocol.ts"))});
+    const L = await import(${JSON.stringify(join(import.meta.dirname, "..", "extensions", "leads.ts"))});
+    const SW = await import(${JSON.stringify(join(import.meta.dirname, "..", "extensions", "store-sweep.ts"))});
+    const S = process.argv[1];
+    gc();
+    const h0 = process.memoryUsage().heapUsed;
+    let peak = h0;
+    const watch = setInterval(() => { peak = Math.max(peak, process.memoryUsage().heapUsed); }, 2);
+    const seats = ["a0", "a1", "a2", "a3", "a0", "a1", "a2", "a3"];
+    const t0 = Date.now();
+    const answers = await Promise.all(seats.map(async (a) => {
+      const ctx = { sandboxRoot: S, agentId: a };
+      const [w, d] = await Promise.all([P.waitForSwarmChange(ctx, { seconds: 1 }), L.leadsDigest(ctx, { mark: true })]);
+      return JSON.stringify(w).length + d.text.length;
+    }));
+    clearInterval(watch);
+    peak = Math.max(peak, process.memoryUsage().heapUsed);
+    const ms = Date.now() - t0;
+    const held = SW.sweepsHeld();
+    const line = SW.sweepOf({ hash: process.argv[2] }, await SW.readSweeps(S));
+    const latest = { hits: line.hits.length, whole: SW.hitsReadWhole(line), pass: line.pass };
+    const older = (await SW.readSweeps(S)).filter((s) => s.target === process.argv[2]).slice(0, -1).map((s) => [s.hits.length, SW.hitsReadWhole(s)]);
+    gc();
+    const h1 = process.memoryUsage().heapUsed;
+    console.log(JSON.stringify({ h0, h1, peak, ms, held, latest, older, answers: Math.max(...answers) }));
+  `;
+  const out = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--expose-gc", "--input-type=module", "-e", script, S, cov.hash!], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(out.status, 0, out.stderr);
+  const m = JSON.parse(out.stdout.trim().split("\n").at(-1)!) as { h0: number; h1: number; peak: number; ms: number; held: ReturnType<typeof SW.sweepsHeld>; latest: { hits: number; whole: boolean; pass: number }; older: Array<[number, boolean]>; answers: number };
+  assert.deepEqual(m.latest, { hits: HELD_HITS, whole: true, pass: PASSES + 1 }, "the latest line is held whole");
+  assert.equal(m.older.length, PASSES, "the first line and every pass but the last");
+  assert.ok(m.older.every(([n, whole]) => n <= SW.SWEEP_HITS_SAMPLE && !whole), `the lines it replaced are held as written: ${JSON.stringify(m.older)}`);
+  assert.equal(m.held.hit_rows, HELD_HITS, `hits held: ${m.held.hit_rows}, one line's, not ${PASSES} lines'`);
+  const added = (m.h1 - m.h0) / 2 ** 20;
+  const peak = (m.peak - m.h0) / 2 ** 20;
+  assert.ok(added < 100, `eight waits left ${added.toFixed(1)} MB more heap`);
+  assert.ok(peak < 100, `eight waits took ${peak.toFixed(1)} MB more heap at their peak`);
+  process.stdout.write(`# ${PASSES} passes of ${HELD_HITS} hits after a restart: 8 waits in ${m.ms} ms, heap +${added.toFixed(1)} MB kept, +${peak.toFixed(1)} MB at the peak; ${m.held.hit_rows} hit rows held (${(m.held.hit_bytes / 2 ** 20).toFixed(1)} MB read); the largest answer ${m.answers} characters\n`);
+});
+
+test("a line whose lists are past what a process holds is held as written, with a row naming its file, and the gate holds on it (Plan 2, A3)", async () => {
+  process.env.SWARM_SWEEP_HITS_HELD = "1000";
+  try {
+    const { S, a0, a1, a2 } = await run();
+    const cov = await longSweep(S, a0, 1, 5000);
+    const line = SW.sweepOf(cov, await SW.readSweeps(S))!;
+    assert.equal(SW.hitsReadWhole(line), false);
+    assert.ok(line.hits.length <= SW.SWEEP_HITS_SAMPLE + 1, String(line.hits.length));
+    assert.match(line.hits.at(-1)!.ref, /^ledger\/sweeps\/hits-[0-9a-f]{64}\.jsonl \(5000 rows, past the 1000 a process holds of one line, SWARM_SWEEP_HITS_HELD: \d+ of the line's 5000 hit\(s\) not read; the file holds each\)$/);
+    assert.ok(SW.sweepsHeld().hit_rows < 5000, "none of its file read back");
+    ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" }));
+    assert.ok((await P.attestEntry(a2, { seq: cov.seq, how: "ran the search again", review: REVIEW })).ok);
+    const r = await checkLedgerAnswers(S, ["2"], ["2"]);
+    const d = r.defects.find((x) => x.code === "sweep_hits");
+    assert.ok(d, "the gate holds on it");
+    assert.match(d.what, /past the 1000 a process holds of one line/);
+  } finally {
+    delete process.env.SWARM_SWEEP_HITS_HELD;
+  }
+});
