@@ -175,6 +175,43 @@ keep_netfetch() {
     '{ts: $ts, agent: "system", tool: "net_fetch_restarted", args: {by: "hub-supervise", restart: $n, port: $port}, result: {ok: $ok}}')"
 }
 
+# E7: a dump the catalogue finds inside an image after the kickoff (which adds the memory pack only for a dump at the
+# top of the inputs). The job service tells every seat when a catalogue lists one ("named as a process or memory
+# dump", a system post); the memory pack is then brought into the run (swarm.sh pack-add --by catalogue, from the
+# run's frozen copy): its tools into tools/, its notes into notes/, the record and a post. Once: added, or kept out by
+# a rule pack-add says (exit 3). The board is looked at every SWARM_DUMP_SCAN_SEC seconds (30), only the system posts
+# written since the last look.
+DUMP_SCAN_SEC="${SWARM_DUMP_SCAN_SEC:-30}"
+dump_scanned=-100000
+dump_tries=0
+keep_dump_pack() {
+  [[ -e "$HUB_DIR/.dump-pack-done" ]] && return 0
+  (( SECONDS - dump_scanned >= DUMP_SCAN_SEC )) || return 0
+  dump_scanned=$SECONDS
+  [[ -d "$SANDBOX/threads" ]] || return 0
+  local stamp="$HUB_DIR/.dump-scan" hit why run out rc=0
+  : > "$stamp.next"
+  if [[ -e "$stamp" ]]; then
+    hit="$(find "$SANDBOX/threads" -type f -name '*-system.md' -newer "$stamp" -exec grep -l 'named as a process or memory dump' {} + 2>/dev/null | head -n 1)"
+  else
+    hit="$(find "$SANDBOX/threads" -type f -name '*-system.md' -exec grep -l 'named as a process or memory dump' {} + 2>/dev/null | head -n 1)"
+  fi
+  mv -f "$stamp.next" "$stamp"
+  [[ -n "$hit" ]] || return 0
+  run="$(jq -r --arg sb "$SANDBOX" '[.runs[]? | select(.sandbox == $sb) | .id] | first // empty' "${SWARM_RUNS_DIR:-$ROOT/runs}/registry.json" 2>/dev/null || true)"
+  [[ -n "$run" ]] || { say "a catalogue lists a dump, and this run is not in the registry: the memory pack was not added" >> "$SANDBOX/traces/vm-hub.log"; touch "$HUB_DIR/.dump-pack-done"; return 0; }
+  why="$(grep -o 'The catalogue [^ ]* of .* lists [0-9]* members* named as a process or memory dump' "$hit" 2>/dev/null | head -n 1 | sed 's/^The /the /' || true)"
+  out="$(bash "$ROOT/scripts/swarm.sh" pack-add "$run" memory-forensics --by catalogue --why "${why:-for a dump a catalogue lists}" 2>&1)" || rc=$?
+  say "pack-add memory-forensics (exit $rc): $(tr '\n' ' ' <<<"$out")" >> "$SANDBOX/traces/vm-hub.log"
+  dump_tries=$((dump_tries + 1))
+  # Added or already in (0), or kept out by a rule (3): done. Anything else is tried again at the next look, three times.
+  if [[ "$rc" -eq 0 || "$rc" -eq 3 || "$dump_tries" -ge 3 ]]; then
+    touch "$HUB_DIR/.dump-pack-done"
+  else
+    rm -f "$stamp"
+  fi
+}
+
 restarts=0
 up_since=$SECONDS
 while :; do
@@ -182,6 +219,7 @@ while :; do
     keep_collector
     keep_gateway
     keep_netfetch
+    keep_dump_pack
     sleep 2
   done
   over && exit 0

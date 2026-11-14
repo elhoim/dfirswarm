@@ -150,7 +150,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for symbols   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot, and the symbol files its build converts (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
-  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance; pack-add <id> <pack> [--why W] brings a pack's tools and notes into it
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -6331,6 +6331,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson until_solved "${until_solved:-0}" \
     --arg stop_policy "${stop_policy:-cap-pause}" \
     --arg stall_minutes "${stall_minutes:-}" \
+    --arg no_packs "$no_packs" \
     --argjson kickoff_pid "$$" \
     --arg kickoff_started "$(proc_started "$$")" \
     '{
@@ -6422,7 +6423,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       hold: null,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared",
-      kickoff: {pid: $kickoff_pid, started: $kickoff_started}
+      kickoff: {pid: $kickoff_pid, started: $kickoff_started},
+      no_packs: ($no_packs | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))
     } + (if $pack_tools_as_jobs == "" then {} else {pack_tools_as_jobs: ($pack_tools_as_jobs | split(","))} end)')"
   # A resumed run is the same record: its start, its hold and what it was
   # given stay; what this start set comes on top, with the resume beside it.
@@ -10694,6 +10696,114 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
   esac
 }
 
+# A pack brought into a running run (E7): the memory pack, for a dump the catalogue finds inside an image after the
+# kickoff (the kickoff adds it only for a dump at the top of the inputs; hub-supervise.sh calls this when the job
+# service says a catalogue lists one), or another pack the operator names. The run's images, its seats' tool lists and
+# their skill index are fixed at its start, so the pack comes in by what a running run can take: its tools into
+# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>), in the run's default job
+# image), its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its
+# packs, with when, by whom and why this one was added), the trace, and a post to every seat naming both. Under the
+# kickoff's rule: only a run that has packs, never a pack the operator excluded (--no-pack), never one this host has
+# not installed, never one that declares secrets (a job does not carry them). Exit 0 when the pack is in the run
+# (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
+#   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
+cmd_pack_add() {
+  local id="${1:-}" pack="${2:-}" why="" by=operator
+  [[ -n "$id" && -n "$pack" && "$id" != -* && "$pack" != -* ]] || die_usage "pack-add requires <id> <pack> [--why TEXT] [--by catalogue|operator]"
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --why) why="${2:-}"; shift 2 ;;
+      --by) by="${2:-}"; shift 2 ;;
+      *) die_usage "pack-add: unknown option $1" ;;
+    esac
+  done
+  [[ "$by" == catalogue || "$by" == operator ]] || die_usage "pack-add: --by is catalogue or operator"
+  ensure_registry
+  local rec sandbox state version sha tools_added=() t name notes post
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  [[ "$state" == running || "$state" == prepared ]] || { echo "BLOCKER: $id is $state; a pack is added only to a run that is going." >&2; exit 2; }
+  if jq -e --arg p "$pack" '[(.packs // [])[]? | .id? // empty] | index($p) != null' <<<"$rec" >/dev/null 2>&1; then
+    echo "Packs:        $pack is already among $id's packs; nothing added."
+    return 0
+  fi
+  if jq -e --arg p "$pack" '(.no_packs // []) | index($p) != null' <<<"$rec" >/dev/null 2>&1; then
+    echo "NOTE: $pack was not added to $id: its kickoff excluded it (--no-pack)." >&2
+    exit 3
+  fi
+  if [[ "$(jq '[(.packs // [])[]?] | length' <<<"$rec")" -eq 0 ]]; then
+    echo "NOTE: $pack was not added to $id: the run has no pack, and a pack is added only to a run that has packs (as its kickoff would)." >&2
+    exit 3
+  fi
+  # The pack and what it depends on that the run lacks, as the kickoff resolves them (dependencies first).
+  local resolved dirs=() d pid have
+  if ! resolved="$("$ROOT/scripts/pack.sh" resolve "$pack" 2>/dev/null)" || [[ -z "$resolved" ]]; then
+    echo "WARN: $pack was not added to $id: it, or a pack it depends on, is not installed on this host (scripts/pack.sh install packs/$pack)." >&2
+    exit 3
+  fi
+  have="$(jq -r '[(.packs // [])[]? | .id? // empty] | join(",")' <<<"$rec")"
+  while IFS= read -r d; do
+    [[ -n "$d" && -f "$d/pack.json" ]] || continue
+    pid="$(jq -r '.id' "$d/pack.json")"
+    [[ ",$have," == *",$pid,"* ]] && continue
+    if [[ "$(jq '(.secrets // []) | length' "$d/pack.json" 2>/dev/null || echo 0)" -gt 0 ]]; then
+      echo "WARN: $pack was not added to $id: $pid declares secrets, which a running run's jobs do not carry; start a run with --pack $pack." >&2
+      exit 3
+    fi
+    dirs+=("$d")
+  done <<<"$resolved"
+  local entries=() added=() names=() said=()
+  for d in "${dirs[@]}"; do
+    pid="$(jq -r '.id' "$d/pack.json")"
+    version="$(jq -r '.version // "?"' "$d/pack.json")"
+    sha="$(sha256_of "$d/pack.json")"
+    # The tools: as the kickoff seeds a pack's (a pack's copy, its manifest naming the pack).
+    tools_added=()
+    chmod u+w "$sandbox/tools" 2>/dev/null || true
+    [[ -d "$d/tools" ]] && install_tools_from "$sandbox" "$d/tools" "$pid"
+    for t in "$d"/tools/*/; do
+      [[ -d "$t" ]] || continue
+      name="$(basename "${t%/}")"
+      jq -e --arg p "$pid" '.pack == $p' "$sandbox/tools/$name/manifest.json" >/dev/null 2>&1 && tools_added+=("$name") && names+=("$name")
+    done
+    # The notes, as files: skill() reads the packs the run started with, so these are read where they are.
+    notes="notes/$pid"
+    if [[ -d "$d/skills" ]]; then
+      [[ -d "$sandbox/$notes" ]] && chmod -R u+w "$sandbox/$notes" 2>/dev/null
+      rm -rf "${sandbox:?}/$notes"
+      mkdir -p "$sandbox/$notes"
+      cp -R "$d/skills/." "$sandbox/$notes/"
+      chmod -R a-w "$sandbox/$notes" 2>/dev/null || true
+    fi
+    entries+=("$(jq -nc --arg p "$pid" --arg v "$version" --arg sha "$sha" --arg by "$by" --arg why "$why" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg asked "$pack" \
+      --argjson tools "$(printf '%s\n' ${tools_added[@]+"${tools_added[@]}"} | jq -R 'select(length > 0)' | jq -s .)" \
+      '{id: $p, version: $v, manifest_sha256: $sha, added: ({at: $at, by: $by, why: (if $why == "" then null else $why end), tools: $tools, notes: "notes/\($p)"} + (if $p == $asked then {} else {for: $asked} end))}')")
+    added+=("$pid $version")
+    said+=("${pid} ${version} (${#tools_added[@]} tool(s), notes under notes/${pid}/)")
+  done
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    echo "Packs:        $pack is already among $id's packs; nothing added."
+    return 0
+  fi
+  registry_merge "$id" "$(jq -c --argjson add "$(printf '%s\n' "${entries[@]}" | jq -s .)" '{packs: ((.packs // []) + $add)}' <<<"$rec")" \
+    || { echo "BLOCKER: the run's record could not take $pack; its tools and notes are in the run, and the seats were not told." >&2; exit 1; }
+  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is in the run's record and its post.
+  if [[ "$by" == operator ]]; then
+    operator_audit pack-add "$id" "$pack" ${why:+--why "$why"} || true
+    operator_trace "$sandbox" pack-add "$id" "$pack"
+  fi
+  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}), which runs it in the run's default job image; tools(name: <name>) gives its manifest. The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read. Read the note for the dump's kind (a process dump, a crash dump, a memory image) before you parse one yourself."
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, key, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "result", to: "all", key, body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$sandbox" "pack-added:$pack" "$post" >/dev/null 2>&1 \
+    || echo "WARN: the seats could not be told on the board that $pack was added: tell them (swarm.sh say $id ...)." >&2
+  echo "Packs:        added to $id: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g'); the record and the board say so"
+}
+
 # Change a running swarm's caps: raise the spend or the token cap, give it
 # more time, set a per-agent cap. The change is taken under the lock every fold
 # of usage takes, kept in budget.json's cap_changes (so the shell watch does not
@@ -12792,6 +12902,19 @@ Then images/recipe.py build reads the store (--symbols-from, by default this one
 files with no network. Each fetch is a line of the store's fetched.jsonl. images/README.md, "Symbol tables".
 EOF
       ;;
+    pack-add) cat <<'EOF'
+  pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
+                                                  bring a pack into a running run: its tools into tools/ (the seats
+                                                  run them with job_run(tool: <name>), in the run's default job image),
+                                                  its notes as files under notes/<pack>/, the run's record and a post
+                                                  to every seat. The run's images, tool lists and skill index stay as
+                                                  they were started. Only a run that has packs; never a pack its
+                                                  kickoff excluded (--no-pack), one this host has not installed, or one
+                                                  that declares secrets: those exit 3, said. The harness runs it itself
+                                                  (--by catalogue) for memory-forensics when a catalogue lists a dump
+                                                  inside an image, which the kickoff could not see.
+EOF
+      ;;
     tool-supply) cat <<'EOF'
   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--provides CAP[,CAP]] [--for R-n|L-n]... [--as ID]
                                                   a program no image holds, for a running (or stopped) run: a file or a
@@ -12881,6 +13004,7 @@ main() {
     evidence) cmd_evidence "$@" ;;
     material) cmd_material "$@" ;;
     tool-supply) cmd_tool_supply "$@" ;;
+    pack-add) cmd_pack_add "$@" ;;
     symbols) python3 "$ROOT/scripts/symbols.py" "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
