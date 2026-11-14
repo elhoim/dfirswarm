@@ -507,14 +507,67 @@ test("a hand-off's header is at most 2,000 characters beside the note, its skill
   const small = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, leads: "Leads: 2 open, 1 yours.\nYours: L-1 (working)\nFinish: READY by the registers", skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
   assert.match(small, /Yours: L-1 \(working\)\nFinish: READY by the registers; finish status lists what holds it\./);
   assert.ok(small.includes(skillLines.slice(0, 4).join("\n")) && small.length <= HANDOFF_HEADER_MAX);
-  // A large register gives way to the skills line, which is bounded where it is written; both are said.
+  // A large register goes ahead of the skills line: the seat's own leads and the finish first, whole lines or none.
   const both = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
-  assert.ok(both.length <= HANDOFF_HEADER_MAX && both.includes(skillLines.slice(0, 4).join("\n")));
-  assert.match(both, /The lead register now[^\n]*\nLeads: 40 open, 12 yours\./);
+  assert.ok(both.length <= HANDOFF_HEADER_MAX, `${both.length}`);
+  assert.match(both, /\nYours: L-0 \(working/);
+  assert.match(both, /\nFinish: not ready \(31, 9 of them yours\); finish status lists what holds it\./);
+  for (const l of both.split("\n")) assert.ok(!/\u2026/.test(l) || /; \u2026 \(cut: leads gives it whole\)$/.test(l), `a line cut inside an item: ${l}`);
+});
+
+test("a hand-off keeps the seat's own jobs, its leads and the finish count ahead of a long skills line and a cap rule (C2)", () => {
+  // A realistic skills line (638 characters: the account and two cards) and a register of the seat's own work.
+  const skills = [
+    "Skill bodies a compaction took out of your context: windows-forensics:registry/clock (2,310 tokens, done), accounts/logons (1,900 tokens). Load again (skill(id)) the ones you still need.",
+    "Rules you worked with (shown once in the run; whole note: skill(id)):",
+    '- registry/clock: regkv {"hive": "<SYSTEM>", "key": "ControlSet001\\\\Control\\\\TimeZoneInformation"}: Bias is minutes west of UTC; a DST rule is the hive\'s, not the clock\'s. Does not show: the clock was right.',
+    '- accounts/logons: regkv {"hive": "<SAM>", "key": "SAM\\\\Domains\\\\Account\\\\Users"}: subkey names are RIDs in hex; ProfileList maps full SIDs to profiles. Record the full SID.',
+  ].join("\n");
+  const leads = [
+    "Leads: 14 open, 3 yours.",
+    "Yours: L-12 (working; USB device attached before the wipe), L-15 (working; timezone of the host), L-19 (ready; SAM accounts created in March)",
+    "Blocked on you: L-21 waits for your reading of job j000143",
+    "Awaiting your interpretation: j000143 (regkv SYSTEM), j000150 (evtx_query Security)",
+    "Questions nobody holds: Q-4 (who logged on), Q-7 (what was exfiltrated)",
+    "Your running jobs: j000151 (evtx_query), j000152 (mft_parse)",
+    "Finish: not ready (9, 3 of them yours)",
+  ].join("\n");
+  const base = { name: "regreader", doing: "windows registry and accounts", claims: ["work/agent03/reg.md", "work/agent03/usb.md"], unread: { main: 4, agent03: 1 }, ledgerTotal: 84, ledgerMine: 21, sentinel: false, spentUsd: 3.21, capUsd: 6, leads, skills };
+  for (const extra of [{}, { capHit: "c".repeat(300) }, { capHit: "c".repeat(300), forged: `Forged this run: ${"tool_x (by a1), ".repeat(30)}` }]) {
+    for (const form of ["string", "built"] as const) {
+      const facts = form === "string" ? { ...base, ...extra } : { ...base, ...extra, skills: undefined };
+      // The built form gives the skills line for the room left, as skills.ts handoffLine does: whole lines from its start.
+      const built = (max: number) => {
+        const out: string[] = [];
+        for (const l of skills.split("\n")) if ([...out, l].join("\n").length <= max) out.push(l);
+        return out.join("\n");
+      };
+      const h = handoffHeader("agent03", 4, facts, true, "threshold", form === "built" ? built : undefined);
+      const what = `${form} ${JSON.stringify(Object.keys(extra))}`;
+      assert.ok(h.length <= HANDOFF_HEADER_MAX, `${what}: ${h.length}`);
+      assert.ok(!h.includes("call leads (no room for it here)"), `${what}: the register is carried, not pointed at`);
+      assert.match(h, /\nYour running jobs: j000151 \(evtx_query\), j000152 \(mft_parse\)\n/, what);
+      assert.match(h, /\nFinish: not ready \(9, 3 of them yours\); finish status lists what holds it\.\n/, what);
+      assert.match(h, /\nYours: L-12 \(working; USB device attached before the wipe\), L-15 [^\n]*March\)\n/, what);
+      // No line is cut: each register line is whole or named as left out.
+      for (const l of leads.split("\n").slice(1, 6)) {
+        const label = l.split(":")[0]!;
+        assert.ok(h.includes(`\n${l}\n`) || new RegExp(`Left out here for room \\(leads gives them\\): [^\\n]*${label}`).test(h), `${what}: ${label} neither whole nor named`);
+      }
+      for (const l of h.split("\n")) assert.ok(!l.includes("\u2026") || /; \u2026 \(cut: [^)]*\)$/.test(l), `${what}: a line cut inside an item: ${l}`);
+      // The skills line takes what is left, by whole lines from its start.
+      const kept = skills.split("\n").filter((l) => h.includes(l));
+      assert.deepEqual(kept, skills.split("\n").slice(0, kept.length), what);
+      if (!("forged" in extra)) assert.ok(kept.length >= 1, `${what}: the skills line keeps what room is left`);
+    }
+  }
+  // With room to spare everything is carried, the register before the skills line.
+  const roomy = handoffHeader("agent03", 4, base, true, "threshold");
+  assert.ok(roomy.indexOf("Finish: not ready") < roomy.indexOf("Skill bodies a compaction"));
 });
 
 /** A stand-in for Pi: the hooks registerSelfCompact adds, the messages it sends, and a provider whose summaries are scripted. */
-async function rig(o: { facts: () => Promise<import("../extensions/self-compact.ts").HandoffFacts>; factsMs?: number; graceMs?: number; summaries?: string[]; tokens?: number; dir?: string }) {
+async function rig(o: { facts: () => Promise<import("../extensions/self-compact.ts").HandoffFacts>; factsMs?: number; graceMs?: number; summaries?: string[]; tokens?: number; dir?: string; skills?: (max: number) => string }) {
   const { registerSelfCompact, STATE_TYPE: STATE } = await import("../extensions/self-compact.ts");
   const { specsFromEnv } = await import("../extensions/context-ceiling.ts");
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => Promise<unknown>>>();

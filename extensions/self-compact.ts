@@ -531,28 +531,92 @@ export function nowPrompt(saved?: string): string {
   return `${base}\n\nA note is already saved from a previous attempt. Pass it to ${SELF_COMPACT_TOOL} verbatim instead of inventing a new one. Saved note, verbatim:\n\n${saved}\n\n---\nCall ${SELF_COMPACT_TOOL} now with exactly that note.`;
 }
 
-/** The header the harness puts in front of the returned note. */
 /** How much of the lead register a hand-off carries. */
 export const HANDOFF_LEADS_MAX = 2000;
+
+const cutTo = (text: string, max: number, where: string): string => (text.length > max ? `${text.slice(0, Math.max(0, max - where.length - 9))}\u2026 (cut: ${where})` : text);
+
+/** The longest one register line a hand-off carries; a longer one is cut at an item boundary and says so. */
+const HANDOFF_LEAD_LINE_MAX = 600;
+
+/**
+ * A line cut at its last item boundary past its label that leaves room for the marker: "; ", else ", ", outside
+ * parentheses, else a space; never inside a word. null when there is no such boundary.
+ */
+function cutAtItem(line: string, max: number, where: string): string | null {
+  if (line.length <= max) return line;
+  const marker = `; \u2026 (cut: ${where})`;
+  const head = line.slice(0, Math.max(0, max - marker.length));
+  const label = line.indexOf(": ") + 1;
+  const last: Record<string, number> = { "; ": -1, ", ": -1, " ": -1 };
+  let depth = 0;
+  for (let i = 0; i < head.length - 1; i += 1) {
+    const c = head[i]!;
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth -= 1;
+    else if (head[i + 1] === " " && depth === 0 && (c === ";" || c === ",")) last[`${c} `] = i;
+    if (c === " " && i > label) last[" "] = i;
+  }
+  for (const sep of ["; ", ", ", " "]) {
+    const at = last[sep]!;
+    if (at > label) return `${line.slice(0, at).replace(/[;,.]+$/, "")}${marker}`;
+  }
+  return null;
+}
+
+/**
+ * Which register lines matter most to a seat that has just lost its context, as a rank (lower first): its own leads,
+ * its own jobs and the finish count are what it must not lose (C2), then what waits on it, the questions nobody holds
+ * and the counts. Ranks below HANDOFF_SKILLS_RANK go ahead of the skills line; the others take what it leaves.
+ */
+const HANDOFF_LEAD_RANKS: Array<[RegExp, number, string]> = [
+  [/^Yours:/, 0, "Yours"],
+  [/^Your running jobs/, 1, "Your running jobs"],
+  [/^Finish: /, 2, "Finish"],
+  [/^Blocked on you:/, 3, "Blocked on you"],
+  [/^Awaiting your interpretation:/, 4, "Awaiting your interpretation"],
+  [/^Questions nobody holds/, 5, "Questions nobody holds"],
+  [/^Leads:/, 6, "Leads"],
+  [/^Found but not answered/, 7, "Found but not answered"],
+  [/^Seats working:/, 9, "Seats working"],
+];
+const HANDOFF_SKILLS_RANK = 8;
+
+type LeadLine = { line: string; rank: number; label: string; order: number };
+
+/** The register lines a hand-off may carry, in the digest's order, each at most HANDOFF_LEAD_LINE_MAX characters, the finish as a count. */
+function handoffLeadLines(digest: string): LeadLine[] {
+  const out: LeadLine[] = [];
+  for (const raw of digest.split("\n")) {
+    const r = HANDOFF_LEAD_RANKS.find(([re]) => re.test(raw));
+    if (!r) continue;
+    let line = raw;
+    if (r[1] === 2) {
+      const m = /^Finish: (READY by the registers|not ready \(\d+(?:, \d+ of them yours)?\))/.exec(raw);
+      line = `${m ? `Finish: ${m[1]}` : "Finish: see finish status"}; finish status lists what holds it.`;
+    } else line = cutAtItem(raw, HANDOFF_LEAD_LINE_MAX, "leads gives it whole") ?? cutTo(raw, HANDOFF_LEAD_LINE_MAX, "leads gives it whole");
+    out.push({ line, rank: r[1], label: r[2], order: out.length });
+  }
+  return out;
+}
 
 /**
  * The lead register for a hand-off: what is the seat's own (its leads, what is blocked on it, the jobs that wait for its
  * reading, its stuck jobs), the questions nobody holds, and the finish as a count. Not the other seats' backlog: a
  * hand-off of the run s01a4f4 named 76 jobs of other seats and ten leads the seat did not hold (17,486 characters),
- * and one of s5d814f was 38 MB. Bounded at HANDOFF_LEADS_MAX characters.
+ * and one of s5d814f was 38 MB. Bounded at `max` characters by whole lines, the seat's own first (HANDOFF_LEAD_RANKS),
+ * in the digest's order.
  */
 export function handoffLeads(digest: string, max: number = HANDOFF_LEADS_MAX): string {
-  const keep = /^(Leads:|Yours:|Blocked on you:|Awaiting your interpretation:|Questions nobody holds|Your running jobs|Found but not answered|Seats working:)/;
-  const out: string[] = [];
-  for (const line of digest.split("\n")) {
-    if (keep.test(line)) out.push(line.length > 600 ? `${line.slice(0, 560)}\u2026 (cut: leads gives it whole)` : line);
-    else if (line.startsWith("Finish: ")) {
-      const m = /^Finish: (READY by the registers|not ready \(\d+(?:, \d+ of them yours)?\))/.exec(line);
-      out.push(`${m ? `Finish: ${m[1]}` : "Finish: see finish status"}; finish status lists what holds it.`);
-    }
+  const all = handoffLeadLines(digest);
+  const kept = new Set<LeadLine>();
+  let used = 0;
+  for (const l of all.slice().sort((a, b) => a.rank - b.rank || a.order - b.order)) {
+    if (used + l.line.length + (kept.size ? 1 : 0) > max) continue;
+    kept.add(l);
+    used += l.line.length + (kept.size > 1 ? 1 : 0);
   }
-  const text = out.join("\n");
-  return text.length > max ? `${text.slice(0, Math.max(0, max - 40))}\u2026 (cut: leads gives it whole)` : text;
+  return all.filter((l) => kept.has(l)).map((l) => l.line).join("\n");
 }
 
 /**
@@ -562,11 +626,19 @@ export function handoffLeads(digest: string, max: number = HANDOFF_LEADS_MAX): s
  */
 export const HANDOFF_HEADER_MAX = 2000;
 
-const cutTo = (text: string, max: number, where: string): string => (text.length > max ? `${text.slice(0, Math.max(0, max - where.length - 9))}\u2026 (cut: ${where})` : text);
-
-export function handoffHeader(agentId: string, cycle: number, facts: HandoffFacts, hadNote: boolean, reason: string): string {
+/**
+ * The header the harness puts in front of the returned note, at most HANDOFF_HEADER_MAX characters. What is kept when
+ * there is less room, in this order: the facts, the cap rule and the forged tools (never dropped); the seat's own leads,
+ * its own jobs and the finish count; what waits on it, the questions nobody holds and the register's counts; the skills
+ * line; the rest of the register. Every line is whole or left out, and the lines left out of the register are named.
+ * `skillsFor` builds the skills line for the room left (skills.ts handoffLine), here, from what the seat holds: so it goes
+ * with the note when the hub's facts are late or unknown. Without it `facts.skills` is used, whole lines from its start.
+ */
+export function handoffHeader(agentId: string, cycle: number, facts: HandoffFacts, hadNote: boolean, reason: string, skillsFor?: (max: number) => string): string {
   const who = facts.name ? `you are ${agentId} "${facts.name}"${facts.doing ? ` (${facts.doing})` : ""}` : `you are ${agentId}; you have not named yourself yet (call name)`;
-  const claims = facts.claims.length ? cutTo(facts.claims.join(", "), 240, `${facts.claims.length} claims, claims lists them`) : "none";
+  // Cut at an item boundary, never inside a path or a tool's name; the marker says where the rest is.
+  const bounded = (text: string, max: number, where: string) => cutAtItem(text, max, where) ?? cutTo(text, max, where);
+  const claims = facts.claims.length ? bounded(facts.claims.join(", "), 240, `${facts.claims.length} claims, claims lists them`) : "none";
   const unreadEntries = Object.entries(facts.unread).filter(([, n]) => n > 0);
   const unread = unreadEntries.length ? `${unreadEntries.map(([thread, n]) => `${n} in ${thread}`).join(", ")}. Call inbox before acting.` : "none.";
   const sentinel = facts.sentinel ? "PRESENT: the swarm is over, call done now" : "absent";
@@ -581,31 +653,70 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
         : [`Live claims: ${claims}.`, `Unread posts: ${unread}`, `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`]),
     // The cap rule is an order and is never cut: the lead register gives way to it.
     ...(facts.capHit ? [facts.capHit] : []),
-    ...(facts.forged ? [cutTo(facts.forged, 240, "tools lists them")] : []),
+    ...(facts.forged ? [bounded(facts.forged, 240, "tools lists them")] : []),
   ];
   // On run 6 all four agents answered this message, a few tool calls later,
   // with a status update to "the user" and ended their turns; three sat idle
   // for ten minutes until the watchdog spoke. The message has to say what
   // it is not.
   // Not when the lines above order the seat to stop: "work on until done is met" would contradict "call done now".
-  lines.push(
-    facts.stopping
-      ? "This message is the harness, not a person: do not answer it with a status or a summary. The swarm is ending, as the lines above say: do what they say and start nothing new."
-      : "This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.",
-  );
+  const tail = facts.stopping
+    ? "This message is the harness, not a person: do not answer it with a status or a summary. The swarm is ending, as the lines above say: do what they say and start nothing new."
+    : "This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.";
   const last = hadNote ? "Your note follows verbatim; continue from its NEXT ACTION and never restart work it marks as done:\n---" : "No note was saved before this compaction (it was Pi's own recovery, not a hand-off). Read the summary above, call inbox, then continue.";
-  // The skills line comes bounded (skills.ts HANDOFF_SKILLS_MAX) and is counted in HANDOFF_HEADER_MAX: whole lines of it are
-  // dropped from its end when the lines above leave less. The lead register takes what is left.
-  const LEADS_HEAD = "The lead register now (your leads are yours: go on with them, or release them; leads and finish status give the rest):\n";
-  const used = [...lines, last].reduce((a, l) => a + l.length + 1, 0);
-  const skillLines = (facts.skills ?? "").split("\n").filter(Boolean);
-  while (skillLines.length && used + skillLines.join("\n").length + 1 > HANDOFF_HEADER_MAX) skillLines.pop();
-  const skills = skillLines.join("\n");
-  const room = HANDOFF_HEADER_MAX - used - (skills ? skills.length + 1 : 0) - LEADS_HEAD.length - 1;
-  const leads = facts.leads && room >= 120 ? [`${LEADS_HEAD}${handoffLeads(facts.leads, Math.min(HANDOFF_LEADS_MAX, room))}`] : facts.leads ? ["The lead register: call leads (no room for it here)."] : [];
-  const tail = lines.pop() as string;
-  lines.push(...leads, ...(skills ? [skills] : []), tail, last);
-  return lines.join("\n");
+  const LEADS_HEAD = "The lead register now (your leads are yours: go on with them, or release them; leads and finish status give the rest):";
+  const NO_ROOM = "The lead register: call leads (no room for it here).";
+  let room = HANDOFF_HEADER_MAX - [...lines, tail, last].reduce((a, l) => a + l.length + 1, 0);
+  // The register's lines ahead of the skills line, the seat's own first, each whole; the seat's own leads, jobs and
+  // finish are cut at an item boundary when nothing else is left. A line that does not fit is left out and named.
+  const reg = facts.leads ? handoffLeadLines(facts.leads) : [];
+  const byRank = reg.slice().sort((a, b) => a.rank - b.rank || a.order - b.order);
+  const kept = new Map<LeadLine, string>();
+  const size = () => (kept.size ? LEADS_HEAD.length + 1 + [...kept.values()].reduce((a, t) => a + t.length + 1, 0) : 0);
+  const leftNote = (ls: LeadLine[]) => (ls.length ? `Left out here for room (leads gives them): ${ls.map((l) => l.label).join(", ")}.` : "");
+  const left: LeadLine[] = [];
+  for (const l of byRank.filter((x) => x.rank < HANDOFF_SKILLS_RANK)) {
+    const before = size();
+    kept.set(l, l.line);
+    if (size() <= room) continue;
+    kept.delete(l);
+    const cut = l.rank <= 2 ? cutAtItem(l.line, room - before - (before ? 1 : LEADS_HEAD.length + 2), "leads gives it whole") : null;
+    if (cut) kept.set(l, cut);
+    if (!cut || size() > room) {
+      kept.delete(l);
+      left.push(l);
+    }
+  }
+  // Naming what was left out takes room from the least of what was kept, never from the seat's own leads, jobs or finish.
+  const fits = () => size() + (left.length ? leftNote(left).length + 1 : 0) <= room;
+  while (kept.size && !fits()) {
+    const least = [...kept.keys()].filter((l) => l.rank > 2).sort((a, b) => b.rank - a.rank || b.order - a.order)[0];
+    if (!least) break;
+    kept.delete(least);
+    left.push(least);
+  }
+  left.sort((a, b) => a.order - b.order);
+  const note = kept.size && fits() ? leftNote(left) : "";
+  room -= size() + (note ? note.length + 1 : 0) + (!kept.size && reg.length ? NO_ROOM.length + 1 : 0);
+  // The skills line takes what is left: built for the room (skills.ts keeps the index pointer first), or the given one by whole lines.
+  let skills = "";
+  if (skillsFor) skills = room > 1 ? skillsFor(room - 1) : "";
+  else {
+    const skillLines = (facts.skills ?? "").split("\n").filter(Boolean);
+    while (skillLines.length && skillLines.join("\n").length + 1 > room) skillLines.pop();
+    skills = skillLines.join("\n");
+  }
+  if (skills.length + 1 > room) skills = "";
+  if (skills) room -= skills.length + 1;
+  // The rest of the register, whole lines, while room is left.
+  for (const l of byRank.filter((x) => x.rank >= HANDOFF_SKILLS_RANK)) {
+    const before = size();
+    kept.set(l, l.line);
+    if (size() - before > room) kept.delete(l);
+    else room -= size() - before;
+  }
+  const leads = kept.size ? [LEADS_HEAD, ...reg.filter((l) => kept.has(l)).map((l) => kept.get(l)!), ...(note ? [note] : [])] : reg.length ? [NO_ROOM] : [];
+  return [...lines, ...leads, ...(skills ? [skills] : []), tail, last].join("\n");
 }
 
 /**
