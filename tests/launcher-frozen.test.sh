@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# The launcher runs from a frozen copy (plan 0.13): `swarm.sh start` and
-# `stop` copy the script first and run the copy, so an edit to the checkout
-# while they run changes neither what they do nor their exit status; a VM
-# run's frozen host copy takes the launcher's own bytes for swarm.sh. Every
+# The launcher runs from a frozen copy (plan 0.13): `swarm.sh start`, `stop`
+# and `resume` copy the script first and run the copy, so an edit to the
+# checkout while they run changes neither what they do nor their exit status;
+# the copy goes when the launcher ends, however it ends; a VM run's frozen
+# host copy takes the launcher's own bytes for swarm.sh. Every
 # line of the logs the launcher's daemons write carries its time, and so do
 # the hub keeper's own lines. No model, no Herdr, no VM.
 set -euo pipefail
@@ -10,6 +11,14 @@ unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK
 export SWARM_ISOLATION=host
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/lfz.XXXXXX)"
+# The launchers' copies go in the suite's own temporary area, where what is left of them can be seen.
+export TMPDIR="$TMP/tmp"; mkdir -p "$TMPDIR"
+copies_left() { ls -d "$TMPDIR"/dfirswarm-launcher.* 2>/dev/null || true; }
+gone_soon() { # <path>: within three seconds
+  local _
+  for _ in $(seq 1 30); do [[ -e "$1" ]] || return 0; sleep 0.1; done
+  return 1
+}
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -25,7 +34,8 @@ for e in "$ROOT"/* "$ROOT"/.[!.]*; do
 done
 for e in "$ROOT"/scripts/*; do [[ "$(basename "$e")" == swarm.sh ]] || ln -s "$e" "$CO/scripts/$(basename "$e")"; done
 cp "$ROOT/scripts/swarm.sh" "$CO/scripts/swarm.sh"
-# The first node the launcher runs says which file its bash runs, and rewrites the checkout's swarm.sh in place.
+# The first node the launcher runs says which file its bash runs, keeps that file's bytes (the copy is gone once the
+# launcher ends), and rewrites the checkout's swarm.sh in place.
 FAKE="$TMP/bin"; mkdir -p "$FAKE"
 REAL_NODE="$(command -v node)"
 cat > "$FAKE/node" <<EOF2
@@ -33,6 +43,8 @@ cat > "$FAKE/node" <<EOF2
 if [[ ! -e "$TMP/seen" ]]; then
   : > "$TMP/seen"
   ps -o command= -p "\$PPID" > "$TMP/launcher-command"
+  c="\$(grep -o '[^ ]*dfirswarm-launcher\.[0-9]*\.[A-Za-z0-9]*' "$TMP/launcher-command" | head -1)"
+  [[ -n "\$c" ]] && cp "\$c/swarm.sh" "$TMP/copy-bytes"
   printf '%s\n' 'echo EDITED-CHECKOUT-RAN; exit 9' 'syntax error here (' > "$CO/scripts/swarm.sh.new"
   cat "$CO/scripts/swarm.sh.new" > "$CO/scripts/swarm.sh"
 fi
@@ -53,21 +65,58 @@ cmd="$(cat "$TMP/launcher-command")"
 grep -q 'dfirswarm-launcher\.[0-9]*\.[A-Za-z0-9]*/swarm.sh start' <<<"$cmd" || fail "the launcher's bash does not run a copy: $cmd"
 grep -q "$CO/scripts/swarm.sh" <<<"$cmd" && fail "the launcher's bash runs the checkout's file: $cmd"
 copy="$(grep -o '[^ ]*dfirswarm-launcher\.[0-9]*\.[A-Za-z0-9]*' <<<"$cmd" | head -1)"
-[[ -n "$copy" && -d "$copy" ]] || fail "no launcher copy named in $cmd"
-cmp -s "$copy/swarm.sh" "$ROOT/scripts/swarm.sh" || fail "the copy is not the file as the launcher began"
+[[ -n "$copy" ]] || fail "no launcher copy named in $cmd"
+cmp -s "$TMP/copy-bytes" "$ROOT/scripts/swarm.sh" || fail "the copy is not the file as the launcher began"
+gone_soon "$copy" || fail "the start's copy is still there after it ended: $(copies_left)"
 sb="$(sed -n 's/^SANDBOX=//p' <<<"$out" | tail -1)"
 [[ -d "$sb" ]] || fail "no sandbox: $out"
-pass "a start runs a copy of swarm.sh; the checkout's file rewritten while it ran changes neither its output nor its exit status"
+pass "a start runs a copy of swarm.sh; the checkout's file rewritten while it ran changes neither its output nor its exit status; the copy goes with it"
 
-echo "# a command that is not start or stop runs where it stands; a stop's status is its own; an ended launcher's copy goes"
+echo "# a command that is not start, stop or resume runs where it stands; a stop's status is its own, and its copy goes"
 cp "$ROOT/scripts/swarm.sh" "$CO/scripts/swarm.sh"
 rc=0; out="$(bash "$CO/scripts/swarm.sh" stop no-such-run 2>&1)" || rc=$?
 [[ "$rc" -ne 0 ]] || fail "a stop of no run succeeded: $out"
 grep -q 'no-such-run' <<<"$out" || fail "the stop of no run said nothing of it: $out"
-[[ ! -e "$copy" ]] || fail "the next stop left the ended start's copy: $copy"
+for _ in $(seq 1 30); do [[ -z "$(copies_left)" ]] && break; sleep 0.1; done
+[[ -z "$(copies_left)" ]] || fail "the stop's copy is still there after it ended: $(copies_left)"
 rc2=0; bash "$CO/scripts/swarm.sh" list >/dev/null 2>&1 || rc2=$?
 [[ "$rc2" -eq 0 ]] || fail "list failed ($rc2)"
-pass "a stop's status passes through the copy; list runs as it stands"
+pass "a stop's status passes through the copy, which goes with it; list runs as it stands"
+
+echo "# a resume runs from a copy too; a launcher killed outright leaves no copy"
+# The first jq a launcher runs says which file its bash runs. resume starts the run again inside its own process
+# (cmd_start), for minutes: the same reading as it goes. Here it is refused (the run never started), with its status.
+JQB="$TMP/jq-bin"; mkdir -p "$JQB"
+REAL_JQ="$(command -v jq)"
+cat > "$JQB/jq" <<EOF2
+#!/usr/bin/env bash
+[[ -e "$TMP/jq-seen" ]] || { : > "$TMP/jq-seen"; ps -o command= -p "\$PPID" > "$TMP/resume-command"; }
+exec "$REAL_JQ" "\$@"
+EOF2
+chmod +x "$JQB/jq"
+lfz_id="$(jq -r '[.runs[] | select(.label == "lfz") | .id] | last' "$SWARM_RUNS_DIR/registry.json")"
+rc=0; out="$(PATH="$JQB:$PATH" bash "$CO/scripts/swarm.sh" resume "$lfz_id" 2>&1)" || rc=$?
+[[ "$rc" -eq 2 ]] && grep -q "is prepared and never started" <<<"$out" || fail "the resume of a run never started ($rc): $out"
+grep -q 'dfirswarm-launcher\.[0-9]*\.[A-Za-z0-9]*/swarm.sh resume' "$TMP/resume-command" || fail "the resume does not run a copy: $(cat "$TMP/resume-command" 2>/dev/null)"
+for _ in $(seq 1 30); do [[ -z "$(copies_left)" ]] && break; sleep 0.1; done
+[[ -z "$(copies_left)" ]] || fail "the resume's copy is still there after it ended: $(copies_left)"
+# A launcher killed with SIGKILL runs no trap of its own: its copy still goes.
+cat > "$FAKE/node" <<EOF2
+#!/usr/bin/env bash
+echo "\$\$" > "$TMP/node-waits"
+exec sleep 30
+EOF2
+chmod +x "$FAKE/node"
+PATH="$FAKE:$PATH" bash "$CO/scripts/swarm.sh" start --model solo/model --n 1 --cap-usd 1 --no-start --toolbox off --goal-file "$GOAL" --label lfk >/dev/null 2>&1 </dev/null &
+killed=$!
+for _ in $(seq 1 100); do [[ -e "$TMP/node-waits" ]] && break; sleep 0.1; done
+[[ -e "$TMP/node-waits" ]] || fail "the start to be killed never reached its first node"
+kcopy="$(copies_left | head -1)"
+[[ -n "$kcopy" && "$kcopy" == *"/dfirswarm-launcher.$killed."* ]] || fail "the running start's copy is not named for its pid $killed: $(copies_left)"
+kill -9 "$killed"; wait "$killed" 2>/dev/null || true
+kill "$(cat "$TMP/node-waits")" 2>/dev/null || true
+gone_soon "$kcopy" || fail "a launcher killed outright left its copy: $(copies_left)"
+pass "a resume runs a copy and its status passes through; a killed launcher's copy goes within a second or two"
 
 echo "# the run's frozen host copy has the launcher's bytes for swarm.sh"
 eval "$(sed -n '/^harness_commit()/,/^}/p; /^harness_dirty()/,/^}/p; /^freeze_harness()/,/^}/p' "$ROOT/scripts/swarm.sh")"

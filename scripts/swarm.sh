@@ -14,11 +14,14 @@ set -euo pipefail
 
 # The launcher runs from a frozen copy of itself. Bash reads a script as it goes: a start or a stop, which run for
 # minutes, read on from the checkout as it was being edited (a start that had worked ended "line 12500: syntax error",
-# exit 2). So `start` and `stop` copy this file first and exec the copy (the same process: its pid, its signals and
-# its status are the launcher's), and a VM run's frozen host copy (freeze_harness) takes these same bytes for
-# scripts/swarm.sh: the launcher and the hub run one file. The block is one command, read whole before it runs. A copy
-# is named for its launcher's pid and kept while it runs; the next start or stop removes those whose launcher ended.
-if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop ) ]]; then
+# exit 2). So `start`, `stop` and `resume` (a start of a run that ended) copy this file first and exec the copy (the
+# same process: its pid, its signals and its status are the launcher's), and a VM run's frozen host copy
+# (freeze_harness) takes these same bytes for scripts/swarm.sh: the launcher and the hub run one file. The block is one
+# command, read whole before it runs. A copy is named for its launcher's pid and kept while it runs, and no longer: a
+# watcher started here removes it within a second of the launcher's end, whichever way it ends (the kickoff's own
+# exit traps are its own), and holds nothing of the launcher's input or output. A copy whose watcher did not outlive
+# it (a hangup kills nothing here, but a kill can) is removed by the next start, stop or resume.
+if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop || "${1:-}" == resume ) ]]; then
   for _launcher_old in "${TMPDIR:-/tmp}"/dfirswarm-launcher.*; do
     [[ -d "$_launcher_old" ]] || continue
     _launcher_pid="${_launcher_old##*/dfirswarm-launcher.}"; _launcher_pid="${_launcher_pid%%.*}"
@@ -26,6 +29,7 @@ if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop )
   done
   _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.$$.XXXXXX" 2>/dev/null)" || _launcher_dir=""
   if [[ -n "$_launcher_dir" ]] && cp "${BASH_SOURCE[0]}" "$_launcher_dir/swarm.sh" 2>/dev/null; then
+    ( trap '' HUP; while kill -0 "$$" 2>/dev/null; do sleep 1; done; rm -rf "${_launcher_dir:?}" ) </dev/null >/dev/null 2>&1 &
     SWARM_LAUNCHER_COPY="$_launcher_dir/swarm.sh" SWARM_LAUNCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
       exec bash "$_launcher_dir/swarm.sh" "$@"
   fi
