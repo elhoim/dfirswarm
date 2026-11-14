@@ -4224,14 +4224,21 @@ export default function (pi: ExtensionAPI) {
   // The kinds' own tools are the weak class's (B2): a seat of another class is declared `record` alone, whose description
   // carries every kind's rules, and not five more definitions of about 47 KB. Decided on the seat's model when the
   // session starts and again when the model changes; the trace says which and why (record_tools).
-  // The kinds' tools the session's allowlist made active, read once: only those are ever put back.
-  let kindAllowed: string[] | null = null;
+  // Only the kinds' tools the session's allowlist (--tools) keeps are ever put back: Pi's configured tools are those, read
+  // at every apply. They were read once from the active set, and a strong seat relaunched had its tool set restored
+  // without them, so a later switch to a weak model had nothing to put back. An older Pi without getAllTools: the kinds'
+  // tools ever seen active.
+  const kindSeen = new Set<string>();
+  const isKindTool = (n: string) => (KIND_TOOL_NAMES as readonly string[]).includes(n);
   const applyKindTools = async (model: { provider?: string; id?: string } | undefined, cwd: string | undefined) => {
     const decision = recordKindToolsFor(model);
     try {
       const active = pi.getActiveTools();
-      kindAllowed ??= active.filter((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n));
-      const next = decision.offer ? [...new Set([...active, ...kindAllowed])] : active.filter((n) => !(KIND_TOOL_NAMES as readonly string[]).includes(n));
+      for (const n of active.filter(isKindTool)) kindSeen.add(n);
+      const all: unknown = typeof pi.getAllTools === "function" ? pi.getAllTools() : null;
+      const configured = Array.isArray(all) ? (all as Array<{ name?: unknown }>).map((t) => String(t?.name ?? "")).filter(isKindTool) : null;
+      const kindAllowed = configured?.length ? configured : [...kindSeen];
+      const next = decision.offer ? [...new Set([...active, ...kindAllowed])] : active.filter((n) => !isKindTool(n));
       if (next.length !== active.length || next.some((n, i) => n !== active[i])) pi.setActiveTools(next);
     } catch {
       // an older Pi without the active-tool calls keeps whatever --tools gave it

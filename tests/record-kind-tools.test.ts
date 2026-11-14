@@ -237,16 +237,20 @@ test("the kinds' tools are offered to the weak model class only; the rest are de
   assert.ok(!active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
 });
 
-/** A seat's active tools once its session started on a model, and what the extension registered. */
-async function seat(model: { provider: string; id: string }, cwd: string, allowed: string[]): Promise<{ active: string[]; tools: Map<string, Tool>; fire: (event: string, e: Json, ctx: Json) => Promise<void>; set: (names: string[]) => void }> {
+/**
+ * A seat's active tools once its session started on a model, and what the extension registered. As Pi does, the
+ * configured tools (getAllTools) are those the allowlist (--tools) keeps, and the session starts with `restored` active
+ * when it is a relaunch whose tool set Pi restored, else with the allowlist.
+ */
+async function seat(model: { provider: string; id: string }, cwd: string, allowed: string[], restored?: string[]): Promise<{ active: string[]; tools: Map<string, Tool>; fire: (event: string, e: Json, ctx: Json) => Promise<void>; set: (names: string[]) => void }> {
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
   const tools = new Map<string, Tool>();
-  const state = { active: [...allowed] };
+  const state = { active: [...(restored ?? allowed)] };
   const base: Record<string, unknown> = {
     registerTool: (t: Tool) => tools.set(t.name, t),
     on: (event: string, fn: (e: unknown, c: unknown) => unknown) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
     getActiveTools: () => [...state.active],
-    getAllTools: () => [...tools.values()].map((t) => ({ name: t.name, description: t.description })),
+    getAllTools: () => [...tools.values()].filter((t) => allowed.includes(t.name)).map((t) => ({ name: t.name, description: t.description })),
     setActiveTools: (names: string[]) => {
       state.active = [...names];
     },
@@ -311,6 +315,25 @@ test("what record's description and an answer's refusals tell a seat to call is 
       assert.match(text, /\brecord with kind|Every kind is recorded here, with kind/, `${what} names record with the kind as the way`);
     }
   }
+});
+
+test("a strong seat relaunched with its tool set restored gets the kinds' tools back when it switches to a weak model, and only those the allowlist keeps", async () => {
+  const { KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  const c = await run();
+  const allowed = ["read", "bash", "record", ...KIND_TOOL_NAMES, "record_candidate", "ledger", "attest", "done"];
+  // Pi restored the relaunched session's tools as the strong seat had them: record alone.
+  const restored = allowed.filter((n) => !(KIND_TOOL_NAMES as readonly string[]).includes(n));
+  const s = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, allowed, restored);
+  assert.deepEqual(s.active, restored, "still record alone");
+  await s.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(KIND_TOOL_NAMES.filter((n) => !s.active.includes(n)), [], "every kind's tool is back for the weak class");
+  await s.fire("model_select", { model: { provider: "anthropic", id: "claude-opus-4-5" } }, { cwd: c.S });
+  assert.ok(!s.active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
+  // An allowlist that keeps only some of them: only those are put back.
+  const some = ["read", "record", "record_finding", "record_answer", "done"];
+  const t = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, some, ["read", "record", "done"]);
+  await t.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(t.active.filter((n) => n.startsWith("record_")).sort(), ["record_answer", "record_finding"]);
 });
 
 test("the kinds' rules are in the tools, not in the worker prompt (B2)", async () => {
