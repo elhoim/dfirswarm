@@ -147,12 +147,15 @@ esac
 EOF
 chmod +x "$TMP/msb"
 set +e
-out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check "${base[@]}" 2>&1)"
+out="$(DFIRSWARM_HOME="$TMP/check-home" SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check "${base[@]}" 2>&1)"
 rc=$?
 set -e
 [[ $rc -eq 2 ]] || fail "a check on a host that cannot boot VMs exited $rc, wanted 2: $out"
 grep -q "BLOCKER: this host cannot run the agents' VMs" <<<"$out" && grep -q 'no hypervisor here' <<<"$out" || fail "the VM check's refusal is not said: $out"
 nothing_written "$TMP/runs-check" "a check refused for VMs"
+# The capacity claim a microVM start writes before its VM host check (kickoff_claim) goes with the check.
+left="$(find "$TMP/check-home" -name '*.json' 2>/dev/null)"
+[[ -z "$left" ]] || fail "a check left a kickoff claim behind: $left"
 pass "--check runs the VM host check and turns its refusal into exit 2, with nothing written"
 
 echo "# image-for: the image a kickoff would boot, read only"

@@ -112,7 +112,7 @@ inst="$DFIRSWARM_HOME/packs/memory-forensics"
 chmod u+w "$inst/tools/minidump_map" "$inst/tools/minidump_map/run.py"
 printf '\n# changed after it was installed\n' >> "$inst/tools/minidump_map/run.py"
 rc=0; out="$(swarm pack-add "$idt" memory-forensics)" || rc=$?
-[[ "$rc" -eq 3 ]] && grep -q "BLOCKER: memory-forensics was not added to $idt: pack memory-forensics does not verify against its own checksums" <<<"$out" || fail "a changed pack ($rc): $out"
+[[ "$rc" -eq 3 ]] && grep -q "BLOCKER: memory-forensics was not added to $idt: pack memory-forensics does not verify (pack.sh's reason is above)" <<<"$out" || fail "a changed pack ($rc): $out"
 [[ ! -e "$sbt/tools/minidump_map" && ! -e "$sbt/notes/memory-forensics" ]] || fail "a pack that does not verify was copied into the run"
 jq -e --arg id "$idt" '.runs[] | select(.id == $id) | [.packs[]?.id] | index("memory-forensics") == null' "$TMP/runs/registry.json" >/dev/null || fail "the record names a pack that was refused"
 ls "$sbt"/threads/main/*-system.md 2>/dev/null | xargs grep -l 'PACK ADDED' 2>/dev/null && fail "the seats were told of a refused pack"
@@ -149,7 +149,15 @@ node --experimental-strip-types --no-warnings --input-type=module -e '
 HUB="$TMP/hub4"; mkdir -p "$HUB" "$sb4/traces"
 printf '{"tokens": {}}\n' > "$HUB/hub-input.json"
 sleep 300 >/dev/null 2>&1 </dev/null & hubpid=$!; PIDS+=("$hubpid")
-SWARM_DUMP_SCAN_SEC=0 bash "$ROOT/scripts/hub-supervise.sh" "$sb4" "$HUB" "$TMP/no-hub.mjs" "$hubpid" >/dev/null 2>&1 </dev/null & keeper=$!; PIDS+=("$keeper")
+# In a VM run the keeper runs from the run's frozen copy of the harness (swarm.sh freeze_harness), not from the
+# checkout: it is built here the same way, and the keeper and the pack-add it calls run from it.
+FROZEN="$TMP/frozen4"; mkdir -p "$FROZEN"
+sed -n '/^freeze_harness() {/,/^}/p' "$ROOT/scripts/swarm.sh" > "$TMP/freeze-harness.sh"
+grep -q '^freeze_harness() {' "$TMP/freeze-harness.sh" || fail "swarm.sh has no freeze_harness"
+ROOT="$ROOT" bash -c 'source "$2"; harness_commit() { echo test; }; harness_dirty() { echo false; }; freeze_harness "$1"' _ "$FROZEN" "$TMP/freeze-harness.sh" \
+  || fail "the run's frozen copy could not be made"
+[[ -x "$FROZEN/host/scripts/hub-supervise.sh" || -f "$FROZEN/host/scripts/hub-supervise.sh" ]] || fail "the frozen copy has no keeper"
+SWARM_DUMP_SCAN_SEC=0 bash "$FROZEN/host/scripts/hub-supervise.sh" "$sb4" "$HUB" "$TMP/no-hub.mjs" "$hubpid" >/dev/null 2>&1 </dev/null & keeper=$!; PIDS+=("$keeper")
 for _ in $(seq 1 300); do [[ -e "$HUB/.dump-pack-done" ]] && break; sleep 0.2; done
 [[ -e "$HUB/.dump-pack-done" ]] || fail "the keeper did not act on the dump: $(cat "$sb4/traces/vm-hub.log" 2>/dev/null)"
 grep -q 'hub-supervise: pack-add memory-forensics (exit 0)' "$sb4/traces/vm-hub.log" || fail "the keeper's log: $(cat "$sb4/traces/vm-hub.log")"
@@ -163,4 +171,4 @@ cat "$sb4"/threads/main/*-system.md | grep -q 'PACK ADDED: memory-forensics .*th
 : > "$HUB/.stop"; { kill "$hubpid"; wait "$hubpid"; } >/dev/null 2>&1 || true
 for _ in $(seq 1 50); do kill -0 "$keeper" 2>/dev/null || break; sleep 0.1; done
 kill -0 "$keeper" 2>/dev/null && fail "the keeper did not end with the run's stop"
-pass "a catalogue's dump post brings the memory pack in on its own, once, recorded as the catalogue's"
+pass "a catalogue's dump post brings the memory pack in on its own, once, recorded as the catalogue's, from the run's frozen copy"

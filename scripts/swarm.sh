@@ -1213,6 +1213,11 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
+  # images/ is what pack.sh reads to check a pack (recipe.py, install.py) and profiles.json, which says which job image
+  # holds a pack: the keeper's pack-add runs from this copy and checks the pack it adds as the kickoff did.
+  rm -rf "${host:?}/images"
+  cp -R "$ROOT/images" "$host/images"
+  rm -rf "${host:?}/images/__pycache__"
   # The launcher runs a copy of swarm.sh it took when it began: the frozen copy has those bytes, whatever the
   # checkout's file holds now, so the hub's stop and the launcher are one script.
   if [[ -n "${LAUNCHER_COPY:-}" && -f "$LAUNCHER_COPY" ]]; then
@@ -3180,6 +3185,8 @@ kickoff_claim() { # <seats> <seat vCPUs> <seat MiB> <workers> <worker vCPUs> <wo
   claim="$(jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson n "${1:-0}" --argjson c "${2:-0}" --argjson m "${3:-0}" --argjson w "${4:-0}" --argjson wc "${5:-0}" --argjson wm "${6:-0}" \
     '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}')" || return 0
+  # A check (`start --check`) writes nothing that outlives it: its claim goes with the check's own temporary files.
+  [[ "${CHECK_ONLY:-0}" -eq 1 ]] && CHECK_TMP+=("$dir/$$.json")
   # Twice: another start's sweep may take an old empty directory away between the mkdir and the write.
   for try in 1 2; do
     mkdir -p "$dir" 2>/dev/null || return 0
@@ -10859,7 +10866,7 @@ cmd_pack_add() {
   # checksums (one changed since it was installed is not copied into a live run), and an older install is said.
   for d in ${dirs[@]+"${dirs[@]}"}; do
     installed_pack_check "$d" || {
-      echo "BLOCKER: $pack was not added to $id: pack $(basename "$d") does not verify against its own checksums (a file of it changed since it was installed). Install it again: scripts/pack.sh install packs/$(basename "$d")" >&2
+      echo "BLOCKER: $pack was not added to $id: pack $(basename "$d") does not verify (pack.sh's reason is above). If a file of it changed since it was installed, install it again: scripts/pack.sh install packs/$(basename "$d")" >&2
       exit 3
     }
   done
