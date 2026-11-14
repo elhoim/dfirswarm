@@ -3013,67 +3013,91 @@ render_contract() {
 }
 
 # The contract's section on the tools --pack-tools-as-jobs left out of Pi's
-# tool list: each with its one-line description and its parameters (the
-# summary the extension's paramSummary gives), after the "Tool jobs" section.
-# A contract that cannot name them would leave the seats without those tools,
-# so the kickoff stops instead.
+# tool list: how to run one, and each pack's tool names, after the job images
+# (where a seat looks for how to run work). The catalogue, one line a tool
+# (its first sentence and its parameters) and then each tool whole, is in
+# PACK-TOOLS.md beside it: one line a tool for every pack is about 36k
+# characters, most of what a first read of SWARM.md returns. A contract that
+# cannot name them would leave the seats without those tools, so the kickoff
+# stops instead.
 pack_tools_contract_section() { # <sandbox> <pack ids, comma-separated>
   local sandbox="$1" packs="$2"
   SWARM_SECTION_PACKS="$packs" node --no-warnings -e '
-const fs = require("fs");
-const path = require("path");
-const [file, tools] = process.argv.slice(1);
-const packs = new Set(process.env.SWARM_SECTION_PACKS.split(",").filter(Boolean));
-const rows = [];
-const full = [];
-for (const dir of fs.readdirSync(tools).sort()) {
-  let m;
-  try { m = JSON.parse(fs.readFileSync(path.join(tools, dir, "manifest.json"), "utf8")); } catch { continue; }
-  if (!m || m.name !== dir || !m.pack || !packs.has(m.pack)) continue;
-  const params = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}: ${(p && p.type) || "string"}`);
-  const whole = String(m.description || "").replace(/\s+/g, " ").trim();
-  full.push(`- \`${m.name}\` (${m.pack}): ${whole} Parameters: ${params.length ? params.join(", ") : "no params"}.`);
-  // One line in the contract: the first sentence, bounded, and the parameter names. The whole is in PACK-TOOLS.md.
-  let about = whole.split(/(?<=[.:;])\s/)[0] || "";
-  if (about.length > 140) about = about.slice(0, 139) + "\u2026";
-  const names = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}`);
-  rows.push(`- \`${m.name}\` (${m.pack}): ${about} Parameters: ${names.length ? names.join(", ") : "none"}.`);
-}
-if (!rows.length) { console.error("no tool of " + [...packs].join(", ") + " is in the run"); process.exit(1); }
-const text = fs.readFileSync(file, "utf8");
-const section =
-  "## Pack tools run as jobs\n\n" +
-  `The tools of the packs ${[...packs].sort().join(", ")} are not in your tool list; a skill of those packs that names one means this call. ` +
-  "Run one with `job_run(tool: <name>, args: {...})`: it runs sealed in a worker VM of its pack'"'"'s image, what it writes under `{OUT}/<name>` is sealed " +
-  "in the store and cited as `job:<id>/<path>`, and `args` are the parameters below (a name ending in `?` is optional). " +
-  "A wrong or missing one is refused, naming the tool'"'"'s parameters. Each tool is one line here; its whole description and its parameter types are in " +
-  "`PACK-TOOLS.md` beside this file (grep it for the name) and in `tools(name: <name>)`.\n\n" +
-  rows.join("\n") + "\n\n";
-fs.writeFileSync(path.join(path.dirname(file), "PACK-TOOLS.md"),
-  "# Pack tools run as jobs: each tool whole\n\nOne entry a tool: what it does and its parameters with their types (a name ending in `?` is optional). " +
-  "Run one with `job_run(tool: <name>, args: {...})`.\n\n" + full.join("\n\n") + "\n");
-let at = text.indexOf("\n## Job images\n");
-if (at < 0) {
-  const start = text.indexOf("## Tool jobs\n");
-  if (start < 0) { console.error("the contract has no Tool jobs section"); process.exit(1); }
-  const next = text.indexOf("\n## ", start + 1);
-  at = next < 0 ? text.length : next;
-}
-at += 1;
-let out = text.slice(0, at) + section + text.slice(at);
-// The file says its own size and sections first: a reader that is given its first 50 KB knows what lies beyond.
-const heads = [...out.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
-const first = out.indexOf("\n## ");
-if (first > 0 && !out.includes("\nSections of this file")) {
-  const head = `\nSections of this file (about ${Math.round((out.length + 300) / 1024)} KB; read past the first page with an offset, or grep a heading): ${heads.join("; ")}.\n`;
-  out = out.slice(0, first) + head + out.slice(first);
-}
-fs.writeFileSync(file + ".tmp", out);
-fs.renameSync(file + ".tmp", file);
+  const fs = require("fs");
+  const path = require("path");
+  const [file, tools] = process.argv.slice(1);
+  const packs = new Set(process.env.SWARM_SECTION_PACKS.split(",").filter(Boolean));
+  const rows = [];
+  const full = [];
+  const byPack = new Map();
+  const listed = new Map();
+  for (const dir of fs.readdirSync(tools).sort()) {
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(tools, dir, "manifest.json"), "utf8")); } catch { continue; }
+    if (m && m.name === dir && m.pack && !packs.has(m.pack)) listed.set(m.pack, (listed.get(m.pack) || 0) + 1);
+    if (!m || m.name !== dir || !m.pack || !packs.has(m.pack)) continue;
+    const params = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}: ${(p && p.type) || "string"}`);
+    const whole = String(m.description || "").replace(/\s+/g, " ").trim();
+    full.push(`- \`${m.name}\` (${m.pack}): ${whole} Parameters: ${params.length ? params.join(", ") : "no params"}.`);
+    // One line in the catalogue: the first sentence, bounded, and the parameter names.
+    let about = whole.split(/(?<=[.:;])\s/)[0] || "";
+    if (about.length > 140) about = about.slice(0, 139) + "\u2026";
+    const names = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}`);
+    rows.push(`- \`${m.name}\` (${m.pack}): ${about} Parameters: ${names.length ? names.join(", ") : "none"}.`);
+    byPack.set(m.pack, [...(byPack.get(m.pack) || []), m.name]);
+  }
+  if (!rows.length) { console.error("no tool of " + [...packs].join(", ") + " is in the run"); process.exit(1); }
+  const text = fs.readFileSync(file, "utf8");
+  const section =
+    "## Pack tools run as jobs\n\n" +
+    `The tools of the packs ${[...packs].sort().join(", ")} are not in your tool list; a skill of those packs that names one means this call. ` +
+    "Run one with `job_run(tool: <name>, args: {...})`: it runs sealed in a worker VM of its pack'"'"'s image, what it writes under `{OUT}/<name>` is sealed " +
+    "in the store and cited as `job:<id>/<path>`, and `args` are its parameters. A wrong or missing one is refused, naming the tool'"'"'s parameters. " +
+    "What each tool does and its parameters, one line a tool, are in `PACK-TOOLS.md` beside this file (grep it for a name or a word; each tool whole follows " +
+    "there), and `tools(name: <name>)` gives a tool'"'"'s manifest. The tools, by pack:\n\n" +
+    [...byPack.keys()].sort().map((p) => `- ${p} (${byPack.get(p).length}): ${byPack.get(p).map((n) => "`" + n + "`").join(", ")}`).join("\n") + "\n\n";
+  fs.writeFileSync(path.join(path.dirname(file), "PACK-TOOLS.md"),
+    "# Pack tools run as jobs\n\nRun one with `job_run(tool: <name>, args: {...})`. A parameter name ending in `?` is optional.\n\n" +
+    "## One line a tool\n\n" + rows.join("\n") + "\n\n## Each tool whole\n\nWhat it does and its parameters with their types.\n\n" + full.join("\n\n") + "\n");
+  // After the sections that say how work runs (Tool jobs, Job images, Job image capabilities), whichever come last.
+  let at = -1;
+  for (const h of ["## Tool jobs\n", "## Job images\n", "## Job image capabilities\n"]) {
+    const start = text.indexOf("\n" + h);
+    if (start < 0) continue;
+    const next = text.indexOf("\n## ", start + 1);
+    at = Math.max(at, next < 0 ? text.length : next);
+  }
+  if (at < 0) { console.error("the contract has no Tool jobs section"); process.exit(1); }
+  at += 1;
+  let out = text.slice(0, at) + section + text.slice(at);
+  // "Pack tools" says the packs put their tools in the tool list: only the packs not run as jobs do.
+  out = out.replace(/## Pack tools\n\nThis run'"'"'s packs \([^)]*\) put \d+ tools in your tool list;([^\n]*)\n\n/, (whole, rest) => {
+    const n = [...listed.values()].reduce((a, b) => a + b, 0);
+    return n ? `## Pack tools\n\nThis run'"'"'s packs (${[...listed.keys()].sort().join(", ")}) put ${n} tools in your tool list;${rest}\n\n` : "";
+  });
+  fs.writeFileSync(file + ".tmp", out);
+  fs.renameSync(file + ".tmp", file);
 ' "$sandbox/SWARM.md" "$sandbox/tools" || {
     echo "BLOCKER: --pack-tools-as-jobs: SWARM.md could not list the tools of $packs as jobs (see above); the seats would be left without them." >&2
     exit 1
   }
+}
+
+# The contract as a seat first reads it, after the kickoff's last append (the
+# case policy, an earlier run's claims): its size and its sections in its first
+# lines, and within what one read returns (scripts/render-contract.ts
+# finishContract). A resumed run keeps the contract it was given.
+finish_contract() { # <sandbox>
+  local sandbox="$1" out
+  [[ -z "${resume_of:-}" && -f "$sandbox/SWARM.md" ]] || return 0
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/render-contract.ts" --finish "$sandbox/SWARM.md")" || {
+    echo "WARN: SWARM.md's first lines (its size and sections) could not be written; the contract stands as rendered." >&2
+    return 0
+  }
+  jq -r 'if (.dropped | length) > 0 then "Contract:     SWARM.md \(.bytes) bytes; left out to stay within one read: \(.dropped | join(", "))" else empty end' <<<"$out" 2>/dev/null || true
+  if [[ "$(jq -r '.bytes' <<<"$out" 2>/dev/null || echo 0)" -gt 51200 ]]; then
+    echo "WARN: SWARM.md is $(jq -r '.bytes' <<<"$out") bytes, more than one read of it returns (50 KB): its first lines say so and list its sections. The goal is the largest part a kickoff cannot shorten." >&2
+  fi
 }
 
 # The memory and vCPUs the other microVM runs going on this host may ask for, as arguments of `vm.ts capacity`:
@@ -6064,6 +6088,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     } >> "$sandbox/SWARM.md"
     echo "Prior claims: $(jq -r '.entries' <<<"$LEDGER_FROM_RECORD") entr$([[ "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" == 1 ]] && echo y || echo ies) of run $ledger_from in prior/ledger.md, as hypotheses ($([[ "$(jq -r '.reviewed' <<<"$LEDGER_FROM_RECORD")" == true ]] && echo 'examiner-accepted only' || echo 'unreviewed'))"
   fi
+  finish_contract "$sandbox"
   mkdir -p "$sandbox/.pi"
   # Removed first, like every file here the kickoff writes into .pi/: a host pane's shell can write the
   # sandbox, and a resume runs this again in it, so a link planted at the name would be written through.
