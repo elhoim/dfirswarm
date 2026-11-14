@@ -151,7 +151,18 @@ export type LedgerInput = {
   decoy?: string;
   /** An answer's that rests on a decoy: {by: the machine check, why} (decoyRule). */
   decoy_check?: unknown;
+  /** A hypothesis's: it is a candidate value for the one question its answers names, not yet verified (record_candidate; CandidateMark). */
+  candidate?: boolean;
 };
+
+/**
+ * A candidate (B5): a value for one question that is not verified, recorded in one call (record_candidate: question,
+ * value, ref) as a hypothesis with status open whose answers names that question. It is named in every header
+ * (extensions/finish.ts candidatesLine) and counted by nothing at the finish: a hypothesis is never an answer, and the
+ * gate, readiness and the answers check read answers only. On the run s082123 a seat held a value at minute 152, left
+ * its record to the lead's holder, and the run stopped without it; a candidate is the record such a value takes at once.
+ */
+export type CandidateMark = { candidate?: true };
 
 function listOf(v: string[] | string | undefined): string[] {
   return [...new Set((Array.isArray(v) ? v.map(String) : String(v ?? "").split(/[\s,]+/)).map((x) => x.trim()).filter(Boolean))];
@@ -385,6 +396,15 @@ async function ledgerV3Input(
   const status = D.one(oneOf("status", input.status, LEDGER_HYPOTHESIS_STATUS));
   if (status.value && kind !== "hypothesis") D.add("status is a hypothesis's: open, supported or refuted");
   if (kind === "hypothesis") fields.status = status.value ?? "open";
+  // A candidate value for one question (CandidateMark): a hypothesis, about one question, resting on the object it was read from.
+  if (input.candidate === true) {
+    if (kind !== "hypothesis") D.add("candidate marks a hypothesis: a value for one question that is not verified yet (record_candidate: question, value, ref)");
+    else {
+      if (listOf(input.answers).length !== 1) D.add("a candidate is a value for one question: answers names that one question");
+      if (!listOf(input.refs).length) D.add("a candidate names the object its value was read from in refs (job:<id>/<path>, input:<path>, ...)");
+      (fields as CandidateMark).candidate = true;
+    }
+  }
   const reason = D.one(oneOf("reason", input.reason, LEDGER_LIMITATION_REASONS));
   if (reason.value && kind !== "limitation") D.add("reason is a limitation's: why the examination could not establish it");
   if (kind === "limitation") {
@@ -2684,7 +2704,7 @@ async function renderLedgerNow(sandboxRoot: string, entries?: LedgerEntry[]): Pr
   }
   if (hypotheses.length) {
     lines.push("", "## Hypotheses", "", "| # | Hypothesis | Status | Source | Evidence | By |", "| --- | --- | --- | --- | --- | --- |");
-    for (const e of hypotheses) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.status ?? "open"} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
+    for (const e of hypotheses) lines.push(`| ${e.seq} | ${(e as CandidateMark).candidate ? `candidate for ${(e.answers ?? []).map((a) => `question:${sectionKey(a)}`).join(", ")}: ` : ""}${mdCell(e.value)}${mark(e)} | ${e.status ?? "open"} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
   }
   // Searched and not found: what, where, and how far. Each holds for that
   // query and that scope only.

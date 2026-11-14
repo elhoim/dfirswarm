@@ -269,6 +269,7 @@ export const SWARM_TOOLS = new Set([
   "record_coverage",
   "record_limitation",
   "record_absence",
+  "record_candidate",
   "ledger",
   "attest",
   "dispute",
@@ -4146,6 +4147,33 @@ export default function (pi: ExtensionAPI) {
       },
     });
   }
+
+  // A candidate in one call (B5): a value for one question that is not verified yet, and the object it was read from.
+  // It is a hypothesis about that question (ledger-rules.ts CandidateMark), named in every header and counted by nothing
+  // at the finish: what a seat holds is on the ledger at once, not left in its context for the lead's holder to write.
+  const candidateSchema = Type.Object({
+    question: Type.String({ description: "The question the value may answer: its number, or question:<n>" }),
+    value: Type.String({ description: "The value as read, alone, in the form the question asks" }),
+    ref: Type.String({ description: "The object it was read from: job:<id>/<path>, input:<path>, import:<id>/<path>, member:<gen>#<n> or sha256:<hex>" }),
+    why: Type.Optional(Type.String({ description: "What is still open: why it is not an answer yet" })),
+  });
+  pi.registerTool({
+    name: "record_candidate",
+    label: "Record a candidate",
+    description:
+      "Record, in one call, a value you hold for a question and cannot stand behind yet: the question, the value, and the object it was read from (ref). It goes on the ledger as a candidate (a hypothesis about that question, status open), every seat's header names it, and the finish counts it for nothing: the answer is still to be recorded, by the lead's holder or by you, once it is verified. Record it the moment you hold the value rather than keeping it in your context: a value that is not on the ledger when the run ends is lost.",
+    promptSnippet: "Record a value for a question that is not verified yet: question, value, ref",
+    promptGuidelines: ["A value for a question you hold and cannot verify yet goes on the ledger at once with record_candidate (question, value, ref); the answer follows once it is verified."],
+    parameters: candidateSchema,
+    prepareArguments: (args: unknown) => argsForValidator(candidateSchema, args) as never,
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const p = params as { question?: unknown; value?: unknown; ref?: unknown; why?: unknown };
+      const q = String(p.question ?? "").trim().replace(/^question:/i, "");
+      const ref = String(p.ref ?? "").trim();
+      const why = typeof p.why === "string" && p.why.trim() ? `; still open: ${p.why.trim()}` : "";
+      return runRecord("record_candidate", { kind: "hypothesis", status: "open", candidate: true, value: p.value, answers: q ? [q] : [], refs: ref ? [ref] : [], source: ref || undefined, evidence: `a candidate value for question:${q}, as read at ${ref}${why}` }, toolCtx);
+    },
+  });
 
   pi.registerTool({
     name: "ledger",

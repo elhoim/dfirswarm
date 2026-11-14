@@ -1758,7 +1758,44 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
     const own = ownReviewWords(await reportReview(sandboxRoot).catch(() => null), me);
     act += own ?? " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
   }
-  return `Finish: ${state}; ${who}.${act}`;
+  // The candidates (B5): values a seat holds and has not verified, named to every seat, counted by nothing at the finish.
+  const candidates = await candidatesAt(sandboxRoot, r.revision).catch(() => null);
+  return `Finish: ${state}; ${who}.${act}${candidates ? ` ${candidates}` : ""}`;
+}
+
+/**
+ * The candidates line of a header (B5, ledger-rules.ts CandidateMark): each standing candidate (a hypothesis with the
+ * candidate mark, open, not superseded) for a question whose standing answer does not already give that value, with
+ * the question, the value, its entry, who holds it and where it was read. At most eight, each value cut at 80
+ * characters; null with none. They are not answers, and nothing at the finish counts them.
+ */
+export function candidatesLine(entries: readonly P.LedgerEntry[]): string | null {
+  const replaced = P.supersededBy(entries as P.LedgerEntry[]);
+  const answered = new Map<string, string>();
+  for (const e of entries) if (e.kind === "answer" && !replaced.has(e.seq) && e.section) answered.set(String(e.section), answerLineKey(String(e.value ?? "")));
+  const items: string[] = [];
+  for (const e of entries) {
+    if (e.kind !== "hypothesis" || !(e as P.LedgerEntry & P.CandidateMark).candidate || replaced.has(e.seq) || (e.status ?? "open") !== "open") continue;
+    const q = `question:${P.sectionKey(String((e.answers ?? [])[0] ?? ""))}`;
+    const value = String(e.value ?? "");
+    if (answered.get(q) === answerLineKey(value)) continue;
+    items.push(`${q} "${value.length > 80 ? `${value.slice(0, 77)}...` : value}" (E-${e.seq} by ${e.by}${e.refs?.[0] ? `, read at ${e.refs[0]}` : ""})`);
+  }
+  if (!items.length) return null;
+  return `Candidates (values held and not verified: not answers, and the finish counts none; verify one and record the answer): ${items.slice(0, 8).join("; ")}${items.length > 8 ? `; and ${items.length - 8} more (ledger kind hypothesis)` : ""}.`;
+}
+
+/** The candidates line at a revision of the registers (the ledger is part of it): read once a revision. */
+const candidatesCache = new Map<string, string | null>();
+async function candidatesAt(sandboxRoot: string, revision: string): Promise<string | null> {
+  const key = `${sandboxRoot}\u0000${revision}`;
+  if (revision && candidatesCache.has(key)) return candidatesCache.get(key)!;
+  const line = candidatesLine(await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]));
+  if (revision) {
+    candidatesCache.set(key, line);
+    if (candidatesCache.size > 64) candidatesCache.delete(candidatesCache.keys().next().value!);
+  }
+  return line;
 }
 
 // --- checks, one per revision ------------------------------------------------------------------
