@@ -101,3 +101,81 @@ rc=0; SWARM_HUB_MAX_RESTARTS=0 bash "$ROOT/scripts/hub-supervise.sh" "$SB2" "$HU
 [[ "$rc" -eq 1 ]] || fail "the keeper with no restarts left exited $rc"
 grep -Eq "${TS}hub-supervise: the hub died 0 times in a row; not restarting it again$" "$SB2/traces/vm-hub.log" || fail "the keeper's line carries no time: $(cat "$SB2/traces/vm-hub.log")"
 pass "the hub keeper's lines in the logs carry their time"
+
+echo "# a start's output ends when the launcher ends, while the watchdog it left behind runs on"
+# A host start that goes the whole way, against a stand-in Herdr and Pi: the run's daemons and the idle watchdog stay up
+# after the launcher exits. Whatever reads the launcher's output (a command substitution, the console's start job, a
+# pipe into tee, ssh) waits for the end of that output, so no daemon may hold it: the watchdog's log stamper held it
+# for the whole run, and the console's job stayed "running" with no exit code.
+STUB="$TMP/stub-bin"; mkdir -p "$STUB"
+cat > "$STUB/pi" <<'SH'
+#!/bin/sh
+echo '{"status":"ready","authType":"api_key","provider":"solo"}'
+SH
+cat > "$STUB/herdr" <<'SH'
+#!/bin/sh
+case "$1 $2" in
+  "status server") if [ "$3" = --json ]; then echo '{"status":"running","running":true}'; else echo "status: running"; fi ;;
+  "agent list") echo '{"result":{"agents":[]}}' ;;
+  "workspace create") echo '{"result":{"root_pane":{"pane_id":"p1"},"workspace":{"workspace_id":"w1"}}}' ;;
+  *) echo '{"result":{}}' ;;
+esac
+SH
+chmod +x "$STUB/pi" "$STUB/herdr"
+LIVE="$TMP/runs-live"; mkdir -p "$LIVE" "$TMP/hubs"
+live() { PATH="$STUB:$PATH" SWARM_RUNS_DIR="$LIVE" SWARM_HUBS_DIR="$TMP/hubs" bash "$@"; }
+live_start=(start --model solo/model --n 1 --cap-usd 1 --toolbox off --no-write-guard --accept-signer-exposure --no-netguard --goal-file "$GOAL")
+# Every run this section starts is stopped at the end, also when a check fails: its watchdog and the host's
+# keep-awake are the run's.
+stop_live() {
+  local id
+  for id in $(jq -r '.runs[]? | select(.state == "running") | .id' "$LIVE/registry.json" 2>/dev/null); do
+    live "$ROOT/scripts/swarm.sh" stop "$id" --no-custody >/dev/null 2>&1 || true
+  done
+}
+trap 'stop_live; chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+watchdog_of() { # <label> -> the watchdog's pid of that run, when it runs
+  local sb p
+  sb="$(jq -r --arg l "$1" '[.runs[]? | select(.label == $l) | .sandbox] | last // empty' "$LIVE/registry.json" 2>/dev/null)"
+  p="$(cat "$sb/idle-nudge.pid" 2>/dev/null || true)"
+  [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && ps -ww -o command= -p "$p" 2>/dev/null | grep -q 'idle-nudge.sh' && echo "$p"
+  return 0
+}
+# Under a command substitution, as a script or a test reads it.
+( got="$( { live "$ROOT/scripts/swarm.sh" "${live_start[@]}" --label lfo-cs 2>&1; echo "$?" > "$TMP/cs.rc"; } )"
+  { printf '%s\n' "$got" > "$TMP/cs.out"; : > "$TMP/cs.eof"; } 2>/dev/null ) &
+for _ in $(seq 1 1800); do [[ -e "$TMP/cs.rc" ]] && break; sleep 0.1; done
+[[ -e "$TMP/cs.rc" ]] || fail "the launcher under a command substitution did not end in three minutes"
+for _ in $(seq 1 50); do [[ -e "$TMP/cs.eof" ]] && break; sleep 0.1; done
+wd="$(watchdog_of lfo-cs)"
+if [[ ! -e "$TMP/cs.eof" ]]; then
+  stop_live
+  fail "the launcher exited ($(cat "$TMP/cs.rc")) and a command substitution of its output had no end five seconds later: a process it left behind holds its output"
+fi
+[[ "$(cat "$TMP/cs.rc")" -eq 0 ]] || fail "the start under a command substitution exited $(cat "$TMP/cs.rc"): $(cat "$TMP/cs.out")"
+grep -q '^Agents prompted\.' "$TMP/cs.out" || fail "the start did not go the whole way: $(cat "$TMP/cs.out")"
+[[ -n "$wd" ]] || fail "no watchdog runs after the start, so nothing was measured: $(cat "$TMP/cs.out")"
+# Under a Node spawn with pipes, as the console's start job runs it (scripts/ui/actions.ts): its status is set on close.
+spawn_js='
+const { spawn } = require("node:child_process");
+const [sh, ...argv] = process.argv.slice(1);
+const c = spawn("bash", [sh, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+let out = "", exitAt = 0, code = null;
+c.stdout.on("data", (d) => { out += d; });
+c.stderr.on("data", (d) => { out += d; });
+c.on("exit", (n) => {
+  code = n; exitAt = Date.now();
+  setTimeout(() => { console.log(JSON.stringify({ exit: code, close_ms: null, out })); process.exit(0); }, 5000);
+});
+c.on("close", () => { console.log(JSON.stringify({ exit: code, close_ms: Date.now() - exitAt, out })); process.exit(0); });
+'
+res="$(PATH="$STUB:$PATH" SWARM_RUNS_DIR="$LIVE" SWARM_HUBS_DIR="$TMP/hubs" node -e "$spawn_js" "$ROOT/scripts/swarm.sh" "${live_start[@]}" --label lfo-spawn)"
+wd2="$(watchdog_of lfo-spawn)"
+[[ "$(jq -r '.close_ms' <<<"$res")" != null ]] || { stop_live; fail "the launcher exited ($(jq -r '.exit' <<<"$res")) and its piped output had not closed five seconds later: $(jq -r '.out' <<<"$res" | tail -3)"; }
+[[ "$(jq -r '.exit' <<<"$res")" == 0 ]] || fail "the spawned start exited $(jq -r '.exit' <<<"$res"): $(jq -r '.out' <<<"$res")"
+[[ -n "$wd2" ]] || fail "no watchdog runs after the spawned start, so nothing was measured: $(jq -r '.out' <<<"$res")"
+# The watchdog's log is still written: its stamper took the daemon's output, not the launcher's.
+sb2="$(jq -r '[.runs[]? | select(.label == "lfo-spawn") | .sandbox] | last' "$LIVE/registry.json")"
+[[ -f "$sb2/traces/idle-nudge.log" ]] || fail "the watchdog has no log"
+stop_live
+pass "the launcher's output ends within five seconds of its exit, under a command substitution and a Node spawn with pipes, while the watchdog it started runs on"

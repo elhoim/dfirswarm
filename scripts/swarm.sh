@@ -101,8 +101,19 @@ VM_HOST_WAY_ON="Or run the agents unisolated with --isolation host: each is then
 # the trace. Fed by the daemon's output (`> >(log_stamper FILE)`), it appends to FILE, ends when the daemon closes its
 # output, and ignores the terminal's hangup and interrupt as the detached daemon does, so it never takes the daemon's
 # output away from it.
+# It lives as long as the daemon, so it holds nothing of the launcher's but the pipe it reads: a process substitution
+# is a fork of the shell that made it, with the launcher's stdout and stderr (and any copy bash keeps of them above 2).
+# Measured: a stamper that kept them held the launcher's output open for the whole run, so a command substitution of
+# `swarm.sh start`, a pipe into tee, ssh and the console's start job (status set when the output closes) waited for
+# the run to end. Its stdout and stderr go to /dev/null and every other descriptor is closed before it reads.
 log_stamper() { # <log file>
   trap '' HUP INT QUIT TERM
+  exec >/dev/null 2>&1
+  local fd
+  for fd in /dev/fd/*; do
+    fd="${fd##*/}"
+    if [[ "$fd" =~ ^[0-9]+$ ]] && ((fd > 2)); then eval "exec $fd>&-" || true; fi
+  done
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
