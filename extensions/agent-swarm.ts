@@ -220,6 +220,7 @@ import { installChunkedEgress } from "./vm-egress.ts";
 import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
 import { cropPng, pngForModel } from "./png-scale.ts";
+import { PUBLISH_MAX_BYTES } from "./board.ts";
 import { coerceArgs } from "./forged-args.ts";
 import { sightingDigest } from "./sighting.ts";
 
@@ -2814,7 +2815,8 @@ export default function (pi: ExtensionAPI) {
     name: "publish_file",
     label: "Publish file",
     description:
-      "Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same.",
+      `Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same. ` +
+      `From a microVM a file of up to ${PUBLISH_MAX_BYTES / (1024 * 1024)} MiB (${PUBLISH_MAX_BYTES.toLocaleString("en-US")} bytes) is published; a larger one is refused: leave it in your own directory and name its path in the report.`,
     promptSnippet: "Publish a file of your own into the shared work/ (claimed and recorded for you)",
     promptGuidelines: ["Write a shared deliverable under work/<your id>/ first, then publish_file it. To change a shared file, copy it into your directory, edit, publish."],
     parameters: Type.Object({
