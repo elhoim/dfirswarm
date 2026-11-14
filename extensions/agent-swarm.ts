@@ -78,6 +78,7 @@ import {
   toolText,
   usageFromSessionEntries,
   runForgedTool,
+  validateToolSpec,
   lacksProgram,
   ownPathsToOut,
   heldOwnPaths,
@@ -220,7 +221,7 @@ import { installChunkedEgress } from "./vm-egress.ts";
 import { toolsListing } from "./tools-view.ts";
 import { lastKnown } from "./last-known.ts";
 import { cropPng, pngForModel } from "./png-scale.ts";
-import { coerceArgs } from "./forged-args.ts";
+import { coerceArgs, coercedWords, selfTestCandidate, selfTestProblem, type SelfTest } from "./forged-args.ts";
 import { sightingDigest } from "./sighting.ts";
 
 /** How long a read made before a model call may take before the call goes out on the last known value. */
@@ -3315,17 +3316,35 @@ export default function (pi: ExtensionAPI) {
         // was given in the agent's own directories already hold something is
         // taken now, before this attempt can create any, so a rerun reads those
         // where they are and writes the rest to its $OUT.
-        const rerunnable = Boolean(manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS);
-        const held = rerunnable ? await heldOwnPaths(toolCtx.cwd, (params ?? {}) as Record<string, unknown>, agentId).catch(() => new Set<string>()) : new Set<string>();
-        // What an argument plainly is under its declared type is taken as that (forged-args.ts).
+        // What an argument plainly is under its declared type is taken as that (forged-args.ts), and said.
         const typed = coerceArgs(manifest.params as Record<string, { type?: string }>, (params ?? {}) as Record<string, unknown>);
         params = typed.args as typeof params;
-        const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
-          signal: signal as AbortSignal | undefined,
-          agentId,
-          env: secrets,
-          ...(sealed ? { sealed } : {}),
-        });
+        // As job_run takes them (scripts/tool-arg-refs.ts directToolArgs): a missing required key refused by name, a job:,
+        // import: or input: reference made the path it names (or refused with where it is), {OUT} the seat's own directory,
+        // and a directory given to a one-file reader run once per file. A script, so reached by a dynamic import: where a
+        // seat is given extensions/ alone the call goes on as it was given.
+        const direct = await import("../scripts/tool-arg-refs.ts").then((m) => m.directToolArgs(toolCtx.cwd, agentId ?? "", manifest.name, (params ?? {}) as Record<string, unknown>, manifest as unknown as Parameters<typeof m.directToolArgs>[4])).catch(() => null);
+        if (direct && !direct.ok) {
+          await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), { ok: false, forged: true, refused: direct.reason }, 0);
+          return { content: [{ type: "text" as const, text: `${manifest.name} refused: ${direct.reason}` }], details: { ok: false, reason: direct.reason }, isError: true };
+        }
+        if (direct?.ok) params = direct.args as typeof params;
+        const eachLib = direct?.ok && direct.each ? await import("../scripts/tool-each.ts").catch(() => null) : null;
+        const refsLib = direct?.ok && direct.resolved.length ? await import("../scripts/tool-arg-refs.ts").catch(() => null) : null;
+        const told = [coercedWords(typed.coerced), refsLib && direct?.ok ? refsLib.argRefsWords(direct.resolved) : "", eachLib && direct?.ok && direct.each ? eachLib.eachDirectWords(direct.each) : ""].filter(Boolean).join(" ");
+        const rerunnable = Boolean(manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS);
+        const held = rerunnable ? await heldOwnPaths(toolCtx.cwd, (params ?? {}) as Record<string, unknown>, agentId).catch(() => new Set<string>()) : new Set<string>();
+        const runOne = (args: Record<string, unknown>, seconds?: number) =>
+          runForgedTool(toolCtx.cwd, seconds ? { ...manifest, timeout_seconds: seconds } : manifest, args, {
+            signal: signal as AbortSignal | undefined,
+            agentId,
+            env: secrets,
+            ...(sealed ? { sealed } : {}),
+          });
+        const run: Awaited<ReturnType<typeof runForgedTool>> =
+          eachLib && direct?.ok && direct.each
+            ? { signal: null, truncated: false, duration_ms: 0, ...(await eachLib.runEachDirect(manifest.name, direct.each, (params ?? {}) as Record<string, unknown>, toolTimeoutSeconds(manifest), runOne)) }
+            : await runOne((params ?? {}) as Record<string, unknown>);
         if (before && agentId) {
           try {
             await new Promise((resolve) => setTimeout(resolve, BASH_SETTLE_MS));
@@ -3408,16 +3427,18 @@ export default function (pi: ExtensionAPI) {
           const text = redactSecrets(JSON.stringify(answer, null, 1), secrets);
           return res.ok ? okResult(answer) : { content: [{ type: "text" as const, text }], details: answer, isError: true };
         }
+        // What the harness did to the arguments, said after the tool's own answer (and on details).
+        const saidOf = { ...(typed.coerced.length ? { coerced: typed.coerced } : {}), ...(direct?.ok && direct.resolved.length ? { args_resolved: direct.resolved } : {}), ...(direct?.ok && direct.each ? { each: { param: direct.each.param, directory: direct.each.directory, files: direct.each.files.length } } : {}) };
         if (run.ok) {
           return {
-            content: [{ type: "text" as const, text: run.stdout || "(no output)" }],
-            details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}) },
+            content: [{ type: "text" as const, text: `${run.stdout || "(no output)"}${told ? `\n${told}` : ""}` }],
+            details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}), ...saidOf },
           };
         }
         const why = run.timed_out ? `timed out after ${toolTimeoutSeconds(manifest)}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
         return {
-          content: [{ type: "text" as const, text: `${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim() }],
-          details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out },
+          content: [{ type: "text" as const, text: `${`${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim()}${told ? `\n${told}` : ""}` }],
+          details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out, ...saidOf },
           isError: true,
         };
       },
@@ -3525,11 +3546,27 @@ export default function (pi: ExtensionAPI) {
         ),
         timeout_seconds: Type.Optional(Type.Number({ description: `Kill the script after this long (default ${TOOL_TIMEOUT_DEFAULT_SECONDS}, max ${TOOL_TIMEOUT_MAX_SECONDS})` })),
         example: Type.Optional(Type.String({ description: "One example call, shown to peers" })),
-        selftest: Type.Optional(Type.Object({ args: Type.Record(Type.String(), Type.Any(), { description: "The arguments of one call whose answer you know" }), expect: Type.String({ description: "Text the tool's output must hold for that call" }) }, { description: "A known-answer test, run now, before the tool is shared: a tool that was never run against an answer its author knows returned garbage for hours in three runs. Give it." })),
+        selftest: Type.Object({ args: Type.Record(Type.String(), Type.Any(), { description: "The arguments of one call whose answer you know" }), expect: Type.String({ description: "Text the tool's output must hold for that call" }) }, { description: "Required: a known-answer test, run before the tool is written or shared; a tool that fails it is not made (a tool that was never run against an answer its author knows returned garbage for hours in three runs)." }),
         requires: Type.Optional(Type.Array(Type.String(), { description: "Programs the script calls (e.g. fls, yara), so a later case knows what its image must hold" })),
       }),
       async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
         const started = Date.now();
+        // The self-test first, on the script as given, before anything is written or shared (forged-args.ts selfTestCandidate):
+        // a call without one, or one whose test fails, is refused and leaves no tool behind.
+        const st = (params as { selftest?: unknown }).selftest;
+        const problem = selfTestProblem(st);
+        const spec = validateToolSpec(params);
+        let selftest: { ran: boolean; ok?: boolean; said: string; coerced?: string[] } | null = null;
+        if (!problem && spec.ok && agentId) {
+          const t = await selfTestCandidate(toolCtx.cwd, agentId, spec.spec, st as SelfTest, (root, m, args, o) => runForgedTool(root, m as unknown as ForgedToolManifest, args, o));
+          selftest = { ran: true, ok: t.passed, said: t.said, ...(t.coerced.length ? { coerced: t.coerced } : {}) };
+          await logEvent(toolCtx.cwd, agentId, "make_tool", { name: spec.spec.name, selftest: true }, { ok: t.passed, exit: t.exit, timed_out: t.timed_out }).catch(() => undefined);
+        }
+        const refusal = problem ? `${problem}; it is run before the tool is written or shared, and a tool whose self-test fails is not made` : selftest && !selftest.ok ? `${selftest.said}: nothing was written or shared. Fix the script, or the expected text, and call make_tool again` : null;
+        if (refusal) {
+          await logEvent(toolCtx.cwd, agentId, "make_tool", { name: params.name, runtime: params.runtime, params: Object.keys(params.params ?? {}).join(","), bytes: Buffer.byteLength(params.script ?? "", "utf8") }, { ok: false, error: refusal }, Date.now() - started);
+          return { content: [{ type: "text" as const, text: `make_tool refused: ${refusal}` }], details: { ok: false, reason: refusal, ...(selftest ? { selftest } : {}) }, isError: true };
+        }
         const result = await forgeTool(ctxFrom(toolCtx.cwd, agentId), params);
         if (!result.ok) {
           // The refusal used to record the name and the runtime only, so a
@@ -3561,25 +3598,15 @@ export default function (pi: ExtensionAPI) {
           Date.now() - started,
         );
         await loadForgedTools(toolCtx.cwd);
-        // The tool's own known-answer test, run now: peers are told whether it passed, failed, or was never given.
-        const st = (params as { selftest?: { args?: Record<string, unknown>; expect?: string } }).selftest;
-        let selftest: { ran: boolean; ok?: boolean; said: string } = { ran: false, said: "no self-test was given: it has not been run against an answer its author knows, so test it on input whose answer you know before you rely on it" };
-        if (st && typeof st.expect === "string" && st.expect !== "") {
-          const typed = coerceArgs(m.params as Record<string, { type?: string }>, st.args ?? {});
-          const run = await runForgedTool(toolCtx.cwd, m, typed.args, { agentId }).catch((err: Error) => ({ ok: false, exit_code: null, stdout: "", stderr: err.message, timed_out: false }) as { ok: boolean; exit_code: number | null; stdout: string; stderr: string; timed_out: boolean });
-          const passed = run.ok && run.stdout.includes(st.expect);
-          selftest = { ran: true, ok: passed, said: passed ? "its self-test passed (a call whose answer its author knew gave that answer)" : `ITS SELF-TEST FAILED (${run.timed_out ? "timed out" : run.ok ? "the output did not hold the expected text" : `exit ${run.exit_code}: ${(run.stderr || run.stdout).trim().split("\n").slice(-1)[0]?.slice(0, 200) ?? ""}`}): do not rely on it until its author fixes it` };
-          await logEvent(toolCtx.cwd, agentId, "make_tool", { name: m.name, selftest: true }, { ok: passed, exit: run.exit_code, timed_out: run.timed_out }).catch(() => undefined);
-        }
+        const tested = selftest ?? { ran: false, said: "no self-test was run" };
         // The board is how peers learn; the harness posts on the author's behalf
         // so a tool never exists without an announcement.
         await postMessage(ctxFrom(toolCtx.cwd, agentId), {
           tag: "result",
           to: "all",
-          body: `Forged tool \`${m.name}\` v${m.version} (${m.runtime}): ${m.description} Params: ${paramSummary(m)}.${m.example ? ` Example: ${m.example}` : ""} Tested: ${selftest.said}. It is in your tool list after your next inbox or wait.`,
+          body: `Forged tool \`${m.name}\` v${m.version} (${m.runtime}): ${m.description} Params: ${paramSummary(m)}.${m.example ? ` Example: ${m.example}` : ""} Tested: ${tested.said}. It is in your tool list after your next inbox or wait.`,
         }).catch(() => undefined);
-        const made = { ok: true, name: m.name, version: m.version, created: result.created, sha256: shortHash(m.sha256), entry: `${TOOLS_DIR}/${m.name}/${m.entry}`, selftest };
-        if (selftest.ran && !selftest.ok) return { content: [{ type: "text" as const, text: `${JSON.stringify(made, null, 2)}\nThe tool was written and shared, and ${selftest.said}. Fix the script and call make_tool again with the same name (it replaces this version).` }], details: made, isError: true };
+        const made = { ok: true, name: m.name, version: m.version, created: result.created, sha256: shortHash(m.sha256), entry: `${TOOLS_DIR}/${m.name}/${m.entry}`, selftest: tested, ...(selftest?.coerced ? { note: coercedWords(selftest.coerced) } : {}) };
         return okResult(made);
       },
     });

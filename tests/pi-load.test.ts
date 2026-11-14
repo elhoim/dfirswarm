@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -150,8 +151,21 @@ test("Pi loader: make_tool and tools exist only when the spawner turned forging 
     // the definition the loader hands back for it.
     const ctx = { cwd: root, hasUI: false, ui: {} };
     const make = swarm.tools.get("make_tool")!.definition;
-    const made = await make.execute("t1", { name: "count_lines", description: "Count lines", runtime: "python3", script: "import json,sys\nprint(sum(1 for _ in open(json.load(sys.stdin)['path'])))\n", params: { path: { type: "string", required: true } } }, undefined, undefined, ctx);
+    await mkdir(join(root, "work"), { recursive: true });
+    await writeFile(join(root, "work", "three.txt"), "a\nb\nc\n");
+    const counter = { name: "count_lines", description: "Count lines", runtime: "python3", script: "import json,sys\nprint(sum(1 for _ in open(json.load(sys.stdin)['path'])))\n", params: { path: { type: "string", required: true } } };
+    // No self-test, or one that fails: refused, and nothing is written or shared.
+    const untested = await make.execute("t0", counter, undefined, undefined, ctx);
+    assert.equal(untested.details.ok, false);
+    assert.match(String(untested.details.reason), /^selftest is required/);
+    const wrong = await make.execute("t0b", { ...counter, selftest: { args: { path: "work/three.txt" }, expect: "4" } }, undefined, undefined, ctx);
+    assert.equal(wrong.details.ok, false);
+    assert.match(String(wrong.details.reason), /its self-test failed \(the output did not hold "4"\): nothing was written or shared/);
+    assert.ok(!existsSync(join(root, "tools", "count_lines")) && !swarm.tools.has("count_lines"), "a tool whose self-test failed is not made");
+    assert.ok(!existsSync(join(root, "work", "agent00", ".make_tool")), "and its staged copy is gone");
+    const made = await make.execute("t1", { ...counter, selftest: { args: { path: "work/three.txt" }, expect: "3" } }, undefined, undefined, ctx);
     assert.equal(made.details.ok, true);
+    assert.equal((made.details.selftest as { ok?: boolean }).ok, true);
     assert.ok(swarm.tools.has("count_lines"), "the forged tool is registered in the forging session");
     const count = swarm.tools.get("count_lines")!.definition;
     const ran = await count.execute("t2", { path: "team.json" }, undefined, undefined, ctx);
@@ -164,7 +178,7 @@ test("Pi loader: make_tool and tools exist only when the spawner turned forging 
     // an input is healed under the tool's own name, and `done` heals what a
     // background process changed between tool calls.
     await seedInputs(root, { "a.txt": "keep me\n" });
-    const tamper = await make.execute("t4", { name: "tamper", description: "Write an input", runtime: "python3", script: "import os\nos.chmod('inputs', 0o755)\nos.chmod('inputs/a.txt', 0o644)\nopen('inputs/a.txt', 'w').write('from a tool\\n')\nprint('wrote')\n" }, undefined, undefined, ctx);
+    const tamper = await make.execute("t4", { name: "tamper", description: "Write an input", runtime: "python3", params: { dry: { type: "boolean" } }, script: "import json,os,sys\nif json.load(sys.stdin).get('dry'):\n    print('wrote'); sys.exit(0)\nos.chmod('inputs', 0o755)\nos.chmod('inputs/a.txt', 0o644)\nopen('inputs/a.txt', 'w').write('from a tool\\n')\nprint('wrote')\n", selftest: { args: { dry: "true" }, expect: "wrote" } }, undefined, undefined, ctx);
     assert.equal(tamper.details.ok, true);
     const wrote = await swarm.tools.get("tamper")!.definition.execute("t5", {}, undefined, undefined, ctx);
     assert.equal(wrote.details.ok, true, "the tool itself succeeds; the harness heals after it");
@@ -351,6 +365,74 @@ test("Pi loader: a pack's seeded tools are in the list with forging off, and its
     if (saved.secrets === undefined) delete process.env.SWARM_PACK_SECRETS; else process.env.SWARM_PACK_SECRETS = saved.secrets;
     await rm(root, { recursive: true, force: true });
     await rm(secretDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi loader: a pack tool called directly is given what job_run gives it: references made paths, {OUT} the seat's own directory, a directory run once per file, a path in another job refused with where it is, and its typed arguments said", async (t) => {
+  const loaderPath = await findLoader();
+  if (!loaderPath) {
+    t.skip("Pi package not found (set PI_PACKAGE_DIR or npm install -g @earendil-works/pi-coding-agent)");
+    return;
+  }
+  const { loadExtensions } = (await import(loaderPath)) as {
+    loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: unknown[] }>;
+  };
+  const root = await mkdtemp(join(tmpdir(), "pi-load-direct-"));
+  const saved = process.env.SWARM_TOOL_FORGING;
+  try {
+    await initSandbox(root, { reset: true });
+    process.env.AGENT_ID = "agent00";
+    delete process.env.SWARM_TOOL_FORGING;
+    const { sealTree, storePaths } = await import("../scripts/evidence-store.ts");
+    const stage = async (name: string, files: Record<string, string>) => {
+      const d = join(root, `staging-${name}`);
+      for (const [rel, text] of Object.entries(files)) {
+        await mkdir(join(d, rel, ".."), { recursive: true });
+        await writeFile(join(d, rel), text);
+      }
+      await sealTree(root, d, join(storePaths(root).jobs, name, "out"), name, 1);
+    };
+    await stage("j000001", { "notes/a.txt": "alpha", "notes/b.txt": "beta" });
+    await stage("j000002", { "other/c.txt": "gamma" });
+    const script = "import json, sys\nd = json.load(sys.stdin)\nprint(json.dumps({'status': 'complete', 'read': d['path'], 'text': open(d['path']).read(), 'out': d.get('out_dir'), 'n': d.get('n')}))\n";
+    await mkdir(join(root, "tools", "pack_reader"), { recursive: true });
+    await writeFile(join(root, "tools", "pack_reader", "run.py"), script);
+    await writeFile(join(root, "tools", "pack_reader", "manifest.json"), JSON.stringify({
+      name: "pack_reader", description: "Read one file", params: { path: { type: "string", required: true, description: "The file to read." }, out_dir: { type: "string", description: "Where to write." }, n: { type: "integer" } },
+      runtime: "python3", entry: "run.py", timeout_seconds: 30, by: "pack-author", at: new Date().toISOString(), version: 1, sha256: createHash("sha256").update(script).digest("hex"), pack: "disk-pack",
+    }));
+    await sealForgedTools(root);
+    const loaded = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
+    assert.deepEqual(loaded.errors, []);
+    const [swarm] = loaded.extensions;
+    const ctx = { cwd: root, hasUI: false, ui: {} };
+    for (const handler of (swarm.handlers.get("session_start") ?? []) as Array<(e: unknown, c: unknown) => Promise<unknown>>) await handler({}, ctx);
+    const tool = swarm.tools.get("pack_reader")!.definition as unknown as { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }> };
+    const call = (args: Record<string, unknown>) => tool.execute("d1", args, undefined, undefined, ctx);
+    // A job reference, {OUT} and a string where an integer is declared.
+    const one = await call({ path: "job:j000001/notes/a.txt", out_dir: "{OUT}/res", n: "5" });
+    assert.equal(one.details.ok, true, JSON.stringify(one));
+    const answer = JSON.parse(one.content[0]!.text.split("\n")[0]!) as Record<string, unknown>;
+    assert.deepEqual([answer.read, answer.text, answer.out, answer.n], ["store/jobs/j000001/out/notes/a.txt", "alpha", "work/agent00/res", 5]);
+    assert.match(one.content[0]!.text, /Arguments taken as their declared types: n \(a string\) was taken as the integer 5\. The tool was given the path of the reference in its arguments \(path: job:j000001\/notes\/a\.txt is store\/jobs\/j000001\/out\/notes\/a\.txt\)\.$/);
+    assert.deepEqual(one.details.coerced, ["n (a string) was taken as the integer 5"]);
+    // $OUT and an input reference.
+    const out = await call({ path: "job:j000002/other/c.txt", out_dir: "$OUT/x" });
+    assert.equal((JSON.parse(out.content[0]!.text.split("\n")[0]!) as { out: string }).out, "work/agent00/x");
+    // A directory given to a one-file reader: once per file, one answer.
+    const each = await call({ path: "job:j000001/notes" });
+    assert.equal(each.details.ok, true, JSON.stringify(each));
+    const all = JSON.parse(each.content[0]!.text.slice(0, each.content[0]!.text.lastIndexOf("}") + 1)) as { status: string; each: { files: number; ran: number }; runs: Array<{ file: string; result: { text: string } }> };
+    assert.deepEqual([all.status, all.each.files, all.each.ran, all.runs.map((r) => [r.file, r.result.text])], ["complete", 2, 2, [["store/jobs/j000001/out/notes/a.txt", "alpha"], ["store/jobs/j000001/out/notes/b.txt", "beta"]]]);
+    assert.match(each.content[0]!.text, /path named the directory store\/jobs\/j000001\/out\/notes, so the tool was run once for each of the 2 file\(s\) in it it reads/);
+    // A path another job holds: refused before the tool runs, with that job, the nearest and store_find.
+    const wrong = await call({ path: "job:j000001/other/c.txt" });
+    assert.equal(wrong.details.ok, false);
+    assert.match(wrong.content[0]!.text, /^pack_reader refused: tool pack_reader: path names job:j000001\/other\/c\.txt, and job j000001 has no other\/c\.txt .*; other\/c\.txt is in job j000002 \(job:j000002\/other\/c\.txt\): name that instead; .*store_find\(name: "c\.txt"\)/);
+  } finally {
+    if (saved === undefined) delete process.env.SWARM_TOOL_FORGING; else process.env.SWARM_TOOL_FORGING = saved;
+    execFileSync("chmod", ["-R", "u+w", root]);
+    await rm(root, { recursive: true, force: true });
   }
 });
 

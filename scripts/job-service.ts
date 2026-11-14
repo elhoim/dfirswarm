@@ -49,6 +49,7 @@ import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { argRefsWords, resolveToolArgs, type ArgRef } from "./tool-arg-refs.ts";
 import { elsewhereWords } from "./store-find.ts";
+import { coerceArgs, coercedWords } from "../extensions/forged-args.ts";
 import { EACH_SCRIPT, eachOf, eachPlan, eachWords, type EachSpec } from "./tool-each.ts";
 import { dumpMembers, dumpReaders, dumpsPost, membersTsv } from "./dump-members.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, SAME_AS_SHOWN, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
@@ -221,6 +222,8 @@ export type JobSpec = {
   args_resolved?: ArgRef[];
   /** A one-file reader given a directory: run once per file it reads there (tool-each.ts). */
   each?: EachSpec;
+  /** tool: the arguments taken as the types its manifest declares ("4096" for an integer, "[1, 2]" for an array), each said (extensions/forged-args.ts). */
+  args_coerced?: string[];
   /** recipe: the one phase of the recipe to run, of those its recipe.json declares (`phases`); the recipe is told in RECIPE_PHASE. Without it the recipe runs whole. */
   phase?: string;
   experimental?: boolean;
@@ -1220,6 +1223,17 @@ export class JobService {
   }
 
   /**
+   * What a job would be accepted as, or the reason it would be refused: the
+   * checks of submit alone (its arguments typed, its references resolved,
+   * its scope), with nothing queued, journalled or run. The tool contract
+   * test asks it of every pack tool.
+   */
+  async preview(raw: Partial<JobSpec>): Promise<JobSpec | { reason: string }> {
+    const { seal: _seal, scope: _scope, ...asked } = raw;
+    return this.normalise(asked);
+  }
+
+  /**
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
@@ -1480,7 +1494,11 @@ export class JobService {
     if (programs.length && declared.kind === "declared") for (const p of programs) if (!inputs.some((x) => x.replace(/\/+$/, "") === p)) inputs.push(p);
     const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}), ...(raw.independent === true && (kind === "command" || kind === "tool") ? { independent: true } : {}), ...(raw.secret_output === true ? { secret_output: true } : {}), ...(programs.length ? { programs } : {}) } as JobSpec;
     if (kind === "tool") {
-      const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
+      const given = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
+      // What an argument plainly is under its declared type is taken as that, as on a direct call (forged-args.ts), and said.
+      const toolParams: unknown = /^[a-z0-9_]{1,64}$/.test(String(raw.tool ?? "")) ? await readFile(join(this.S, "tools", String(raw.tool), "manifest.json"), "utf8").then((t) => (JSON.parse(t) as { params?: unknown }).params, () => undefined) : undefined;
+      const typed = toolParams !== null && typeof toolParams === "object" && !Array.isArray(toolParams) ? coerceArgs(toolParams as Record<string, { type?: string }>, given as Record<string, unknown>) : { args: given as Record<string, unknown>, coerced: [] as string[] };
+      const args = typed.args;
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
       if (!checked.ok) return { reason: checked.reason };
       // A reference given as an argument is the path it names; one that names nothing is refused here, with the form that works.
@@ -1496,7 +1514,7 @@ export class JobService {
       const man = JSON.parse(await readFile(join(this.S, "tools", String(raw.tool), "manifest.json"), "utf8"));
       const each = eachOf(this.S, String(raw.tool), refs.args, man);
       if (!each.ok) return { reason: each.reason };
-      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}) };
+      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}), ...(typed.coerced.length ? { args_coerced: typed.coerced.slice(0, 32) } : {}) };
       // The tool's manifest says this job is secret output: so it is, whatever the agent said (false included).
       if (checked.secret) return { ...base, secret_output: true, secret_output_by: "tool_manifest", ...withRefs };
       return { ...base, ...withRefs };
@@ -4008,7 +4026,7 @@ export function describe(job: JobRecord): string {
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
   const sameN = job.same_as_total?.files ?? job.same_as?.length ?? 0;
   const same = sameN ? ` ${sameN} of its files are an earlier job's output byte for byte (job_status ${job.id} names ${job.same_as_total?.list ? `the first, ${job.same_as_total.list} every one` : "them"}).` : "";
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_coerced?.length ? ` ${coercedWords(job.spec.args_coerced)}` : ""}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
 }
 
 /**
@@ -4058,6 +4076,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number; wa
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
+    ...(job.spec.args_coerced?.length ? { args_coerced: coercedWords(job.spec.args_coerced) } : {}),
     ...(job.spec.programs?.length ? { programs: job.spec.programs } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
     ...(job.spec.secret_output_by ? { secret_output_by: job.spec.secret_output_by } : {}),
