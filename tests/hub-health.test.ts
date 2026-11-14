@@ -136,3 +136,61 @@ test("a hub filled to 60% of its heap writes a heap snapshot that is not empty a
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a disk probe that never ends holds no health sample: it is said slow or hung, the heap snapshot and the restart are still decided, and no second probe starts while it hangs", { timeout: 120_000 }, async () => {
+  const { Hub } = await import("../scripts/vm-hub.ts");
+  const P = await import("../extensions/protocol.ts");
+  const { mkdtemp, rm, stat } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const base = await mkdtemp(join(tmpdir(), "hub-probe-"));
+  const dir = await mkdtemp(join(tmpdir(), "hp-"));
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "hp1", agentIds: ["a1"], capUsd: 1, wallClockMinutes: 30 });
+  const hub = new Hub({ sandbox: S, dir, agents: ["a1"], tokens: { a1: "t", system: "s" }, collector: join(dir, "none.sock"), backstop: false, quiet: true, settleMs: 0, herdrBin: "/usr/bin/false" });
+  let probes = 0;
+  // An fsync that never returns, as on a disk that hung.
+  hub.diskProbe = () => (probes++, new Promise(() => undefined));
+  hub.healthProbeMs = 200;
+  const said: Array<[string, Record<string, unknown>]> = [];
+  (hub as unknown as { event: (t: string, a: unknown, r: Record<string, unknown>) => Promise<void> }).event = async (t, _a, r) => void said.push([t, r]);
+  const keys = ["SWARM_HUB_SNAPSHOT_AT", "SWARM_HUB_RECYCLE_AT", "SWARM_HUB_SUPERVISED"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  // Both heap lines are passed at once, so that the sample has to reach them.
+  process.env.SWARM_HUB_SNAPSHOT_AT = "0.0001";
+  process.env.SWARM_HUB_RECYCLE_AT = "0.0001";
+  process.env.SWARM_HUB_SUPERVISED = "1";
+  const exit = process.exit;
+  let exited: number | undefined;
+  process.exit = ((code?: number) => void (exited = code)) as typeof process.exit;
+  try {
+    const loop = { read: () => ({ p50: 1, p99: 2, max: 3 }) };
+    await hub.healthTick(loop);
+    const t1 = performance.now();
+    await hub.healthTick(loop);
+    const second = performance.now() - t1;
+    assert.ok(second < 1500, `the second sample took ${second.toFixed(0)} ms`);
+    assert.equal(probes, 1, "no second probe while the first hangs");
+    const health = said.filter(([t]) => t === "hub_health").map(([, r]) => r);
+    assert.equal(health.length, 2, "both samples are on the trace");
+    assert.equal(health[0]!.disk_write_mb_s, null);
+    assert.match(String(health[0]!.disk_error), /the disk probe did not end within 200 ms: the disk under .* is slow or hung/);
+    assert.match(String(health[1]!.disk_error), /the disk probe started \d+ s ago has not ended/);
+    assert.ok(typeof health[0]!.heap_used_mb === "number" && (health[0]!.heap_used_mb as number) > 0, "the heap is read");
+    const shot = said.find(([t]) => t === "hub_heap_snapshot")?.[1] as { ok: boolean; file: string; bytes: number } | undefined;
+    assert.ok(shot?.ok, `the heap snapshot was taken: ${JSON.stringify(shot)}`);
+    assert.ok((await stat(shot!.file)).size > 0);
+    for (let i = 0; i < 100 && exited === undefined; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(exited, 75, "and the restart past its line was decided");
+    assert.ok(said.some(([t]) => t === "hub_recycled"));
+  } finally {
+    process.exit = exit;
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    await hub.stop().catch(() => undefined);
+    await rm(base, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

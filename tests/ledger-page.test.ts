@@ -7,12 +7,12 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import extension from "../extensions/agent-swarm.ts";
-import { inboxPageChars, initSandbox, itemBudget, pageWholeItems, recordEntry, replyCost } from "../extensions/protocol.ts";
+import { inboxPageChars, initSandbox, itemBudget, LEDGER_ENTRIES, pageWholeItems, recordEntry, replyCost } from "../extensions/protocol.ts";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Tool = { execute: (id: string, params: Json, signal: undefined, update: undefined, ctx: { cwd: string }) => Promise<{ content: Array<{ text: string }>; details: Json; isError?: boolean }> };
@@ -116,4 +116,74 @@ test("ids reads exact entries with their hash and names the ones that do not exi
   assert.match(text(bad), /exact ledger ids written E-<seq>/);
   const badFrom = await ledger.execute("c", { from: "3" }, undefined, undefined, { cwd: root });
   assert.equal(badFrom.isError, true);
+});
+
+test("behind a hub, every answer to listLedger is within the answer wall on every filter path, and the window is joined whole: the ledger tool's remaining and kept_as count all of it", { timeout: 300_000 }, async (t) => {
+  const { Hub } = await import("../scripts/vm-hub.ts");
+  const board = await import("../extensions/board.ts");
+  const base = await mkdtemp(join(tmpdir(), "ledger-hub-"));
+  const dir = await mkdtemp(join(tmpdir(), "lgh-"));
+  const S = join(base, "runs", "t1");
+  await mkdir(S, { recursive: true });
+  await initSandbox(S, { swarmId: "t1", agentIds: ["a0", "a1"], capUsd: 1, wallClockMinutes: 30 });
+  // The re-review's ledger: 2,000 entries of about 1.6 KB each (3.3 MB in all).
+  const lines: string[] = [];
+  for (let i = 1; i <= 2000; i++) lines.push(JSON.stringify({ v: 4, seq: i, kind: "finding", by: "a0", authors: ["a0"], value: `v${i} ` + "x".repeat(900), source: "the disk", evidence: "e".repeat(600), refs: ["job:j000001/x"], at: "2026-11-14T10:00:00.000Z" }));
+  await mkdir(join(S, "ledger"), { recursive: true });
+  await writeFile(join(S, LEDGER_ENTRIES), lines.join("\n") + "\n");
+  const hub = new Hub({ sandbox: S, dir, agents: ["a0", "a1"], tokens: { a0: "t0", a1: "t1", system: "ts" }, collector: join(dir, "none.sock"), backstop: false, quiet: true, settleMs: 0, herdrBin: "/usr/bin/false", forging: false });
+  await hub.start();
+  // What the hub sends, measured as it leaves (the answer after the wall).
+  const sent: number[] = [];
+  const h = hub as unknown as { replyRpc: (agent: string, socket: unknown, id: number, result: unknown) => void };
+  const reply = h.replyRpc.bind(hub);
+  h.replyRpc = (agent, socket, id, result) => {
+    sent.push(Buffer.byteLength(JSON.stringify(result)));
+    reply(agent, socket, id, result);
+  };
+  const saved = process.env.SWARM_BOARD_SOCKET;
+  process.env.SWARM_BOARD_SOCKET = hub.socketFor("a0");
+  const wall = 256 * 1024;
+  try {
+    const all = Array.from({ length: 2000 }, (_, i) => i + 1);
+    for (const [filter, want] of [
+      [{}, all.slice(-200)],
+      [{ limit: 500 }, all.slice(-500)],
+      [{ from: 1 }, all],
+      [{ ids: all }, all],
+      [{ kind: "finding", from: 1500 }, all.slice(1499)],
+    ] as Array<[Record<string, unknown>, number[]]>) {
+      sent.length = 0;
+      const t0 = performance.now();
+      const got = await board.listLedger(S, filter);
+      const ms = performance.now() - t0;
+      assert.deepEqual(got.map((e) => e.seq), want, `${JSON.stringify(filter).slice(0, 40)}: the whole window, in order, once each`);
+      assert.ok(sent.length >= 1 && Math.max(...sent) <= wall, `${JSON.stringify(filter).slice(0, 40)}: answers of ${sent.join(", ")} bytes`);
+      if (want.length >= 500) assert.ok(sent.length > 1, "a window past the wall comes in pages");
+      t.diagnostic(`${JSON.stringify(filter).slice(0, 30)}: ${got.length} entries in ${sent.length} answer(s), the largest ${Math.max(...sent)} bytes, ${ms.toFixed(0)} ms`);
+    }
+    // The ledger tool behind the hub: its page, and remaining counted from the whole window; the whole window kept.
+    const ledger = load("a0").get("ledger")!;
+    for (const [params, total] of [
+      [{}, 200],
+      [{ from: "E-1" }, 2000],
+      [{ ids: all.map((n) => `E-${n}`) }, 2000],
+    ] as Array<[Json, number]>) {
+      sent.length = 0;
+      const r = await ledger.execute("c", params, undefined, undefined, { cwd: S });
+      assert.ok(Math.max(...sent) <= wall);
+      const d = r.details;
+      assert.equal(d.n + d.remaining, total, `${JSON.stringify(params).slice(0, 30)}: the page and what it holds back are the whole window`);
+      assert.equal(d.next, `E-${seqs(d).at(-1)! + 1}`);
+      const kept = (await readFile(join(S, d.kept_as.path), "utf8")).trimEnd().split("\n");
+      assert.equal(kept.length, total, "the whole window is kept");
+    }
+  } finally {
+    if (saved === undefined) delete process.env.SWARM_BOARD_SOCKET;
+    else process.env.SWARM_BOARD_SOCKET = saved;
+    board.closeBoardClients();
+    await hub.stop().catch(() => undefined);
+    await rm(base, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
 });

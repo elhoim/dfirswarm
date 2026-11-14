@@ -29,7 +29,7 @@ import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as Q from "./questions.ts";
 import * as T from "./toolchain.ts";
-import { boundLocalAnswer } from "./reply-bound.ts";
+import { boundLocalAnswer, joinLedgerPages } from "./reply-bound.ts";
 
 /** Where the hub listens, as the VM sees it; unset on the host. */
 export function boardSocket(env: NodeJS.ProcessEnv = process.env): string {
@@ -663,7 +663,12 @@ export const heldBy = remote("heldBy", P.heldBy);
 export const listClaims = remote("listClaims", P.listClaims);
 export const listFileHistory = remote("listFileHistory", P.listFileHistory);
 export const listForgedTools = remote("listForgedTools", P.listForgedTools);
-export const listLedger = remote("listLedger", P.listLedger);
+/** The ledger's window, whole: past the answer wall the hub answers it in pages (reply-bound.ts ledgerPage), joined here. */
+export const listLedger: typeof P.listLedger = async (sandboxRoot, filter = {}) => {
+  const socket = boardSocket();
+  if (!socket) return boundHere("listLedger", [sandboxRoot, filter], await P.listLedger(sandboxRoot, filter));
+  return joinLedgerPages((cursor) => callBoard(socket, "listLedger", cursor ? [sandboxRoot, filter, cursor] : [sandboxRoot, filter]));
+};
 export const listTeam = remote("listTeam", P.listTeam);
 export const markDone = remote("markDone", P.markDone);
 export const markStopSteer = P.markStopSteer;

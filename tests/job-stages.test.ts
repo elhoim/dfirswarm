@@ -27,7 +27,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DERIVED, DERIVED_LIMITS, DERIVED_RESERVE, derivedPass, derivedRank, derivedRoom, describe, JobService, jobView, sealIsLarge, sealLeftStaging, SEAL_LARGE_FILES, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
+import { DERIVED, DERIVED_FLOOR, DERIVED_LIMITS, DERIVED_RESERVE, derivedPass, derivedRank, derivedRoom, describe, JobService, jobView, sealIsLarge, sealLeftStaging, SEAL_LARGE_FILES, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
 import { buildIndex, writeIndex } from "../scripts/manifest-index.ts";
 import { sealTree, storePaths, verifyJournalText, type JournalLine } from "../scripts/evidence-store.ts";
 import { listInputs, localWorker } from "./job-service-worker.ts";
@@ -290,6 +290,27 @@ test("part of the ceiling is kept for what a user made or kept: vendor objects t
   await svc.stop("over");
 });
 
+test("in the service, kept room is lent to the next rank's objects down to the floor, and a user's object offered later takes the floor", async () => {
+  const S = sandbox();
+  // Five generations, three kept, one of them never lent (DERIVED_FLOOR): the next rank's objects get four.
+  assert.deepEqual([Math.floor(5 * DERIVED_RESERVE), Math.floor(5 * DERIVED_FLOOR)], [3, 1]);
+  const { svc } = service(S, { packDirs: [CFB], derived: true, derivedLimits: { generationsMax: 5 } });
+  await svc.start();
+  const tar = (dir: string, names: string[]) => `python3 - <<'PY'\nimport tarfile,io,os\nfor k,n in enumerate(${JSON.stringify(names)}):\n  d=os.path.join(os.environ['OUT'],${JSON.stringify(dir)}); os.makedirs(d,exist_ok=True)\n  with tarfile.open(os.path.join(d,n),'w') as t:\n    i=tarfile.TarInfo('m.txt'); b=(n*400).encode(); i.size=len(b); t.addfile(i,io.BytesIO(b))\nPY`;
+  const web = ok(await svc.submit("a1", { kind: "command", command: tar("image/inetpub/wwwroot/app", ["w1.tar", "w2.tar", "w3.tar", "w4.tar", "w5.tar", "w6.tar"]), inputs: [] }));
+  await until(svc, web.job.id);
+  assert.equal(derivedRank("image/inetpub/wwwroot/app/w1.tar"), 1);
+  const gens = () => journal(S).filter((l) => l.type === "generation_committed" && l.trigger === "derived");
+  await eventually(() => gens().length === 4 && ![...svc.jobs.values()].some((j) => j.requester.agent === DERIVED && ["accepted", "running", "finished", "fenced"].includes(j.state)), "four generations, and the lane idle", 120000);
+  assert.ok(gens().every((g) => /inetpub\/wwwroot\/app\/w\d\.tar$/.test(String((g.target as { ref?: string }).ref))), "the next rank's objects, two of them on loan");
+  assert.ok(journal(S).some((l) => (l.type === "job_cancelled" && /the last 1 never lent/.test(String(l.reason))) || l.type === "derived_not_run"), "past the floor the rest is not run, and said so");
+  const user = ok(await svc.submit("a1", { kind: "command", command: tar("image/Users/x/Downloads", ["u.tar"]), inputs: [] }));
+  await until(svc, user.job.id);
+  await eventually(() => gens().length === 5, "the user's object, offered later, takes the floor", 120000);
+  assert.match(String((gens()[4].target as { ref?: string }).ref), /Users\/x\/Downloads\/u\.tar$/);
+  await svc.stop("over");
+});
+
 /** A tree of a Windows image, the way extraction jobs commit it: objects a recipe would take, by path and size. */
 function windowsTree(): { vendor: string[]; runtime: string[]; profile: string[] } {
   const vendor: string[] = [];
@@ -336,8 +357,10 @@ function replayLane(arrivals: string[][]): { made: string[]; notRun: number } {
     while (pending.length && made.length < max) {
       const { take } = derivedPass(pending, (c) => derivedRank(c.path), { made: made.length, max, reserve, pairsPerPass: DERIVED_LIMITS.pairsPerPass });
       if (!take.length) break;
+      // As fromDetect asks: whether a user's object waits, once for the pass's answers.
+      const userWaiting = pending.some((c) => derivedRank(c.path) < 1);
       for (const c of take) {
-        if (derivedRoom(derivedRank(c.path), made.length, max, reserve)) made.push(c.path);
+        if (derivedRoom(derivedRank(c.path), made.length, max, reserve, { userWaiting })) made.push(c.path);
         else notRun += 1;
       }
     }
@@ -367,6 +390,56 @@ test("replayed on a synthetic Windows image whose vendor trees are committed bef
   }
   // With a fifth kept, as before, the late profile got ten: the replay fails without the larger reserve.
   assert.ok(DERIVED_RESERVE >= 0.6);
+});
+
+test("kept room no user's object waits for is lent to the next rank, all but the floor, and taken back while a user's object waits; a vendor's objects are never lent it", () => {
+  const max = DERIVED_LIMITS.generationsMax;
+  const reserve = Math.floor(max * DERIVED_RESERVE);
+  const floor = Math.floor(max * DERIVED_FLOOR);
+  assert.deepEqual([max, reserve, floor], [50, 30, 10]);
+  // derivedRoom, rank by rank, once only the kept part is left (made 20 of 50).
+  assert.equal(derivedRoom(2, 20, max, reserve), false, "a vendor's object: never");
+  assert.equal(derivedRoom(1, 20, max, reserve), true, "the next rank, on loan");
+  assert.equal(derivedRoom(1, 20, max, reserve, { userWaiting: true }), false, "taken back while a user's object waits");
+  assert.equal(derivedRoom(1, max - floor - 1, max, reserve), true);
+  assert.equal(derivedRoom(1, max - floor, max, reserve), false, "the floor is never lent");
+  assert.equal(derivedRoom(0, max - 1, max, reserve, { userWaiting: true }), true, "a user's object: up to the ceiling");
+  assert.equal(derivedRoom(0, max, max, reserve), false);
+  const rank1 = (p: string) => derivedRank(p) === 1;
+  const user = (p: string) => derivedRank(p) < 1;
+  // The re-review's case: twelve Program Files objects, then 27 under web roots and at the root. Kept room nobody used left 30
+  // generations idle (20 made, 8 of them the web roots').
+  const vendor = Array.from({ length: 12 }, (_, i) => `image/Program Files/V${i}/setup${i}.cab`);
+  const web = [
+    ...Array.from({ length: 15 }, (_, i) => `image/inetpub/wwwroot/app/upload/shell${i}.aspx.zip`),
+    ...Array.from({ length: 10 }, (_, i) => `image/var/www/html/backup${i}.tar.gz`),
+    "image/root/.bash_history.tar",
+    "image/etc/cron.d/x.zip",
+  ];
+  assert.ok(web.every(rank1) && vendor.every((p) => derivedRank(p) === 2));
+  const lent = replayLane([vendor, web]);
+  assert.equal(lent.made.length, 39, "every object is catalogued: 12 vendor objects and 27 of the next rank");
+  assert.equal(lent.made.filter(rank1).length, 27);
+  // The next rank first and the profile after: the loan stops at the floor, which the late profile gets.
+  const { profile } = windowsTree();
+  const many = Array.from({ length: 60 }, (_, i) => `image/inetpub/wwwroot/site${i}/backup${i}.zip`);
+  const late = replayLane([many, profile]);
+  assert.equal(late.made.filter(rank1).length, max - floor, "the next rank takes all but the floor");
+  assert.equal(late.made.filter(user).length, floor, "the late profile takes the floor");
+  // Offered together: the user's objects first, and none of the kept part is lent while they wait.
+  const together = replayLane([[...many, ...profile, ...vendor]]);
+  assert.ok(together.made.filter(user).length >= 30, `${together.made.filter(user).length} user objects`);
+  assert.equal(together.made.filter((p) => derivedRank(p) === 2).length, 0, "the vendor's objects come after both, and get nothing kept");
+  // derivedPass: once only the kept part is left, a user's object waiting keeps the pass to the user's objects.
+  const pending = [...many.slice(0, 5), ...profile.slice(0, 3)].map((path, i) => ({ path, bytes: 1000 - i, recipes: ["r"] }));
+  const pass = derivedPass(pending, (c) => derivedRank(c.path), { made: 25, max, reserve, pairsPerPass: 32 });
+  assert.deepEqual(pass.take.map((c) => c.path).sort(), profile.slice(0, 3).sort());
+  assert.equal(pass.userOnly, true);
+  const next = derivedPass(pending, (c) => derivedRank(c.path), { made: 28, max, reserve, pairsPerPass: 32 });
+  assert.equal(next.take.length, 5, "with none waiting the next rank is lent the room");
+  // The E0 criterion is unchanged by the loan: vendor and runtime first, the profile last, a user's objects get 30 of 50.
+  const { vendor: v, runtime } = windowsTree();
+  assert.ok(replayLane([v, runtime, profile]).made.filter(user).length >= 30);
 });
 
 test("a commit of 200,000 files tells its requester within 2 s, its files are offered from the manifest's index (the manifest itself unreadable), and a job committed meanwhile is told within 2 s", { timeout: 300_000 }, async (t) => {

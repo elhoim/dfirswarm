@@ -95,7 +95,7 @@ import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, reque
 import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
 import { commandNames, freshCoverage, libraryHint, seatLibraryHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
-import { boundRpcAnswer } from "../extensions/reply-bound.ts";
+import { boundRpcAnswer, ledgerPage } from "../extensions/reply-bound.ts";
 import { sweepsHeld } from "../extensions/store-sweep.ts";
 import { jobsListing, storeFind } from "./store-find.ts";
 import { diskSpeed, healthEveryMs, loopMonitor, memoryPressure, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
@@ -197,6 +197,20 @@ const FILE_FNS = new Set(["publishFile", "recordFileVersion", "fileDiff"]);
 const TRANSFER_SEAT_BYTES = 96 * 1024 * 1024;
 const TRANSFER_SEAT_COUNT = 4;
 const TRANSFER_IDLE_MS = 5 * 60_000;
+/** How long a health sample's disk and memory probes may take (Hub.healthProbeMs): a probe of 1 MB and one fsync takes well under a second on a disk that works. */
+const HEALTH_PROBE_MS = 10_000;
+/** What the disk probe says (hub-health.ts diskSpeed). */
+type DiskProbe = Awaited<ReturnType<typeof diskSpeed>>;
+
+/** `p`'s value, or `late()`'s once `ms` have passed without it; the timer does not hold the process. */
+function within<T>(p: Promise<T>, ms: number, late: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(late()), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, bound]).finally(() => clearTimeout(timer));
+}
 /** The states a seat reports (the extension's), and how much text may go with one. */
 const SEAT_STATES = new Set(["idle", "working", "blocked", "unknown"]);
 const STATE_DETAIL_MAX = 200;
@@ -716,7 +730,14 @@ export function boardTable(hub: {
     listClaims: () => P.listClaims(S),
     listFileHistory: (_who, a) => P.listFileHistory(S, String(a[1] ?? "")),
     listForgedTools: () => P.listForgedTools(S),
-    listLedger: (_who, a) => P.listLedger(S, (a[1] as { kind?: string; limit?: number }) ?? {}),
+    listLedger: async (_who, a) => {
+      // The window the seat asked for (a kind, the newest `limit`, `from` a seq, exact `ids`), answered within the wall: past it, in
+      // pages of whole entries (reply-bound.ts ledgerPage), the next one asked with the cursor {from: <seq>} as the third argument.
+      const filter = (isObject(a[1]) ? a[1] : {}) as Parameters<typeof P.listLedger>[1] & object;
+      const at = isObject(a[2]) && Number.isInteger(a[2].from) ? (a[2].from as number) : undefined;
+      const window = await P.listLedger(S, at === undefined || filter.ids ? filter : { ...filter, from: at });
+      return ledgerPage(at === undefined ? window : window.filter((e) => e.seq >= at));
+    },
     listTeam: (who) => P.listTeam(as(who)),
     teamView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
@@ -1099,6 +1120,12 @@ export class Hub {
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private healthTimer?: ReturnType<typeof setInterval>;
   private snapshotTaken = false;
+  /** The disk probe of a health sample (hub-health.ts diskSpeed); a test gives one that never ends. */
+  diskProbe: (dir: string) => Promise<DiskProbe> = diskSpeed;
+  /** How long a sample's disk and memory probes may take before the sample is taken without them (HEALTH_PROBE_MS; a test shortens it). */
+  healthProbeMs = HEALTH_PROBE_MS;
+  /** A disk probe that has not ended, and since when: no other is started on a disk that hangs. */
+  private diskProbing: { since: number } | null = null;
   private memoryHigh = false;
   /** The sockets a seat's VM holds, and whose: every line written on one is checked against P.WIRE_LINE_MAX. */
   private seatSockets = new WeakMap<Socket, string>();
@@ -2683,9 +2710,14 @@ export class Hub {
     };
   }
 
-  /** One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at a quiet moment. */
+  /**
+   * One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at
+   * a quiet moment. The disk's and the memory's probes are bounded (healthProbeMs): an fsync that never returned held the sample,
+   * and with it every later sample, the 60% heap snapshot and the 85% restart (the timer starts none while one runs). A probe past
+   * its bound is said slow or hung in the sample, and the heap is read and acted on all the same.
+   */
   async healthTick(loop: { read(): { p50: number; p99: number; max: number } }): Promise<void> {
-    const [pressure, disk] = await Promise.all([memoryPressure().catch(() => undefined), diskSpeed(this.cfg.dir).catch(() => undefined)]);
+    const [pressure, disk] = await Promise.all([within(memoryPressure().catch(() => undefined), this.healthProbeMs, () => undefined), this.probeDisk()]);
     const h = sampleHealth(loop.read(), this.holdsNow(), { pressure, disk });
     await this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
     if (snapshotDue(h, this.snapshotTaken)) {
@@ -2711,6 +2743,20 @@ export class Hub {
         .then(() => this.flushRefusals().catch(() => undefined))
         .then(() => process.exit(75));
     }
+  }
+
+  /** The disk's speed for a health sample, within healthProbeMs; a probe that does not end is said so, and none other is started while it hangs. */
+  private async probeDisk(): Promise<DiskProbe> {
+    const unknown = (why: string): DiskProbe => ({ disk_write_mb_s: null, disk_fsync_ms: null, disk_error: why });
+    if (this.diskProbing) return unknown(`the disk probe started ${Math.round((Date.now() - this.diskProbing.since) / 1000)} s ago has not ended: the disk under ${this.cfg.dir} is slow or hung`);
+    const probing = { since: Date.now() };
+    this.diskProbing = probing;
+    const probe = this.diskProbe(this.cfg.dir)
+      .catch((err: Error) => unknown(String(err?.message ?? err).slice(0, 200)))
+      .finally(() => {
+        if (this.diskProbing === probing) this.diskProbing = null;
+      });
+    return within(probe, this.healthProbeMs, () => unknown(`the disk probe did not end within ${this.healthProbeMs} ms: the disk under ${this.cfg.dir} is slow or hung`));
   }
 
   /** Said once each time the heap passes three quarters of its limit, and again after it has gone back under two thirds. */
@@ -3480,13 +3526,17 @@ export async function keepAnswer(sandbox: string, agent: string, fn: string, tex
 }
 
 /**
- * Each line the hub writes to its log (traces/vm-hub.log takes its stdout and
- * stderr: its own lines, Node's warnings, an error's stack) begins with when,
- * in UTC, as idle-nudge's do under SWARM_LOG_TS (Plan 2, 0.13): the log of the
- * runs s17fdfe and s5d814f could not be laid beside the trace. A chunk that
- * ends mid-line leaves the next chunk to go on with it, unstamped. What the
- * runtime writes past these streams (the text of a fatal out-of-memory) is
- * not stamped. Returns a function that puts the stream back.
+ * Each line the hub writes to its log through its streams (traces/vm-hub.log
+ * takes its stdout and stderr: its own lines, Node's warnings, an error it
+ * reports) begins with when, in UTC, as the watchdog's do (Plan 2, 0.13): the
+ * log of the runs s17fdfe and s5d814f could not be laid beside the trace. A
+ * chunk that ends mid-line leaves the next chunk to go on with it, unstamped.
+ * Not every line of the log is stamped: what the runtime writes past these
+ * streams is not. A crash's report is (Node prints an uncaught exception's
+ * stack itself), so stampCrashes writes a stamped copy of it first; the text
+ * of a fatal out-of-memory, and anything Node says before the hub's main()
+ * has run (a module that does not load), stay as Node writes them. Returns a
+ * function that puts the stream back.
  */
 export function stampLines(stream: { write: (...a: never[]) => boolean }, now: () => string = () => new Date().toISOString()): () => void {
   const write = stream.write;
@@ -3517,11 +3567,35 @@ export function stampLines(stream: { write: (...a: never[]) => boolean }, now: (
   };
 }
 
+/**
+ * A crash's report with its time: an uncaught exception, or a rejection
+ * nothing handled (which Node raises as one), is printed by Node itself past
+ * process.stderr.write, so its stack stood in the log with no time. Before
+ * Node prints it and exits as it always has (code 1), the same error is
+ * written through `stream`, stamped by stampLines. It listens on
+ * uncaughtExceptionMonitor, which changes nothing of what follows. Node's own
+ * report follows it, unstamped; a fatal out-of-memory has no such event and
+ * is not stamped. Returns a function that stops listening.
+ */
+export function stampCrashes(stream: { write: (text: string) => boolean } = process.stderr): () => void {
+  const said = (err: unknown, origin: string) => {
+    try {
+      const what = origin === "unhandledRejection" ? "a rejection nothing handled" : "an uncaught exception";
+      stream.write(`vm-hub: ${what} ends the hub (Node's own report of it follows, without times): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    } catch {
+      // Node's own report still follows.
+    }
+  };
+  process.on("uncaughtExceptionMonitor", said);
+  return () => void process.off("uncaughtExceptionMonitor", said);
+}
+
 async function main(): Promise<void> {
   // SWARM_LOG_TS=0 leaves the lines as they are.
   if (process.env.SWARM_LOG_TS !== "0") {
     stampLines(process.stdout);
     stampLines(process.stderr);
+    stampCrashes();
   }
   const args = process.argv.slice(2);
   const opt = (name: string) => {
