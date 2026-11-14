@@ -37,7 +37,7 @@
  * any import, and published as `import:<id>/<file>` with its trace provenance.
  */
 import { createHash } from "node:crypto";
-import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { INDEX_MIN_BYTES } from "./manifest-index.ts";
@@ -683,19 +683,94 @@ export const MSB_DEFAULT_QUOTA_MB = 4096;
 
 /**
  * The write quota of a job's $OUT, in MiB: `SWARM_JOB_OUT_QUOTA_MB` when set,
- * else the room free where it is kept less the room the service keeps free,
- * shared among the jobs that write at once (`sharers`: this job and every
- * other that runs), and never below microsandbox's default
- * (a job could write that much before). Each job used to be given all the
- * free room: three whole-image extractions of one run were promised the same
- * 64 GB, and the disk stood at 94%.
+ * else one budget, the room free where it is kept less the room the service
+ * keeps free, shared among the jobs that may write to that disk at once
+ * (`sharers`: this job, every other job of its run that runs, and the jobs
+ * of the other runs on the host that write to the same disk, as
+ * hostStagingWriters counts them). Each job used to be given all the free
+ * room (three whole-image extractions of one run were promised the same
+ * 64 GB, and the disk stood at 94%), and then a share of it never below
+ * microsandbox's default of 4 GiB, which promised a disk with less room than
+ * that 4 GiB a job, and counted no other run. The share is what there is:
+ * never 0 (a quota of 0 is none, and microsandbox's 4 GiB again), and
+ * microsandbox's default only when the room is not known.
  */
 export function outQuotaMb(free: number | null, minFreeMb: number, env: NodeJS.ProcessEnv = process.env, sharers = 1): number {
   const set = Number(env.SWARM_JOB_OUT_QUOTA_MB);
   if (Number.isFinite(set) && set > 0) return Math.floor(set);
   if (free === null) return MSB_DEFAULT_QUOTA_MB;
   const n = Number.isFinite(sharers) && sharers >= 1 ? Math.floor(sharers) : 1;
-  return Math.max(MSB_DEFAULT_QUOTA_MB, Math.floor((free - minFreeMb) / n));
+  return Math.max(1, Math.floor((free - minFreeMb) / n));
+}
+
+/** Beside a run's staging: how many of its jobs write there now, for the other runs on the host to count (hostStagingWriters). */
+export const STAGING_WRITERS = ".writers.json";
+
+/**
+ * The jobs of the other runs on this host that may write to the same disk
+ * as `staging` now: for each run the registry says is running whose hub
+ * lives (as swarm.sh's capacity check counts them), whose staging is on the
+ * same device, the count its job service last wrote beside its staging
+ * (STAGING_WRITERS, held to a live process), or, where it wrote none (a hub
+ * from before it did), the job workers it declared, the most it may run.
+ * `runs` names each run counted and what it was counted as.
+ */
+export function hostStagingWriters(registry: string | undefined, self: string, staging: string): { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } {
+  const out: { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } = { writers: 0, runs: [] };
+  if (!registry) return out;
+  let listed: unknown;
+  try {
+    listed = (JSON.parse(readFileSync(registry, "utf8")) as { runs?: unknown }).runs;
+  } catch {
+    return out;
+  }
+  const runs = (Array.isArray(listed) ? listed : listed && typeof listed === "object" ? Object.values(listed) : []) as Array<Record<string, unknown>>;
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const me = real(self);
+  let dev: number | null = null;
+  try {
+    dev = statSync(staging).dev;
+  } catch {
+    dev = null;
+  }
+  const alive = (pid: unknown) => {
+    try {
+      return Number.isInteger(pid) && (pid as number) > 0 && process.kill(pid as number, 0);
+    } catch {
+      return false;
+    }
+  };
+  for (const r of runs) {
+    if (!r || r.state !== "running" || typeof r.sandbox !== "string" || !r.sandbox) continue;
+    const sb = resolve(r.sandbox);
+    if (real(sb) === me || hubAlive(sb) === null) continue;
+    const theirs = storePaths(sb).staging;
+    let st;
+    try {
+      st = statSync(theirs);
+    } catch {
+      continue; // no staging yet: none of its jobs has written
+    }
+    if (dev !== null && st.dev !== dev) continue; // another disk, another budget
+    let n: number | null = null;
+    try {
+      const w = JSON.parse(readFileSync(join(theirs, STAGING_WRITERS), "utf8")) as { writers?: unknown; pid?: unknown };
+      if (Number.isInteger(w.writers) && (w.writers as number) >= 0 && alive(w.pid)) n = w.writers as number;
+    } catch {
+      n = null;
+    }
+    const iso = r.isolation as { jobs?: { workers?: unknown } } | undefined;
+    const declared = Math.max(1, Math.floor(Number(iso?.jobs?.workers) || 1));
+    out.runs.push({ run: String(r.id ?? sb), writers: n ?? declared, from: n === null ? "declared_workers" : "writers_file" });
+    out.writers += n ?? declared;
+  }
+  return out;
 }
 
 export class JobService {
@@ -815,6 +890,8 @@ export class JobService {
       if (!last || JSON.stringify({ default: last.default, images: last.images, pack_profiles: last.pack_profiles }) !== JSON.stringify(declared)) await this.journal.append({ type: "job_images", ...declared });
     }
     await this.recover();
+    // Whatever an earlier hub of this run said of its writers is this one's to say now.
+    this.publishWriters();
     await this.queueKickoffRecipes();
     let ticks = 0;
     this.timer = setInterval(() => {
@@ -1941,6 +2018,7 @@ export class JobService {
     const imageChoice = Object.keys(this.o.images ?? {}).length ? { image_choice: chosen.choice } : {};
     await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...imageChoice, lane, ...hostWait, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, scope, ...(atStart ? { sensitive_at_start: atStart } : {}), accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
     Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, lane, ...imageChoice, accessible, scope, ...(atStart ? { sensitive_at_start: atStart } : {}), network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
+    this.publishWriters();
     await this.project(job);
     maybeCrash("job:started");
     const started = Date.now();
@@ -2053,6 +2131,7 @@ export class JobService {
     const times = { command_ended_at: commandEnded, worker_gone_at: workerGone, noticed_at: iso(noticedAt), ...(result.overdue ? { overdue: result.overdue } : {}) };
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...times, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(commandEnded ? { command_ended_at: commandEnded } : {}), ...(workerGone ? { worker_gone_at: workerGone } : {}), ...(result.digest ? { image_digest: result.digest } : {}) });
+    this.publishWriters();
     // job.json says what the job is at each step, not only at its commit: a job waiting to be sealed read "running" for hours (the run s17fdfe).
     await this.project(job).catch(() => undefined);
     await this.workerHealth(job, exit === null && !cancelled && !stopped && !pastLimit ? (result.error ?? "the worker did not report an exit status") : null);
@@ -3283,11 +3362,39 @@ export class JobService {
     }
   }
 
-  /** The jobs that may still write at once: this one and every other that runs (what an ended job wrote is already out of the free room). */
+  /**
+   * The jobs that may still write to this disk at once: this one, every
+   * other of this run that runs, and the other runs' on the host
+   * (hostStagingWriters). What an ended job wrote is already out of the free
+   * room.
+   */
   private stagingSharers(id: string): number {
     let n = 1;
     for (const j of this.jobs.values()) if (j.id !== id && j.state === "running") n += 1;
-    return n;
+    const registry = this.o.registry ?? (process.env.SWARM_RUNS_DIR ? join(process.env.SWARM_RUNS_DIR, "registry.json") : undefined);
+    return n + hostStagingWriters(registry, this.S, storePaths(this.S).staging).writers;
+  }
+
+  private writersSaid: number | null = null;
+  /**
+   * How many of this run's jobs write to its staging now, written beside it
+   * (STAGING_WRITERS) whenever that changes, for the other runs on the host
+   * to share the disk's room with them. A file that cannot be written leaves
+   * the others counting this run's declared workers.
+   */
+  private publishWriters(): void {
+    const n = [...this.jobs.values()].filter((j) => j.state === "running").length;
+    if (n === this.writersSaid) return;
+    const dir = storePaths(this.S).staging;
+    const tmp = join(dir, `${STAGING_WRITERS}.${process.pid}.tmp`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify({ v: 1, run: this.o.run, pid: process.pid, writers: n, at: new Date().toISOString() })}\n`);
+      renameSync(tmp, join(dir, STAGING_WRITERS));
+      this.writersSaid = n;
+    } catch (err) {
+      this.log(`how many jobs write to the staging (${n}) could not be written beside it: ${(err as Error).message}`);
+    }
   }
 
   /** The kickoff's plan: every recipe the census found applies, run once the hub is up. */
