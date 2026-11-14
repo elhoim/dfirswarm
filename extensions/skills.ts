@@ -1760,7 +1760,7 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
    * The hand-off's skills line, at most `max` characters (the header it goes in is 2,000 beside the note): the notes the
    * compaction took out, then the cards of those notes and of the tools the seat ran (shown once in the run, so carried
    * here), the last first, each whole, as many as fit; and, when the prompt lost the index, where it is (never the index
-   * itself, which ran to thousands of characters).
+   * itself, which ran to thousands of characters), first, so that it is the last line a header with less room drops.
    */
   function handoffLine(max: number = HANDOFF_SKILLS_MAX): string {
     const ids = ledger.handoffIds();
@@ -1779,10 +1779,11 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
       for (const [ref, c] of [...cardsHeld.entries()].reverse()) take(ref, c);
     }
     const head = "Rules you worked with (shown once in the run; whole note: skill(id)):";
-    // The account of the notes read, then whole cards while they fit; the index's line last, always.
+    // The index's line first, always (it is short, and a header with less room drops lines from the end), then the
+    // account of the notes read, then whole cards while they fit.
     const render = (account: string): { text: string; rows: number } => {
-      const lines: string[] = [];
-      let room = max - (indexLine ? indexLine.length + 1 : 0);
+      const lines: string[] = indexLine && indexLine.length <= max ? [indexLine] : [];
+      let room = max - (lines.length ? indexLine.length + 1 : 0);
       if (account && account.length <= room) {
         lines.push(account);
         room -= account.length + 1;
@@ -1796,7 +1797,6 @@ export function registerSkills(pi: ExtensionAPI, deps: SkillsDeps): SkillsHandle
         used += row.length + 1;
       }
       if (rows.length) lines.push(`${head}\n${rows.join("\n")}`);
-      if (indexLine) lines.push(indexLine);
       return { text: lines.join("\n"), rows: rows.length };
     };
     // The whole account (sizes, done or not) when a card still fits beside it; else the ids, as many as leave room for one.
