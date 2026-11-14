@@ -195,7 +195,7 @@ if os.path.isfile(toolbox_path):
             met = by if r.get("met") is True else ("not met" + (f" ({failed} is there and failed a test input)" if failed else f" (none of {wanted})"))
             rows.append(f"| {r.get('capability')} | {met} | {r.get('use', '')} |")
         if any(r.get("met") is not True for r in req):
-            rows += ["", "A capability not met is not a reason to stop at not determinable: a program the operator supplies runs in a job (`job_run` with `programs`), and asking for one is an acquisition ask."]
+            rows += ["", "A capability not met is not a reason to stop at not determinable: a program the operator supplies runs in a job (`job_run` with `programs`), and asking for one is an acquisition ask. This table is the kickoff's and is not updated: a program supplied after the start is said on the board (SUPPLIED PROGRAM TESTED, or NOT TESTED), with whether its known-answer test passed, and in `supplied-capabilities.json`."]
         toolbox_section += "\n".join(rows) + "\n\n"
 # A case can need a library this host does not have — the BelkaCTF #6 run met a
 # BitLocker volume with the recovery key in hand and no reader on the machine,
