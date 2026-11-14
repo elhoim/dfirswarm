@@ -281,3 +281,37 @@ test("words common to a tool's notes tell none apart: a regkv call under Microso
   assert.equal(got(call("regkv", { hive: W + "SOFTWARE", key: "Microsoft\\Windows NT\\CurrentVersion" })), "windows-forensics:registry/system-profile (args)");
 });
 
+test("a first-call card names the tool it comes with, or the tool's manifest speaks; a value the card itself names is not another kind (D3)", async () => {
+  const index = await indexOf(PACK_IDS);
+  const fresh = new Set<string>();
+  const none = () => false;
+  // jumplist with the path form its own cards write: a card that names jumplist, never registry/devices' card about USBSTOR.
+  const j = chooseCard(index, call("jumplist", { path: "inputs/C/Users/u/AppData/Roaming/Microsoft/Windows/Recent/AutomaticDestinations/5f7b5f1e01b83767.automaticDestinations-ms" }), fresh, none);
+  assert.equal(j?.kind, "note");
+  if (j?.kind === "note") {
+    assert.notEqual(j.note.id, "registry/devices");
+    assert.match(j.note.card, /(?<![A-Za-z0-9_])jumplist(?![A-Za-z0-9_])/);
+  }
+  // registry_recover: no card of its notes names it, so its own manifest, never artifacts/shellbags' card.
+  assert.deepEqual(chooseCard(index, call("registry_recover", { hive: "inputs/C/Windows/System32/config/SOFTWARE" }), fresh, none), { kind: "manifest", name: "registry_recover" });
+  // Every first call of a tool few notes name: the card shown names the tool.
+  const naming: string[] = [];
+  for (const [tool, notes] of index.byTool) {
+    if (notes.length > CARD_TOOL_SPREAD) continue;
+    const got = chooseCard(index, call(tool, { path: "inputs/x/item0001" }), fresh, none);
+    if (got?.kind === "note" && !new RegExp(`(?<![A-Za-z0-9_])${tool}(?![A-Za-z0-9_])`).test(got.note.card)) naming.push(`${tool}: ${got.note.pack.id}:${got.note.id}`);
+  }
+  assert.deepEqual(naming, []);
+  // tcrypt_header with header "hidden", which the VeraCrypt card says to try: that card, not identify/by-format.
+  const vc = index.notes.find((n) => n.pack.id === "encrypted-containers" && n.id === "volumes/veracrypt-truecrypt")!;
+  for (const header of ["hidden", "backup", "normal"]) {
+    const got = chooseCard(index, call("tcrypt_header", { source: "inputs/vol.hc", password_file: "work/a/pw", header }), fresh, none);
+    assert.ok(got?.kind === "note" && got.note === vc, `${header}: ${got?.kind === "note" ? got.note.id : got?.kind}`);
+  }
+  // Rules the cut to 400 characters had dropped and seats use, each back in its card.
+  const card = (pack: string, id: string) => index.notes.find((n) => n.pack.id === pack && n.id === id)!.card;
+  assert.match(card("network-forensics", "metadata/fingerprints"), /checksum_mode is none unless set to all \(record it\)/);
+  assert.match(card("ransomware-response", "recovery/what-is-possible"), /compressed formats read high/);
+  assert.match(card("cloud-forensics", "kubernetes/audit"), /principal is the requester, impersonated_principal who it ran as/);
+  assert.match(card("encrypted-containers", "keys/recovery-key-scan"), /unless max_bytes_per_file is raised/);
+});

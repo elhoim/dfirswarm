@@ -1,7 +1,7 @@
 {
   "id": "network-forensics",
   "name": "Network Forensics Pack",
-  "version": "1.14.18",
+  "version": "1.14.19",
   "description": "Method and tooling for packet captures and web, proxy and firewall logs: what a capture can and cannot show, transaction and object reconstruction, DNS and TLS metadata when the payload is encrypted, periodicity and volume as leads to test, and tying the wire to host evidence. Flow records in an nfcapd file (NetFlow v5, v9, IPFIX) are read with nfdump.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -38,7 +38,7 @@
       "skills/logs/web-proxy-firewall.md": "9f618537168bb21d0fb90f24233ebb76f48efa3359d8ffd0072233097f62a27a",
       "skills/metadata/dns-tls.md": "d9c1541f9fa04e447419c1ab910ba5e8bacd3d5de82c3d37df0403b91b38c942",
       "skills/metadata/encrypted-dns.md": "b2b9dbeb490f3c3191b423a1d07457a29aeb6cac18c23705522247f65e6d28b9",
-      "skills/metadata/fingerprints.md": "37d54468595e31fbb3d524a8714a79762b73878a6fa8a5ff7ae9ba866c83d0b3",
+      "skills/metadata/fingerprints.md": "a0c7c726c033d373a78bbd063b5084032bc9654407ba855b452cc972d7346878",
       "skills/network/router.md": "c636e7d72305b9821a864c829ad7a963916e5f3d5ca2f43a102a0de810df43f5",
       "skills/sessions/objects.md": "acc56b8e363768252c0124f3275832bce2103b6e0f6a6adefb3d105598c9cc23",
       "skills/sessions/quic-http3.md": "b5a3fca4704b30c20b354bc394f29122f61bbb2fb6afbcc97c6879016d7edb6e",

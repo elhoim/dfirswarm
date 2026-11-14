@@ -784,10 +784,14 @@ const same = (a: unknown, b: unknown): boolean => {
 /** How a call and a note's card agree: the pairs it gives as the card writes them, its words in the card's forms, and the lead's in the note's subject. */
 type Agreement = { pairs: string[]; words: string[]; lead: string[] };
 
+/** A value the card itself writes as one to give ("try \"hidden\" and \"backup\" separately"): a call that gives it is not another kind. */
+const cardNamesValue = (card: string, v: unknown): boolean => kindValue(v) && new RegExp(`"${escapeRe(v)}"`, "i").test(card);
+
 function agreement(note: CardNote, call: CardCall, name: string, callWords: Set<string>, leadWords: Set<string>, common: (w: string) => boolean): Agreement | null {
   const forms = call.tool ? (note.examples.get(name) ?? []) : [];
-  // A form the call contradicts (it gives another value of a kind the form names) is not the call's; a note whose every form is contradicted is not either.
-  const kept = forms.filter((f) => !Object.entries(f).some(([k, v]) => kindValue(v) && call.args[k] !== undefined && !same(call.args[k], v)));
+  // A form the call contradicts (it gives another value of a kind the form names, and one the card does not name) is not
+  // the call's; a note whose every form is contradicted is not either.
+  const kept = forms.filter((f) => !Object.entries(f).some(([k, v]) => kindValue(v) && call.args[k] !== undefined && !same(call.args[k], v) && !cardNamesValue(note.card, call.args[k])));
   if (forms.length && !kept.length) return null;
   const pairs = new Set<string>();
   const words = new Set<string>();
@@ -832,7 +836,7 @@ export function commonWords(notes: readonly CardNote[]): (w: string) => boolean 
  * form's own, not common to the tool's notes (commonWords; 2 a word), or works a lead whose words the note's subject
  * holds (1 a word). What most of the notes share tells none apart: a pair or a word counts only when at most half of them
  * have it. The note matches with 2 or more, strictly more than any other. `fit` is every note the call does not
- * contradict (a provider another than the one a note's every form names).
+ * contradict (a provider another than the one a note's every form names, and its card does not name).
  */
 export function matchCard(call: CardCall, name: string, notes: readonly CardNote[], leadText = ""): { best: CardNote | null; score: number; by: "args" | "lead" | null; fit: CardNote[] } {
   const callWords = new Set(cardWords(call.tool ? stringsOf(call.args).join(" ") : call.text));
@@ -872,8 +876,9 @@ export type CardChoice =
 /**
  * The card a call brings, by what the seat has seen (`ever`: `note:<key>`, `tool:<name>`) and holds. The note the call
  * matches (matchCard), if the seat neither holds it nor was shown its card. Else, on the first call of the tool (or of
- * the program): the most specific note's card when at most CARD_TOOL_SPREAD notes name it and the call contradicts none
- * of them; else the rules its notes give of it (toolRules); else, for a tool no note names, its own manifest's. Never
+ * the program): the most specific note's card that names the tool when at most CARD_TOOL_SPREAD notes name it and the
+ * call contradicts none of them (the tool's own manifest when no card of them names it); else the rules its notes give
+ * of it (toolRules); else, for a tool no note names, its own manifest's. Never
  * the bare list of note ids ("Notes that name regkv: ... and 11 more"), which was 9 of 39 cards of one run and
  * followed by no load. A command's programs are tried in their order. `ever` is not changed here.
  */
@@ -886,9 +891,12 @@ export function chooseCard(index: CardIndex, call: CardCall, ever: ReadonlySet<s
     if (m.best && open(m.best)) return { kind: "note", name, note: m.best, by: m.by ?? "args" };
     if (ever.has(`tool:${name}`)) continue;
     if (all.length && all.length <= CARD_TOOL_SPREAD) {
-      // One of a few notes is the method: the most specific the call does not contradict, unless the seat holds it.
-      const top = m.fit[0];
+      // One of a few notes is the method: the most specific the call does not contradict and whose card names the tool,
+      // unless the seat holds it. A card that does not name the tool (another tool's rules) is not shown for it: where
+      // none does, the tool's own manifest says what it is.
+      const top = m.fit.find((n) => mentionRe(name).test(n.card));
       if (top && open(top)) return { kind: "note", name, note: top, by: "first" };
+      if (!top && call.tool && !all.some((n) => mentionRe(name).test(n.card))) return { kind: "manifest", name };
       continue;
     }
     if (!all.length) return { kind: "manifest", name };
