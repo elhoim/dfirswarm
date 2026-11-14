@@ -5241,7 +5241,6 @@ export default function (pi: ExtensionAPI) {
       spentUsd: status?.this_agent?.spent_usd ?? 0,
       capUsd: status?.budget.cap_per_agent_usd ?? undefined,
       ...(leads ? { leads: leads.text } : {}),
-      ...(skills?.handoffLine() ? { skills: skills.handoffLine() } : {}),
       // What the prompt of the run a hand-off starts cannot say, because it changes: a cap that was hit, the tools forged so far.
       ...(status?.over_budget ? { capHit: capHitLine(status) } : {}),
       // Told to stop: the sentinel stands, or a cap-stop run's cap was hit. The header's last paragraph says "work on" otherwise.
@@ -5256,6 +5255,8 @@ export default function (pi: ExtensionAPI) {
       agentId: () => agentId,
       trace: (cwd, tool, args, result) => logEvent(cwd, agentId, tool, args, result),
       handoffFacts,
+      // Built by the seat itself, not read with the hub's facts: a late hub does not take the cards with it.
+      handoffSkills: skills ? (max) => skills!.handoffLine(max) : undefined,
       summaryInput: skills ? (history, turnPrefix) => skills!.summaryInput(history, turnPrefix) : undefined,
       promptsDir: join(dirname(fileURLToPath(import.meta.url)), "..", "prompts"),
       summaryPromptPath: process.env.SWARM_COMPACT_PROMPT?.trim() || undefined,

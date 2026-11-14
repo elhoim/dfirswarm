@@ -612,6 +612,7 @@ async function rig(o: { facts: () => Promise<import("../extensions/self-compact.
     handoffFacts: async () => o.facts(),
     handoffFactsMs: o.factsMs,
     handoffFactsGraceMs: o.graceMs,
+    ...(o.skills ? { handoffSkills: o.skills } : {}),
     promptsDir: join(REPO, "prompts"),
     ...specsFromEnv({}),
   });
@@ -670,6 +671,41 @@ test("a hand-off note goes at once: with the hub held, the facts follow in a mes
   await stop.fire("session_start", { type: "session_start", reason: "startup" });
   await new Promise((r) => setTimeout(r, 500));
   assert.match(stop.sent[1]!.content, /Sentinel: PRESENT[\s\S]*The swarm is ending, as the lines above say/);
+});
+
+test("the skills line goes with the note when the hub is late or does not answer: the seat builds it, not the hub (D6)", async () => {
+  const { HANDOFF_FACTS_TYPE } = await import("../extensions/self-compact.ts");
+  const SKILLS = "Rules you worked with (shown once in the run; whole note: skill(id)):\n- registry/clock: regkv: Bias is minutes west of UTC.";
+  const rooms: number[] = [];
+  const skills = (max: number) => {
+    rooms.push(max);
+    return SKILLS.length <= max ? SKILLS : "";
+  };
+  // The hub never answers: the note carries the cards, and the facts follow as unknown without them.
+  const dead = await rig({ facts: () => new Promise(() => undefined), graceMs: 100, factsMs: 600, skills });
+  dead.withReadyNote("NEXT ACTION: x");
+  await dead.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(dead.sent.length, 2);
+  assert.ok(dead.sent[0]!.content.includes(SKILLS), dead.sent[0]!.content);
+  assert.ok(dead.sent[0]!.content.length - "\nNEXT ACTION: x".length <= 2000);
+  assert.equal(dead.sent[1]!.customType, HANDOFF_FACTS_TYPE);
+  assert.ok(!dead.sent[1]!.content.includes(SKILLS), "said once, with the note");
+  // The hub fails at once: the header says unknown, and the cards are there.
+  const failed = await rig({ facts: () => Promise.reject(new Error("down")), skills });
+  failed.withReadyNote("NEXT ACTION: y");
+  await failed.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.match(failed.sent[0]!.content, /unknown \(the hub could not be reached/);
+  assert.ok(failed.sent[0]!.content.includes(SKILLS));
+  // The hub answers: the register goes first and the skills line is asked for the room it leaves.
+  const quick = await rig({ facts: async () => ({ ...known, leads: "Yours: L-1 active.\nFinish: not ready (2)" }), skills });
+  quick.withReadyNote("NEXT ACTION: z");
+  await quick.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(quick.sent.length, 1);
+  assert.match(quick.sent[0]!.content, /\nYours: L-1 active\.\nFinish: not ready \(2\); finish status lists what holds it\.\nRules you worked with/);
+  assert.ok(rooms.every((r) => r > 0 && r < 2000), JSON.stringify(rooms));
 });
 
 test("the summary starts on a copy at the notice line, and the compaction summarizes only what came after it", async () => {

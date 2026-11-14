@@ -152,7 +152,8 @@ export type HandoffFacts = {
   /**
    * The pack skills this seat had loaded before the compaction (extensions/
    * skills.ts): a compaction summarises their bodies away, so the seat is told
-   * which to load again if it still needs them.
+   * which to load again if it still needs them. Used when the seat gives no
+   * SelfCompactDeps.handoffSkills, which builds the line for the room left.
    */
   skills?: string;
   /** The facts could not be read (the hub unreachable): the header says unknown, never zeros or absent. */
@@ -209,6 +210,11 @@ export type SelfCompactDeps = {
   /** One trace line; the extension's own `logEvent`, so attribution and the collector are the same. */
   trace: (cwd: string, tool: string, args: Record<string, unknown>, result: unknown) => Promise<void>;
   handoffFacts: (cwd: string, agentId: string) => Promise<HandoffFacts>;
+  /**
+   * The hand-off's skills line for the room the header leaves (skills.ts handoffLine), built here from what the seat
+   * holds and not read with the hub's facts: a hub that is late or does not answer must not take the cards with it.
+   */
+  handoffSkills?: (max: number) => string;
   /** How long the facts are waited for in all before they follow as unknown (HANDOFF_FACTS_MS). */
   handoffFactsMs?: number;
   /** How long the note waits for them before it goes without them (HANDOFF_FACTS_GRACE_MS). */
@@ -1062,7 +1068,14 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     const quick = await Promise.race([read.catch(() => ({ claims: [], unread: {}, ledgerTotal: 0, ledgerMine: 0, sentinel: false, spentUsd: 0, unknown: true }) as HandoffFacts), new Promise<typeof late>((r) => (timer = setTimeout(() => r(late), grace)))]);
     if (timer) clearTimeout(timer);
     const facts: HandoffFacts = quick === late ? { claims: [], unread: {}, ledgerTotal: 0, ledgerMine: 0, sentinel: false, spentUsd: 0, pending: true } : quick;
-    const header = handoffHeader(agentId(), cycle, facts, hadNote, reason);
+    const skillsFor = deps.handoffSkills ? (max: number) => {
+      try {
+        return deps.handoffSkills!(max);
+      } catch {
+        return "";
+      }
+    } : undefined;
+    const header = handoffHeader(agentId(), cycle, facts, hadNote, reason, skillsFor);
     const content = hadNote && h ? `${header}\n${h.note}` : header;
     const details = { id: h?.id, cycle, note: hadNote ? h?.note : undefined, reason, facts };
     const send = (customType: string, text: string, more: Record<string, unknown>) => {
