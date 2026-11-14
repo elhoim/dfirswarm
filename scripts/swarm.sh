@@ -14,17 +14,20 @@ set -euo pipefail
 
 # The launcher runs from a frozen copy of itself. Bash reads a script as it goes: a start or a stop, which run for
 # minutes, read on from the checkout as it was being edited (a start that had worked ended "line 12500: syntax error",
-# exit 2). So `start` and `stop` copy this file first and run the copy, and a VM run's frozen host copy
-# (freeze_harness) takes these same bytes for scripts/swarm.sh: the launcher and the hub run one file. The block is
-# one command, read whole before it runs; the copy goes when the launcher ends, and its status is the launcher's.
+# exit 2). So `start` and `stop` copy this file first and exec the copy (the same process: its pid, its signals and
+# its status are the launcher's), and a VM run's frozen host copy (freeze_harness) takes these same bytes for
+# scripts/swarm.sh: the launcher and the hub run one file. The block is one command, read whole before it runs. A copy
+# is named for its launcher's pid and kept while it runs; the next start or stop removes those whose launcher ended.
 if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop ) ]]; then
-  _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.XXXXXX" 2>/dev/null)" || _launcher_dir=""
+  for _launcher_old in "${TMPDIR:-/tmp}"/dfirswarm-launcher.*; do
+    [[ -d "$_launcher_old" ]] || continue
+    _launcher_pid="${_launcher_old##*/dfirswarm-launcher.}"; _launcher_pid="${_launcher_pid%%.*}"
+    if [[ "$_launcher_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$_launcher_pid" 2>/dev/null; then rm -rf "$_launcher_old" 2>/dev/null || true; fi
+  done
+  _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.$$.XXXXXX" 2>/dev/null)" || _launcher_dir=""
   if [[ -n "$_launcher_dir" ]] && cp "${BASH_SOURCE[0]}" "$_launcher_dir/swarm.sh" 2>/dev/null; then
-    _launcher_rc=0
     SWARM_LAUNCHER_COPY="$_launcher_dir/swarm.sh" SWARM_LAUNCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
-      bash "$_launcher_dir/swarm.sh" "$@" || _launcher_rc=$?
-    rm -rf "$_launcher_dir"
-    exit "$_launcher_rc"
+      exec bash "$_launcher_dir/swarm.sh" "$@"
   fi
   [[ -z "$_launcher_dir" ]] || rm -rf "$_launcher_dir"
 fi
