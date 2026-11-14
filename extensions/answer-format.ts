@@ -139,12 +139,34 @@ export function looksLikeSentence(line: string): boolean {
   return words.length >= 4 && /\b(?:is|was|are|were|has|have|shows?|holds?)\b/i.test(line);
 }
 
-/** How many digests of a format's hash lengths a line holds: a second one on the first line of an md5 answer is a second candidate. */
+/**
+ * A digest standing as its own value: a run of hex digits with nothing next to it but the line's ends, a space, a
+ * format's separator, =, a bracket, a quote or an emphasis mark (a full stop only where a sentence ends). One joined
+ * to other characters is part of a name: a sample named by its own digest (<md5>.exe) holds one, and it is not a
+ * second candidate.
+ */
+const STANDALONE_DIGEST = /(?<=^|[\s_:/|,;@=*()[\]{}<>"'`])[0-9a-f]{32,128}(?=$|[\s_:/|,;@=*()[\]{}<>"'`]|[.!?](?:\s|$))/gi;
+
+/**
+ * How many digests of a format's hash lengths a line holds, each standing as its own value: a second one on the first
+ * line of an md5 answer is a second candidate. A line in the format counts its hash pieces, and in a name piece only a
+ * digest that stands alone beside other words (a second candidate written into it); a name piece that is one digest
+ * and nothing else is the name the question asks for. A digest inside a name (<md5>.exe_<md5>) is never counted: on a
+ * Name_md5(file) question such an answer was refused with extra_digests 2.
+ */
 function digestsIn(f: AnswerFormat, line: string): { held: number; asked: number } {
   const asked = f.parts.filter((p) => p === "hash").length;
   if (!asked) return { held: 0, asked: 0 };
   const lengths = new Set(f.pieces.filter((p) => p.kind === "hash").map((p) => Number(/\{(\d+)\}/.exec(p.re)?.[1] ?? 32)));
-  const held = [...line.matchAll(/(?<![0-9a-f])[0-9a-f]{32,128}(?![0-9a-f])/gi)].filter((m) => lengths.has(m[0].length)).length;
+  const standalone = (s: string) => [...s.matchAll(STANDALONE_DIGEST)].filter((m) => lengths.has(m[0].length)).length;
+  const whole = new RegExp(`^${f.pieces.map((p) => `${p.join}(${p.re})`).join("")}$`, "i").exec(line);
+  if (!whole) return { held: standalone(line), asked };
+  let held = asked;
+  f.pieces.forEach((p, i) => {
+    const got = (whole[i + 1] ?? "").trim();
+    if (p.kind === "hash" || /^[0-9a-f]+$/i.test(got)) return;
+    held += standalone(got);
+  });
   return { held, asked };
 }
 
