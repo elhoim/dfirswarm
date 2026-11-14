@@ -75,6 +75,14 @@ export type ManifestView = {
   dir(rel: string): Promise<{ files: number; bytes: number } | null>;
   /** Every file, sorted by path, read as a stream and handed on a piece of the index at a time. */
   files(): AsyncGenerator<IndexedRow[]>;
+  /**
+   * The files directly in a directory ("" for the top of the tree), sorted by
+   * path, and the names of the directories in it: the index's lines for that
+   * directory alone, each directory under it passed over by a seek, never the
+   * index whole. At most `limit` files; `more` says there were others. (The
+   * blocks read are kept for the call: a directory's own range of the index.)
+   */
+  children(rel: string, limit?: number): Promise<{ files: IndexedRow[]; dirs: string[]; more: boolean }>;
 };
 
 export const TOP_MAX = 200;
@@ -195,8 +203,14 @@ const BLOCK = 4096;
 /** A range this small is read whole and searched line by line. */
 const SCAN = 8192;
 
-/** The line whose first field is `key`, found by bisection over the file's bytes: a few blocks read, never the file. */
-async function findLine(fh: FileHandle, size: number, key: string): Promise<string | null> {
+/** A line's first field: a file's path, or a directory's prefix with its slash. */
+function keyOf(text: string): string {
+  const tab = text.indexOf("\t");
+  return tab < 0 ? text : text.slice(0, tab);
+}
+
+/** The index read a block at a time, the blocks kept for the reader's life: a line at a byte, and where a key would be. */
+function indexReader(fh: FileHandle, size: number) {
   const blocks = new Map<number, Buffer>();
   const block = async (i: number): Promise<Buffer> => {
     let b = blocks.get(i);
@@ -234,10 +248,38 @@ async function findLine(fh: FileHandle, size: number, key: string): Promise<stri
     const end = nl < 0 ? size : nl;
     return { text: (await bytes(start, end)).toString("utf8"), next: end + 1 };
   };
-  const keyOf = (text: string) => {
-    const tab = text.indexOf("\t");
-    return tab < 0 ? text : text.slice(0, tab);
+  /**
+   * Where the first line whose first field is at or after `key` starts (as
+   * JavaScript compares strings, the order the index is sorted in), or the
+   * file's size when every line is before it. By bisection: a few blocks.
+   */
+  const lowerBound = async (key: string, from = 0): Promise<number> => {
+    // Every line before lo is before the key (the caller's `from` is a line start it knows that of); the line at hi (or the end) is not.
+    let lo = from;
+    let hi = size;
+    while (hi - lo > SCAN) {
+      const mid = lo + ((hi - lo) >> 1);
+      const nl = await breakFrom(mid);
+      const p = nl < 0 ? size : nl + 1;
+      // No line starts after mid and before hi: what is left is a line or two, read line by line.
+      if (p >= hi) break;
+      const line = await lineAt(p);
+      if (keyOf(line.text) < key) lo = line.next;
+      else hi = p;
+    }
+    for (let at = lo; at < hi; ) {
+      const line = await lineAt(at);
+      if (keyOf(line.text) >= key) return at;
+      at = line.next;
+    }
+    return hi;
   };
+  return { breakFrom, lineAt, lowerBound };
+}
+
+/** The line whose first field is `key`, found by bisection over the file's bytes: a few blocks read, never the file. */
+async function findLine(fh: FileHandle, size: number, key: string): Promise<string | null> {
+  const { breakFrom, lineAt } = indexReader(fh, size);
   // The line sought starts in [lo, hi); lo is always the start of a line.
   let lo = 0;
   let hi = size;
@@ -263,6 +305,12 @@ async function findLine(fh: FileHandle, size: number, key: string): Promise<stri
     at = line.next;
   }
   return null;
+}
+
+/** A directory's own files and the names of its directories, the prefix of every path under it. */
+function prefixOf(rel: string): string {
+  const r = rel.replace(/^\/+|\/+$/g, "");
+  return r ? `${r}/` : "";
 }
 
 function fileView(manifestPath: string, head: ManifestHead): ManifestView {
@@ -294,6 +342,44 @@ function fileView(manifestPath: string, head: ManifestHead): ManifestView {
     async dir(rel) {
       const d = (await lookup([`${rel.replace(/\/+$/, "")}/`])).map(parseLine)[0];
       return d && "dir" in d ? { files: d.files, bytes: d.bytes } : null;
+    },
+    async children(rel, limit = Number.POSITIVE_INFINITY) {
+      const files: IndexedRow[] = [];
+      const dirs: string[] = [];
+      let more = false;
+      if (!head.index.bytes) return { files, dirs, more };
+      const prefix = prefixOf(rel);
+      const size = head.index.bytes;
+      const fh = await open(ix, "r");
+      try {
+        const r = indexReader(fh, size);
+        for (let at = await r.lowerBound(prefix); at < size; ) {
+          const line = await r.lineAt(at);
+          const k = keyOf(line.text);
+          if (!k.startsWith(prefix)) break;
+          const rest = k.slice(prefix.length);
+          const slash = rest.indexOf("/");
+          if (slash < 0) {
+            const f = parseLine(line.text);
+            if (f && "path" in f) {
+              if (files.length >= limit) {
+                more = true;
+                break;
+              }
+              files.push(f);
+            }
+            at = line.next;
+            continue;
+          }
+          // A directory: its own line comes first, and every path under it sorts before <prefix><name>0 ("0" follows "/").
+          const name = rest.slice(0, slash);
+          if (name) dirs.push(name);
+          at = await r.lowerBound(`${prefix}${name}0`, line.next);
+        }
+      } finally {
+        await fh.close();
+      }
+      return { files, dirs, more };
     },
     async *files() {
       if (!head.index.bytes) return;
@@ -341,6 +427,13 @@ export function memoryView(manifest: IndexedManifest, of: { sha256: string; byte
     },
     async *files() {
       if (rows.length) yield [...rows].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    },
+    async children(rel, limit = Number.POSITIVE_INFINITY) {
+      const prefix = prefixOf(rel);
+      const inside = rows.filter((f) => f.path.startsWith(prefix)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      const direct = inside.filter((f) => !f.path.slice(prefix.length).includes("/"));
+      const dirs = [...new Set(inside.map((f) => f.path.slice(prefix.length)).filter((x) => x.includes("/")).map((x) => x.slice(0, x.indexOf("/"))))].sort();
+      return { files: direct.slice(0, limit), dirs, more: direct.length > limit };
     },
   };
 }

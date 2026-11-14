@@ -246,3 +246,68 @@ export function eachPlan(tool: string, each: EachSpec, argv: string[], seconds: 
   return { tool, param: each.param, directory: each.directory, argv, seconds, runs: each.files.map((file, k) => ({ file, args: argsFile(k + 1) })) };
 }
 
+
+/** One run of a tool, as the seat's own runner gives it (protocol-core.ts runForgedTool). */
+export type EachRun = { ok: boolean; exit_code: number | null; stdout: string; stderr: string; timed_out: boolean; duration_ms?: number };
+
+/**
+ * The seat's side of a call run once per file (a pack tool called directly,
+ * IMPROVEMENT-PLAN-2 D4): the same plan and the same one answer as the
+ * worker's script (EACH_SCRIPT), the runs one after another under one clock
+ * of `seconds`. `runOne` runs the tool with one file's arguments and the
+ * seconds left. The answer is complete only when every file was run, every
+ * run exited 0, and no run's answer said it was not complete.
+ */
+export async function runEachDirect(tool: string, each: EachSpec, args: Record<string, unknown>, seconds: number, runOne: (args: Record<string, unknown>, secondsLeft: number) => Promise<EachRun>): Promise<EachRun> {
+  const started = Date.now();
+  const deadline = started + Math.max(5, seconds) * 1000;
+  const runs: Array<Record<string, unknown>> = [];
+  const notRun: string[] = [];
+  const basis: string[] = [];
+  let inline = 0;
+  let stopped = "";
+  for (const [k, file] of each.files.entries()) {
+    const left = Math.floor((deadline - Date.now()) / 1000);
+    if (stopped || left < 1) {
+      stopped ||= "clock";
+      notRun.push(file);
+      continue;
+    }
+    const r = await runOne({ ...args, [each.param]: file }, left);
+    let ans: unknown = null;
+    try {
+      ans = r.stdout.length <= 8 * 1024 * 1024 ? JSON.parse(r.stdout.trim() || "null") : null;
+    } catch {
+      ans = null;
+    }
+    const row: Record<string, unknown> = { file, n: k + 1, exit: r.exit_code };
+    if (ans && typeof ans === "object" && !Array.isArray(ans) && typeof (ans as { status?: unknown }).status === "string") row.status = (ans as { status: string }).status;
+    if (r.timed_out) {
+      row.stopped_by = "clock";
+      stopped = "clock";
+    }
+    const a = ans as { status?: unknown; complete?: unknown; partial?: unknown; ok?: unknown } | null;
+    const settled = Boolean(a && typeof a === "object" && !Array.isArray(a) && !(typeof a.status === "string" && !["complete", "ok", "success", "done"].includes(a.status.toLowerCase())) && a.complete !== false && a.partial !== true && a.ok !== false);
+    const ok = r.exit_code === 0 && settled && !r.timed_out;
+    row.settled = ok;
+    if (!ok) basis.push(`${file}: ${r.exit_code !== 0 ? `exit ${r.exit_code}` : r.timed_out ? "stopped" : "its answer is not complete"}`);
+    const size = Buffer.byteLength(r.stdout);
+    if (ans !== null && size <= 256 * 1024 && inline + size <= 2 * 1024 * 1024) {
+      row.result = ans;
+      inline += size;
+    } else if (r.stdout.trim()) row.output = `${r.stdout.slice(0, 2000)}${r.stdout.length > 2000 ? "…" : ""}`;
+    if (!ok && r.stderr.trim()) row.stderr = r.stderr.trim().split("\n").slice(-3).join("\n").slice(0, 600);
+    runs.push(row);
+  }
+  if (notRun.length) basis.push(`${notRun.length} file(s) not run (${stopped || "clock"})`);
+  const answer: Record<string, unknown> = { tool, each: { param: each.param, directory: each.directory, files: each.files.length, ran: runs.length }, status: basis.length ? "partial" : "complete", runs };
+  if (basis.length) answer.status_basis = basis.slice(0, 32);
+  if (notRun.length) answer.not_run = notRun;
+  const anyOk = runs.some((x) => x.exit === 0);
+  return { ok: anyOk, exit_code: anyOk ? 0 : 1, stdout: `${JSON.stringify(answer, null, 1)}\n`, stderr: "", timed_out: stopped === "clock", duration_ms: Date.now() - started };
+}
+
+/** What a direct call run once per file says of it, in one sentence (each run's answer is in the one answer, not in a directory of its own). */
+export function eachDirectWords(each: EachSpec): string {
+  return `${each.param} named the directory ${each.directory}, so the tool was run once for each of the ${each.files.length} file(s) in it it reads; its answer lists every run and its status.`;
+}

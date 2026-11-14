@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.17.19",
+  "version": "1.17.20",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -161,9 +161,9 @@
       "tools/qr_read/run.py": "29873d36248b05af03c3415a67ce98e15520214d7e15396d14b2f4362712f281",
       "tools/sig_carve/manifest.json": "eb62fd0af747389ce66626ebb58d7625e14af86cb1ab2bcb6ad937862dd68966",
       "tools/sig_carve/run.py": "0dc8c850f15d4e55950c85842ae6c374918b76c732629238365132ec16383fc9",
-      "tools/sqlite_query/manifest.json": "77d64fa4487c597e64ba0dc0b3d0d4e6084c1e2769ed9800319abee9cd6c6def",
+      "tools/sqlite_query/manifest.json": "08f833a709b18ec83f741e32e0f9378fa8d315dea4064e653aa1d1c136fcb304",
       "tools/sqlite_query/run.py": "2269eb623ae17925911be46e72d9368776b2a5871cc7ba5df32dcc72fbbeff2e",
-      "tools/sqlite_snapshot/manifest.json": "2fcc99a7e72fb2163ce8c8efbf300674bbed446f14fbed3abc74af04afab061b",
+      "tools/sqlite_snapshot/manifest.json": "b9f7bdb59b21d120069b9cc55d0e0d95ab12549a95c3b3178e47e19317ebf669",
       "tools/sqlite_snapshot/run.py": "cd96f503cffa9b8e30c8b2dada3a97252b38ec07c669eded9298ba93fe8393c3",
       "tools/timeline_super/manifest.json": "b598854fab31dbee3702f5714cd2f4183f20fcebedcf15f3e692cddc21aa9afd",
       "tools/timeline_super/run.py": "b2f6c73a2d98995d9462debfa973bcef1c88ba53a8c3ceaac997fa14b5591e3c",

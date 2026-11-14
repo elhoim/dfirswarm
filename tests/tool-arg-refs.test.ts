@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { argRefsWords, resolveToolArgs } from "../scripts/tool-arg-refs.ts";
+import { argRefsWords, directToolArgs, resolveToolArgs, withOut } from "../scripts/tool-arg-refs.ts";
 
 const S = mkdtempSync(join(tmpdir(), "tool-arg-refs-"));
 after(() => rmSync(S, { recursive: true, force: true }));
@@ -64,4 +64,27 @@ test("hostile shapes do not throw: deep nesting, a NUL, a huge string, odd ids",
   assert.equal(run({ f: "job:j000007/a\0b" }).ok, false);
   assert.ok(run({ f: `job:${"x".repeat(100000)}` }).ok, "not a job id: left as it is");
   assert.deepEqual((run({ f: "job:J000007/x", g: "jobs:j000007/x", h: "$OUTSIDE/x", i: "x$OUT/y" }) as { args: unknown }).args, { f: "job:J000007/x", g: "jobs:j000007/x", h: "$OUTSIDE/x", i: "x$OUT/y" });
+});
+
+test("a tool called directly gets what job_run gives it: references made paths, $OUT and {OUT} the seat's own directory, a missing key and a missing file refused, a directory run once per file", async () => {
+  // Sealed, as the seat's directory shows a committed job: its manifest is there.
+  writeFileSync(join(S, "store/jobs/j000007/manifest.json"), JSON.stringify({ v: 1, job: "j000007", files: [{ path: "a dir/hive file", path_b64: Buffer.from("a dir/hive file").toString("base64"), bytes: 1, sha256: "0".repeat(64), mode: "444" }], dirs: [], rejected: [], totals: { files: 1, bytes: 1 } }));
+  const man = { params: { hive: { type: "string", required: true, description: "The hive file to read." }, out_dir: { type: "string", description: "Where to write." }, prog: { type: "string", description: "A program." } } };
+  const ok = await directToolArgs(S, "a1", "t", { hive: "job:j000007/a dir/hive file", out_dir: "$OUT/x y", prog: "import:mat-1/tool.bin" }, man);
+  assert.ok(ok.ok, (ok as { reason?: string }).reason);
+  if (!ok.ok) return;
+  assert.deepEqual(ok.args, { hive: "store/jobs/j000007/out/a dir/hive file", out_dir: "work/a1/x y", prog: "store/imports/mat-1/out/tool.bin" });
+  assert.deepEqual([ok.resolved.map((x) => x.object), ok.each], [["job:j000007", "import:mat-1"], null]);
+  const braces = await directToolArgs(S, "a1", "t", { hive: "input:set one/disk.img", out_dir: "{OUT}/z" }, man);
+  assert.ok(braces.ok && braces.args.out_dir === "work/a1/z" && braces.args.hive === "inputs/set one/disk.img");
+  const missingKey = await directToolArgs(S, "a1", "t", { out_dir: "{OUT}/z" }, man);
+  assert.deepEqual(missingKey, { ok: false, reason: "tool t needs hive" });
+  const missingFile = await directToolArgs(S, "a1", "t", { hive: "job:j000007/a dir/nope" }, man);
+  assert.equal(missingFile.ok, false);
+  assert.match((missingFile as { reason: string }).reason, /^tool t: hive names job:j000007\/a dir\/nope, and job j000007 has no a dir\/nope .*; the nearest in job j000007: job:j000007\/a dir\/hive file; store_find\(name: "nope"\)/);
+  const unsealed = await directToolArgs(S, "a1", "t", { hive: "job:j000008/x" }, man);
+  assert.match((unsealed as { reason: string }).reason, /whose output is not sealed yet \(it is not sealed yet\)/);
+  const dir = await directToolArgs(S, "a1", "t", { hive: "job:j000007/a dir" }, man);
+  assert.ok(dir.ok && dir.each?.param === "hive" && dir.each.files.length === 1 && dir.each.files[0] === "store/jobs/j000007/out/a dir/hive file", JSON.stringify(dir));
+  assert.deepEqual(withOut({ a: "{OUT}/x", b: ["{OUT}"], c: { d: "keep" } }, "work/a1"), { a: "work/a1/x", b: ["work/a1"], c: { d: "keep" } });
 });

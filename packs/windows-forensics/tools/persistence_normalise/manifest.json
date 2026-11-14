@@ -48,7 +48,7 @@
   "example": "{\"system\": \"work/extracted/SYSTEM\", \"software\": \"work/extracted/SOFTWARE\", \"tasks_dir\": \"work/extracted/Windows/System32/Tasks\", \"limit\": 200}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 12,
+  "version": 13,
   "sha256": "8f7d84e1a1649c62749c325f567a118062ea32442307976a010958b29664da09",
   "use": {
     "names": [
@@ -68,5 +68,34 @@
     "when_args": [
       "write_values"
     ]
-  }
+  },
+  "companions": [
+    {
+      "param": "software",
+      "suffixes": [
+        ".LOG",
+        ".LOG1",
+        ".LOG2"
+      ],
+      "why": "the transaction logs beside the hive, which a dirty hive needs to be read whole"
+    },
+    {
+      "param": "system",
+      "suffixes": [
+        ".LOG",
+        ".LOG1",
+        ".LOG2"
+      ],
+      "why": "the transaction logs beside the hive, which a dirty hive needs to be read whole"
+    },
+    {
+      "param": "ntuser",
+      "suffixes": [
+        ".LOG",
+        ".LOG1",
+        ".LOG2"
+      ],
+      "why": "the transaction logs beside the hive, which a dirty hive needs to be read whole"
+    }
+  ]
 }

@@ -20,7 +20,8 @@ import vm from "node:vm";
 import { manifestNearNames, manifestOf, resolveRef, sealTree, storePaths, type Manifest } from "../scripts/evidence-store.ts";
 import { resolveScope } from "../scripts/job-scope.ts";
 import { forgetHeads, headPath, indexPath, indexStats } from "../scripts/manifest-index.ts";
-import { checkRefs } from "../extensions/ledger-rules.ts";
+import { checkRefs, meantRef } from "../extensions/ledger-rules.ts";
+import { jobView, type JobRecord } from "../scripts/job-service.ts";
 
 const bases: string[] = [];
 test.after(() => {
@@ -161,6 +162,60 @@ test("with a manifest of 200,000 files a ref is resolved from under 1 MB of the 
     assert.deepEqual(readdirSync(join(storePaths(S).jobs, "j000001")), ["manifest.json"]);
   } finally {
     chmodSync(join(storePaths(S).jobs, "j000001"), 0o755);
+  }
+});
+
+test("with a manifest of 200,000 files a directory's own files, a directory meant by a ref and a job's status are read from the index alone (the manifest unreadable), the status in under 50 ms", async (t) => {
+  const { S, manifestPath, under } = large();
+  // Sealed as a seal leaves it: the index is there. Then the manifest is made unreadable: nothing below may read it whole.
+  assert.ok((await resolveRef(S, `job:j000001/${pathOf(3)}`)).ok);
+  chmodSync(manifestPath, 0);
+  try {
+    forgetHeads();
+    const view = (await manifestOf(manifestPath))!;
+    // A directory that holds files: every one of them, as the manifest has them, from its own lines of the index.
+    const d = "tree/Users/u7/AppData/Local/d13";
+    const want: string[] = [];
+    for (let i = 0; i < FILES; i += 1) if (pathOf(i).startsWith(`${d}/`)) want.push(pathOf(i));
+    const before = indexStats.bytes;
+    const own = await view.children(d);
+    const read = indexStats.bytes - before;
+    assert.deepEqual(own.files.map((f) => f.path), [...want].sort());
+    assert.deepEqual(own.files.map((f) => f.sha256), [...want].sort().map((p) => sha(Number(/file-(\d+)/.exec(p)![1]))));
+    assert.deepEqual([own.dirs, own.more], [[], false]);
+    assert.ok(read < 256 * 1024, `${read} bytes of the index read for a directory of ${want.length} files`);
+    // A directory of directories: no file, and each directory named once, passed over by a seek.
+    const local = await view.children("tree/Users/u7/AppData/Local");
+    const dirs = [...new Set(Array.from({ length: FILES }, (_, i) => i).filter((i) => i % 50 === 7).map((i) => `d${i % 997}`))].sort();
+    assert.deepEqual([local.files.length, local.dirs], [0, dirs]);
+    // The top of the tree's directory: the two odd names and one directory; a limit says there were more.
+    const top = await view.children("tree");
+    assert.deepEqual([top.files.map((f) => f.path), top.dirs], [["tree/\\xff.bin", "tree/odd\\\\name.txt"], ["Users"]]);
+    assert.deepEqual((await view.children("tree", 1)).more, true);
+    assert.deepEqual(await view.children("tree/nothing"), { files: [], dirs: [], more: false });
+    // A directory of a job's output named the way the shell shows it is the job, whole.
+    assert.equal(await meantRef(S, "store/jobs/j000001/out/tree/Users/u7/"), "job:j000001");
+    assert.equal(await meantRef(S, "store/jobs/j000001/out/tree/Users/u7x/"), null, "a directory that is not there is not meant");
+    // job_status of the job: from the head, cold (no head in memory) and warm.
+    const job = { id: "j000001", attempt: 1, state: "committed", status: "ok", requester: { agent: "a1" }, spec: { kind: "command", command: "x", inputs: [], scope: "declared", timeout_seconds: 60, network: "off" }, outputs: { path: "store/jobs/j000001/out", files: FILES + 2, bytes: under.get("tree/Users/u0")!.bytes } } as unknown as JobRecord;
+    const times: number[] = [];
+    for (let k = 0; k < 21; k += 1) {
+      if (k === 0) forgetHeads();
+      const at = performance.now();
+      const v = await jobView(S, job);
+      times.push(performance.now() - at);
+      const out = v.outputs as { list: unknown[]; more: string; top: unknown[]; manifest_sha256: string };
+      assert.equal(out.list.length, 20);
+      assert.equal(out.more, `${FILES + 2 - 20} more, every one in store/jobs/j000001/manifest.json`);
+      assert.match(out.manifest_sha256, /^[0-9a-f]{64}$/);
+    }
+    const cold = times[0];
+    const warm = [...times.slice(1)].sort((a, b) => a - b)[10];
+    t.diagnostic(`job_status over ${FILES} files: ${cold.toFixed(1)} ms cold, ${warm.toFixed(2)} ms warm (median of 20); a directory of ${want.length} files: ${read} bytes of the index`);
+    assert.ok(cold < 50, `job_status took ${cold.toFixed(1)} ms cold`);
+    assert.ok(warm < 50, `job_status took ${warm.toFixed(1)} ms warm`);
+  } finally {
+    chmodSync(manifestPath, 0o644);
   }
 });
 

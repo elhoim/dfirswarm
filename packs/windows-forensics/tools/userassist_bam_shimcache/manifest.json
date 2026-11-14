@@ -42,7 +42,7 @@
   "example": "{\"hive\": \"work/extracted/SYSTEM\", \"source\": \"bam\", \"limit\": 200}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 11,
+  "version": 12,
   "sha256": "e6dcdeba585b7af64bfe5e80cd729f30bce2c2d12efad1c8f89725bf09318c3a",
   "use": {
     "names": [
@@ -61,5 +61,16 @@
     "when_args": [
       "write_values"
     ]
-  }
+  },
+  "companions": [
+    {
+      "param": "hive",
+      "suffixes": [
+        ".LOG",
+        ".LOG1",
+        ".LOG2"
+      ],
+      "why": "the transaction logs beside the hive, which a dirty hive needs to be read whole"
+    }
+  ]
 }

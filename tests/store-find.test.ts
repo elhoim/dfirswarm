@@ -9,7 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
-import { jobsListing, storeFind } from "../scripts/store-find.ts";
+import { elsewhereWords, jobsListing, storeFind } from "../scripts/store-find.ts";
+import { JobService } from "../scripts/job-service.ts";
+import { listInputs, localWorker } from "./job-service-worker.ts";
+import { createHash } from "node:crypto";
 import { initSandbox } from "../extensions/protocol.ts";
 
 test("a file is found by a part of its name and by its sha256, across jobs and imports, without a grep", async () => {
@@ -63,4 +66,52 @@ test("the jobs listing: mine by default, the open ones first with why they wait,
   assert.deepEqual(jobsListing(all, { who: "a9", scope: "lead", lead: "L-2", leadOf: (id) => (id === "j000004" ? "L-2" : undefined) }).jobs.map((r) => r.job), ["j000004"]);
   const cut = jobsListing(all, { who: "a0", scope: "all", limit: 2 });
   assert.ok(cut.returned === 2 && /2 more, older/.test(cut.note ?? ""));
+});
+
+test("a path a seat names in one job that another job holds is refused naming that job, the nearest paths in the one it named, and store_find: as an input and as a tool's argument", async () => {
+  const S = mkdtempSync(join(tmpdir(), "store-find-elsewhere-"));
+  try {
+    await initSandbox(S, { reset: true, agentIds: ["a0", "a1"] });
+    for (const d of ["inputs", "tools", "catalog", "work/a1"]) mkdirSync(join(S, d), { recursive: true });
+    writeFileSync(join(S, "inputs", "x.txt"), "x\n");
+    listInputs(S);
+    const body = "import json,sys\nd=json.load(sys.stdin)\nprint(json.dumps({'read': d['path']}))\n";
+    mkdirSync(join(S, "tools", "reader"), { recursive: true });
+    writeFileSync(join(S, "tools", "reader", "run.py"), body);
+    writeFileSync(join(S, "tools", "reader", "manifest.json"), JSON.stringify({ name: "reader", description: "reads one file", params: { path: { type: "string", required: true, description: "The file to read." } }, runtime: "python3", entry: "run.py", timeout_seconds: 60, by: "t", at: "t", version: 1, sha256: createHash("sha256").update(body).digest("hex") }));
+    const svc = new JobService({
+      sandbox: S, run: "s000000", image: "img:test", workers: 2, workerCpus: 1, workerMemoryMib: 512, allowHosts: [], openNet: false,
+      packDirs: [], forging: true, minFreeMb: 1, runWorker: localWorker(), destroyWorker: async () => ({ ok: true }), notify: async () => undefined, identity: async (a) => ({ name: a }),
+    });
+    await svc.start();
+    const until = async (id: string) => {
+      for (let i = 0; i < 400 && svc.jobs.get(id)?.state !== "committed"; i++) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(svc.jobs.get(id)?.state, "committed");
+    };
+    const first = await svc.submit("a1", { kind: "command", command: "mkdir -p \"$OUT/dumps\" && echo t > \"$OUT/dumps/proc.txt\" && echo d > \"$OUT/dumps/other.dmp\"", inputs: [] });
+    const second = await svc.submit("a1", { kind: "command", command: "mkdir -p \"$OUT/dumps\" && echo dump > \"$OUT/dumps/proc.dmp\"", inputs: [] });
+    assert.ok(first.ok && second.ok);
+    await until(first.job.id);
+    await until(second.job.id);
+    const [a, b] = [first.job.id, second.job.id];
+    const said = await elsewhereWords(S, "job", a, "dumps/proc.dmp");
+    assert.match(said, new RegExp(`^dumps/proc\\.dmp is in job ${b} \\(job:${b}/dumps/proc\\.dmp\\): name that instead; the nearest in job ${a}: job:${a}/dumps/[a-z.]+, job:${a}/dumps/[a-z.]+; store_find\\(name: "proc\\.dmp"\\) finds a file by its name in every job's output and every import$`));
+    // As a declared input.
+    const asInput = await svc.submit("a0", { kind: "command", command: "cat x", inputs: [`job:${a}/dumps/proc.dmp`] });
+    assert.equal(asInput.ok, false);
+    assert.match((asInput as { reason: string }).reason, new RegExp(`dumps/proc\\.dmp is not in job ${a}'s manifest; dumps/proc\\.dmp is in job ${b} \\(job:${b}/dumps/proc\\.dmp\\): name that instead; the nearest in job ${a}: .*store_find\\(name: "proc\\.dmp"\\)`));
+    // As a tool's argument.
+    const asArg = await svc.submit("a0", { kind: "tool", tool: "reader", args: { path: `job:${a}/dumps/proc.dmp` }, inputs: [] });
+    assert.equal(asArg.ok, false);
+    assert.match((asArg as { reason: string }).reason, new RegExp(`^tool reader: path names job:${a}/dumps/proc\\.dmp, and job ${a} has no dumps/proc\\.dmp .*; dumps/proc\\.dmp is in job ${b} \\(job:${b}/dumps/proc\\.dmp\\): name that instead; the nearest in job ${a}: .*; store_find\\(name: "proc\\.dmp"\\)`));
+    // A directory another job holds is named as one; a path no job holds still gets the nearest and store_find.
+    assert.match(await elsewhereWords(S, "job", b, "dumps/../dumps"), /store_find/);
+    const none = await elsewhereWords(S, "job", a, "dumps/nothing.bin");
+    assert.doesNotMatch(none, /is in job/);
+    assert.match(none, /store_find\(name: "nothing\.bin"\)/);
+    await svc.stop("over");
+  } finally {
+    execFileSync("chmod", ["-R", "u+w", S]);
+    rmSync(S, { recursive: true, force: true });
+  }
 });

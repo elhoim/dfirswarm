@@ -11,7 +11,7 @@
  * run's E-81 fixed the team's search for 115 minutes).
  */
 import assert from "node:assert/strict";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../extensions/protocol.ts";
@@ -100,6 +100,25 @@ test("a negative about pictures lists the images read, and the sheets of the cit
   const seen = ok(await rec(c.a0, { kind: "finding", ...F, value: "The caption on sheet 6 reads a 22-character string", source: "job:j000030/m/m06.png", evidence: "read by eye", refs: ["job:j000030/m/m06.png"] })).entry as Negative;
   assert.equal(seen.images_unread, undefined);
   refused(await rec(c.a0, { kind: "finding", ...F, value: "The caption on sheet 6 reads a 22-character string, twice", source: "s", evidence: "e", images_read: ["job:j000030/m/m06.png"] }), /images_read is a negative's/);
+});
+
+test("the images of a job of thousands of files are listed from its manifest's index, the manifest itself unreadable: the unread sheets are named as before", async () => {
+  const c = await run();
+  const sheets = Array.from({ length: 6 }, (_, i) => `m/m${String(i + 1).padStart(2, "0")}.png`);
+  const noise = Array.from({ length: 3000 }, (_, i) => `noise/d${i % 30}/f${i}.txt`);
+  await jobWith(c.S, "j000031", [...sheets, ...noise, "m/sub/deeper.png"], { spec: { kind: "command", inputs: ["input:disk.E01"], command: "ffmpeg … m/m%02d.png" } });
+  const manifestPath = join(storePaths(c.S).jobs, "j000031", "manifest.json");
+  await chmod(manifestPath, 0);
+  try {
+    for (const s of sheets.slice(0, 2)) await traceRead(c.S, "a0", `store/jobs/j000031/out/${s}`);
+    await planned(c.a0, "1");
+    const r = ok(await rec(c.a0, { kind: "finding", ...F, value: "None of the frames of the second clip shows burned-in text", source: "job:j000031/m/", evidence: "read by eye", refs: ["job:j000031/m/m01.png"], answers: ["1"] }));
+    const e = r.entry as Negative;
+    assert.deepEqual(e.images_read, ["job:j000031/m/m01.png", "job:j000031/m/m02.png"]);
+    assert.deepEqual(e.images_unread, [{ job: "j000031", dir: "m", total: 6, unread: sheets.slice(2) }], "the directory's own images, not those of a directory under it");
+  } finally {
+    await chmod(manifestPath, 0o444);
+  }
 });
 
 test("a finding at high confidence that five later entries stand on and nobody reviewed is warned of, and no longer once another seat attests or disputes it", async () => {

@@ -16,6 +16,8 @@ import { after, test } from "node:test";
 import * as P from "../extensions/protocol.ts";
 import { JobService, LISTING_PHASE, phaseWords, type JobRecord } from "../scripts/job-service.ts";
 import { localWorker } from "./job-service-worker.ts";
+import { ad1Image, type Ad1Node } from "./ad1-fixture.ts";
+import { createHash } from "node:crypto";
 
 const ROOT = join(import.meta.dirname, "..");
 const made: string[] = [];
@@ -111,4 +113,57 @@ test("the post of a generation that is not a listing is its status, unchanged", 
   assert.equal(phaseWords(undefined, "partial"), "partial");
   assert.equal(phaseWords("other", "complete"), "complete");
   assert.match(phaseWords(LISTING_PHASE, "partial"), /nobody need walk the image for a list \(partial until then\)/);
+});
+
+/**
+ * The plan's bar for the kickoff catalogue of a large AD1 (IMPROVEMENT-PLAN-2 A12): the listing of a 400,000-item image is committed
+ * in under 60 s through the job service, the whole catalogue following as a later job. AD1_LISTING_ITEMS sets the count, as
+ * CLOUD_TIMELINE_ROWS does for the cloud timeline: the default is small enough for every run of the suite, and the bar is the plan's
+ * rate, 60 s for each 400,000 items, and never under ten seconds (what a kickoff does once whatever the image's size: the census,
+ * the service's start, the seal). `AD1_LISTING_ITEMS=400000` measures the plan's own case against its own 60 s. The image is built from the format's layout
+ * (tests/ad1-fixture.ts): folders of a thousand empty files, and one file in each with content.
+ */
+const ITEMS = Math.max(1000, Math.floor(Number(process.env.AD1_LISTING_ITEMS ?? 20_000) / 1000) * 1000 || 20_000);
+
+test(`the listing of a ${ITEMS}-item AD1 is committed through the job service at the rate that commits 400,000 in under 60 s (AD1_LISTING_ITEMS sets the count)`, { timeout: 3_600_000 }, async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "catalog-phases-ad1-"));
+  made.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "phase2", agentIds: ["a0", "a1"], capUsd: 5, wallClockMinutes: 30, goal: "## Goal\n\nList the image.\n\n### Questions\n\n1. What does the image hold?\n" });
+  for (const d of ["inputs", "tools", "catalog", "work/a1"]) mkdirSync(join(S, d), { recursive: true });
+  const dirs: Ad1Node[] = [];
+  for (let k = 0; k < ITEMS / 1000; k++) {
+    const kids: Ad1Node[] = [];
+    for (let i = 0; i < 1000; i++) kids.push({ name: `f${i}.txt`, content: i === 500 ? Buffer.from(`file 500 of d${k}`) : Buffer.alloc(0) });
+    dirs.push({ name: `d${k}`, folder: true, children: kids });
+  }
+  const image = ad1Image(dirs);
+  writeFileSync(join(S, "inputs", "case.ad1"), image);
+  writeFileSync(join(S, "inputs.json"), JSON.stringify({ files: [{ path: "inputs/case.ad1", sha256: createHash("sha256").update(image).digest("hex"), bytes: image.length }] }));
+  const CFB = join(ROOT, "packs", "computer-forensics-base");
+  const began = Date.now();
+  const census = spawnSync("python3", [join(ROOT, "scripts", "evidence_catalog.py"), S, "--plan-only", "--recipes-from", CFB], { encoding: "utf8" });
+  assert.equal(census.status, 0, census.stderr);
+  const posts: Array<[string, string]> = [];
+  const svc = new JobService({ sandbox: S, run: "s000000", image: "img:test", workers: 2, workerCpus: 1, workerMemoryMib: 512, allowHosts: [], openNet: false, packDirs: [CFB], forging: false, minFreeMb: 1, runWorker: localWorker(), destroyWorker: async () => ({ ok: true }), notify: async (to, body) => void posts.push([to, body]), identity: async (a) => ({ name: `${a}-name` }) });
+  await svc.start();
+  try {
+    const listing = () => [...svc.jobs.values()].find((j) => j.spec.kind === "recipe" && j.spec.phase === LISTING_PHASE && j.spec.recipe === "computer-forensics-base/ad1-items");
+    await eventually(() => Boolean(listing() && done(listing()!)), "the listing job catalogued", 3_000_000);
+    const job = listing()!;
+    assert.equal(job.state, "committed");
+    const committedAt = Date.parse(String(svc.journal.of("job_committed").find((l) => l.job === job.id)!.at));
+    const ms = committedAt - began;
+    const cov = JSON.parse(readFileSync(join(S, "catalog", "gen", job.generation!, "coverage.json"), "utf8")) as { phase: string; items: number; files: number };
+    assert.deepEqual([cov.phase, cov.items, cov.files], ["listing complete; digests pending", ITEMS + ITEMS / 1000, ITEMS]);
+    const rows = readFileSync(join(S, "catalog", "gen", job.generation!, "members.tsv"), "utf8").trimEnd().split("\n").length - 1;
+    assert.equal(rows, ITEMS + ITEMS / 1000, "every item is listed");
+    // Said to everyone as the listing, with what follows.
+    assert.ok(posts.some(([to, b]) => to === "all" && b.includes(job.generation!) && /the listing \(every member's path, size and times/.test(b)), JSON.stringify(posts.map(([to, b]) => [to, b.slice(0, 160)])));
+    const bar = Math.max((60_000 * ITEMS) / 400_000, 10_000);
+    t.diagnostic(`${ITEMS} items (an image of ${image.length} bytes): the listing committed ${ms} ms after the census began (the plan's rate allows ${Math.round(bar)} ms)`);
+    assert.ok(ms < bar, `the listing of ${ITEMS} items was committed ${ms} ms after the census began`);
+  } finally {
+    await svc.stop("over");
+  }
 });

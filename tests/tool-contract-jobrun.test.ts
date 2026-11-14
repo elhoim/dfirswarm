@@ -20,7 +20,7 @@
  * the item that removes it; the list may only shrink.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -368,3 +368,160 @@ test("the job_run check finds a path said not to be there, a traceback, a hang, 
   assert.equal(sameAsAbsent(notThere('{"errors":["definitions not found"]}', root), both), null);
   assert.equal(sameAsAbsent(notThere('{"status":"complete"}', root), []), null);
 });
+
+// --- D4: the five spellings of a path, a missing key and a missing file, on job_run and called directly ------------------------------
+//
+// Every pack tool with an input path is given that path the five ways a seat writes it (a job's file as job:<id>/<path>, an input
+// as input:<path>, an import's file as import:<id>/<path>, and the job's own output as $OUT/<name> and {OUT}/<name>), a call with a
+// required key left out, and a reference to a file that is not there; on job_run's front door (the job service's own checks,
+// JobService.preview, nothing run) and as a direct call in the seat (scripts/tool-arg-refs.ts directToolArgs, what the Pi tool runs).
+// The references become the paths they name, $OUT and {OUT} the job's output directory (and the seat's own directory on a direct
+// call), the missing key and the missing file are refused by name, the file with where it is instead. Then the tool itself is run
+// with the job reference as it was resolved, and must read the store's file or refuse it in words of its own.
+
+const D4_JOB_FILE = "case files/sample file.bin";
+const D4_JOB_DIR = "case files/a folder";
+
+test("every pack tool with an input path takes job:, input:, import:, $OUT/ and {OUT}/, and refuses a missing key and a missing file, on job_run and called directly", { timeout: 1_800_000 }, async () => {
+  const { JobService } = await import("../scripts/job-service.ts");
+  const { sealTree, storePaths } = await import("../scripts/evidence-store.ts");
+  const { directToolArgs } = await import("../scripts/tool-arg-refs.ts");
+  const tools = (await bundledTools()).filter((t) => inputParams(t.manifest).length);
+  assert.ok(tools.length >= 100, `${tools.length} tools take an input path`);
+  const top = await mkdtemp(join(tmpdir(), "d4-contract-"));
+  const root = join(top, "run");
+  const failures = new Map<string, string>();
+  const skipped: string[] = [];
+  let checks = 0;
+  let ran = 0;
+  let svc: InstanceType<typeof JobService> | null = null;
+  try {
+    for (const d of ["work/s1", "catalog", DIR]) await mkdir(join(root, d), { recursive: true });
+    await writeFile(join(root, FILE), Buffer.concat([Buffer.from("not an artefact of any kind\n"), Buffer.alloc(512, 0x41)]));
+    await writeFile(join(root, DIR, "one file.txt"), "not an artefact of any kind\n");
+    await writeFile(join(root, "inputs.json"), JSON.stringify({ files: [{ path: FILE, sha256: "0".repeat(64), bytes: 540 }, { path: `${DIR}/one file.txt`, sha256: "1".repeat(64), bytes: 28 }] }));
+    for (const t of await bundledTools()) await cp(join(ROOT, "packs", t.id.split("/")[0]!, "tools", t.name), join(root, "tools", t.name), { recursive: true });
+    // The same fixture as a sealed import, and as a committed job's output.
+    const staged = async (name: string) => {
+      const d = join(top, `staging-${name}`);
+      await mkdir(join(d, D4_JOB_DIR), { recursive: true });
+      await writeFile(join(d, D4_JOB_FILE), Buffer.concat([Buffer.from("not an artefact of any kind\n"), Buffer.alloc(512, 0x41)]));
+      await writeFile(join(d, D4_JOB_DIR, "one file.txt"), "not an artefact of any kind\n");
+      return d;
+    };
+    await sealTree(root, await staged("mat"), join(storePaths(root).imports, "mat-0001", "out"), "mat-0001", 1);
+    svc = new JobService({ sandbox: root, run: "s000000", image: "img:test", workers: 1, workerCpus: 1, workerMemoryMib: 512, allowHosts: [], openNet: false, packDirs: [], forging: false, minFreeMb: 1, runWorker: (await import("./job-service-worker.ts")).localWorker(), destroyWorker: async () => ({ ok: true }), notify: async () => undefined, identity: async (a: string) => ({ name: a }) });
+    await svc.start();
+    const made = await svc.submit("s1", { kind: "command", command: `mkdir -p "$OUT/${D4_JOB_DIR}" && cp "${FILE}" "$OUT/${D4_JOB_FILE}" && cp "${DIR}/one file.txt" "$OUT/${D4_JOB_DIR}/one file.txt"`, inputs: [] });
+    assert.ok(made.ok, JSON.stringify(made));
+    const job = made.ok ? made.job.id : "";
+    for (let i = 0; i < 800 && svc.jobs.get(job)?.state !== "committed"; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(svc.jobs.get(job)?.state, "committed");
+    const service = svc;
+    const onePath = (v: unknown) => (Array.isArray(v) ? v[0] : v);
+    for (const tool of tools) {
+      const ip = inputParams(tool.manifest)[0]!;
+      const fail = (why: string) => {
+        if (!failures.has(tool.id)) failures.set(tool.id, why);
+      };
+      const rel = ip.dir ? D4_JOB_DIR : D4_JOB_FILE;
+      const inputRel = (ip.dir ? DIR : FILE).slice("inputs/".length);
+      const spellings: Array<[string, string, string, string]> = [
+        // given, as job_run gives it, as a direct call gives it
+        ["job", `job:${job}/${rel}`, `store/jobs/${job}/out/${rel}`, `store/jobs/${job}/out/${rel}`],
+        ["input", `input:${inputRel}`, `inputs/${inputRel}`, `inputs/${inputRel}`],
+        ["import", `import:mat-0001/${rel}`, `store/imports/mat-0001/out/${rel}`, `store/imports/mat-0001/out/${rel}`],
+        ["$OUT", "$OUT/x y", "{OUT}/x y", "work/s1/x y"],
+        ["{OUT}", "{OUT}/x y", "{OUT}/x y", "work/s1/x y"],
+      ];
+      for (const [how, given, viaJob, viaDirect] of spellings) {
+        const args = callFor(tool.manifest, ip.name);
+        args[ip.name] = ip.list ? [given] : given;
+        checks += 1;
+        const spec = await service.preview({ kind: "tool", tool: tool.name, args });
+        if ("reason" in spec) {
+          fail(`${how}: job_run refused ${JSON.stringify(given)}: ${spec.reason}`);
+          continue;
+        }
+        // A one-file reader given a directory runs once per file: the plan names the directory.
+        const gotJob = spec.each && spec.each.param === ip.name ? spec.each.directory : onePath(spec.args?.[ip.name]);
+        if (gotJob !== viaJob) fail(`${how}: job_run gave ${JSON.stringify(gotJob)} for ${JSON.stringify(given)}, not ${viaJob}`);
+        const direct = await directToolArgs(root, "s1", tool.name, args, tool.manifest as Parameters<typeof directToolArgs>[4]);
+        if (!direct.ok) {
+          fail(`${how}: a direct call refused ${JSON.stringify(given)}: ${direct.reason}`);
+          continue;
+        }
+        const gotDirect = direct.each && direct.each.param === ip.name ? direct.each.directory : onePath(direct.args[ip.name]);
+        if (gotDirect !== viaDirect) fail(`${how}: a direct call gave ${JSON.stringify(gotDirect)} for ${JSON.stringify(given)}, not ${viaDirect}`);
+      }
+      // A missing key: the first required parameter left out, refused by its name on both doors.
+      const required = Object.entries(tool.manifest.params ?? {}).find(([, p]) => p?.required)?.[0];
+      if (required) {
+        const args = callFor(tool.manifest, ip.name);
+        delete args[required];
+        checks += 1;
+        const spec = await service.preview({ kind: "tool", tool: tool.name, args });
+        if (!("reason" in spec) || !spec.reason.includes(`needs ${required}`)) fail(`missing key ${required}: job_run said ${JSON.stringify("reason" in spec ? spec.reason : "accepted")}`);
+        const direct = await directToolArgs(root, "s1", tool.name, args, tool.manifest as Parameters<typeof directToolArgs>[4]);
+        if (direct.ok || !direct.reason.includes(`needs ${required}`)) fail(`missing key ${required}: a direct call said ${JSON.stringify(direct.ok ? "accepted" : direct.reason)}`);
+      }
+      // A missing file: refused before the tool runs, with the form and where to look, on both doors.
+      const absent = `job:${job}/case files/absent file.bin`;
+      const args = callFor(tool.manifest, ip.name);
+      args[ip.name] = ip.list ? [absent] : absent;
+      checks += 1;
+      const spec = await service.preview({ kind: "tool", tool: tool.name, args });
+      const said = /has no case files\/absent file\.bin .*store_find\(name: "absent file\.bin"\)/;
+      if (!("reason" in spec) || !said.test(spec.reason)) fail(`missing file: job_run said ${JSON.stringify("reason" in spec ? spec.reason : "accepted")}`);
+      const direct = await directToolArgs(root, "s1", tool.name, args, tool.manifest as Parameters<typeof directToolArgs>[4]);
+      if (direct.ok || !said.test(direct.reason)) fail(`missing file: a direct call said ${JSON.stringify(direct.ok ? "accepted" : direct.reason)}`);
+    }
+    // The tool itself, given the job reference as it was resolved: it reads the store's file, or refuses it in words of its own.
+    let n = 0;
+    await pool(tools, async (tool) => {
+      const ip = inputParams(tool.manifest)[0]!;
+      const args = callFor(tool.manifest, ip.name);
+      args[ip.name] = ip.list ? [`job:${job}/${ip.dir ? D4_JOB_DIR : D4_JOB_FILE}`] : `job:${job}/${ip.dir ? D4_JOB_DIR : D4_JOB_FILE}`;
+      const direct = await directToolArgs(root, "s1", tool.name, args, tool.manifest as Parameters<typeof directToolArgs>[4]);
+      if (!direct.ok || direct.each) return;
+      const r = await runAsJob(root, tool, `j9${String(++n).padStart(5, "0")}`, direct.args);
+      ran += 1;
+      if ((missingModule(r.stderr) && /Traceback/.test(r.stderr)) || missingLibrary(r.stdout)) {
+        skipped.push(tool.id);
+        return;
+      }
+      const why = storeReadFailure(r, String(onePath(direct.args[ip.name])));
+      if (why) fail2(tool.id, `run with ${JSON.stringify(onePath(direct.args[ip.name]))}: ${why}`);
+    });
+    function fail2(id: string, why: string) {
+      if (!failures.has(id)) failures.set(id, why);
+    }
+  } finally {
+    await svc?.stop("over");
+    spawnSync("chmod", ["-R", "u+w", top]);
+    await rm(top, { recursive: true, force: true });
+  }
+  console.log(`# D4: ${checks} spellings and refusals checked over ${tools.length} tools, ${ran} tools run with a resolved job reference; ${failures.size} failing, ${skipped.length} not run here (a module missing)`);
+  assert.ok(ran >= tools.length - 10, `${ran} of ${tools.length} tools were run with the reference resolved`);
+  const list = [...failures].map(([tool, why]) => `  ${tool}: ${why}`);
+  assert.equal(list.length, 0, `${list.length} tool(s) do not take a path the five ways or refuse a missing key or file:\n${list.join("\n")}`);
+});
+
+/** Why the answer of a tool given a store path is not one: a traceback, no JSON, or a message that says that path is not there. */
+function storeReadFailure(r: Run, path: string): string | null {
+  if (r.killed) return `no answer in ${LIMIT_MS / 1000} s`;
+  if (/Traceback \(most recent call last\)/.test(r.stderr)) return `a traceback: ${r.stderr.trim().split("\n").pop()?.slice(0, 160)}`;
+  let doc: unknown;
+  try {
+    doc = JSON.parse(r.stdout.trim());
+  } catch {
+    return r.stdout.trim() ? "stdout is not one JSON document" : `no JSON on stdout (exit ${r.code})`;
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return "the answer is not a JSON object";
+  const named = new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![/\\w])|store/jobs/j\\d{6}/out/case(?! files)`);
+  for (const said of [...strings(doc), ...r.stderr.split("\n")]) {
+    NOT_THERE.lastIndex = 0;
+    if (NOT_THERE.test(said) && named.test(said)) return `says the store's file is not there ("${said.replace(/\s+/g, " ").slice(0, 240)}")`;
+  }
+  return null;
+}

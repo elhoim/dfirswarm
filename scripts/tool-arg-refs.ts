@@ -13,13 +13,20 @@
  * Only a whole string is read as a reference: a reference inside a longer
  * text (a note, a pattern) is left alone.
  */
-import { lstatSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join, normalize } from "node:path";
+import { elsewhereWords } from "./store-find.ts";
+import { eachOf, type EachSpec } from "./tool-each.ts";
 
 /** One argument that was a reference, where it was, and what it became. */
 export type ArgRef = { at: string; from: string; to: string; object: string };
 
-export type ArgRefsResult = { ok: true; args: Record<string, unknown>; resolved: ArgRef[] } | { ok: false; reason: string };
+/**
+ * A refusal; `missing` names the sealed job or import and the path in it that is not there, for the
+ * caller to say where that path is instead (store-find.ts elsewhereWords: the job that holds it, the
+ * nearest names, store_find), which needs the store's indexes and so is not done here.
+ */
+export type ArgRefsResult = { ok: true; args: Record<string, unknown>; resolved: ArgRef[] } | { ok: false; reason: string; missing?: { kind: "job" | "import"; id: string; rel: string } };
 
 /** What the service knows of a job: its state, or undefined when the run has no such job. */
 export type JobStateOf = (id: string) => string | undefined;
@@ -58,7 +65,9 @@ function shape(abs: string): "file" | "dir" | null {
 export function resolveToolArgs(S: string, tool: string, args: Record<string, unknown>, jobState: JobStateOf): ArgRefsResult {
   const resolved: ArgRef[] = [];
   let refusal: string | null = null;
-  const refuse = (at: string, text: string): string => {
+  let missing: { kind: "job" | "import"; id: string; rel: string } | undefined;
+  const refuse = (at: string, text: string, what?: { kind: "job" | "import"; id: string; rel: string }): string => {
+    if (refusal === null && what) missing = what;
     refusal ??= `tool ${tool}: ${at} ${text}`;
     return "";
   };
@@ -80,7 +89,7 @@ export function resolveToolArgs(S: string, tool: string, args: Record<string, un
       }
       const base = j ? `store/jobs/${id}/out` : `store/imports/${id}/out`;
       const path = rel ? `${base}/${rel}` : base;
-      if (!shape(join(S, path))) return refuse(at, `names ${kind}:${id}${rel ? `/${rel}` : ""}, and ${kind} ${id} has no ${rel || "output"} (${j ? `job_status ${id}` : "the board's post of it"} lists its files; a name is written as the listing has it)`);
+      if (!shape(join(S, path))) return refuse(at, `names ${kind}:${id}${rel ? `/${rel}` : ""}, and ${kind} ${id} has no ${rel || "output"} (${j ? `job_status ${id}` : "the board's post of it"} lists its files; a name is written as the listing has it)`, rel ? { kind, id, rel } : undefined);
       resolved.push({ at, from: v, to: path, object: `${kind}:${id}` });
       return path;
     }
@@ -103,7 +112,7 @@ export function resolveToolArgs(S: string, tool: string, args: Record<string, un
     return v;
   };
   const out = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, walk(v, k, 0)]));
-  if (refusal) return { ok: false, reason: refusal };
+  if (refusal) return { ok: false, reason: refusal, ...(missing ? { missing } : {}) };
   return { ok: true, args: out, resolved };
 }
 
@@ -112,4 +121,43 @@ export function argRefsWords(resolved: ArgRef[]): string {
   if (!resolved.length) return "";
   const shown = resolved.slice(0, 3).map((r) => `${r.at}: ${r.from} is ${r.to}`);
   return `The tool was given ${resolved.length === 1 ? "the path of the reference" : "the paths of the references"} in its arguments (${shown.join("; ")}${resolved.length > 3 ? `; and ${resolved.length - 3} more` : ""}).`;
+}
+
+/** A job of the run as a seat's own directory shows it: sealed (its manifest is there), under way, or none. */
+function storeJobState(S: string): JobStateOf {
+  return (id) => (existsSync(join(S, "store", "jobs", id, "manifest.json")) ? "committed" : existsSync(join(S, "store", "jobs", id)) ? "not sealed yet" : undefined);
+}
+
+/** The arguments with `{OUT}` made `to` wherever a string holds it. */
+export function withOut(args: Record<string, unknown>, to: string): Record<string, unknown> {
+  const sub = (v: unknown): unknown => (typeof v === "string" ? v.split("{OUT}").join(to) : Array.isArray(v) ? v.map(sub) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, sub(x)])) : v);
+  return sub(args) as Record<string, unknown>;
+}
+
+export type DirectArgs = { ok: true; args: Record<string, unknown>; resolved: ArgRef[]; each: EachSpec | null } | { ok: false; reason: string };
+
+/**
+ * A pack tool called directly, as a Pi tool in the seat, given what job_run
+ * gives it (IMPROVEMENT-PLAN-2 D4): a required parameter that is missing is
+ * refused by its name; a whole argument that is a reference (job:, import:,
+ * input:) becomes the path it names, and one that names nothing is refused
+ * with the form that works and where the path is instead (store-find.ts
+ * elsewhereWords); `$OUT`, `${OUT}` and `{OUT}` at an argument's head are
+ * the seat's own directory (work/<id>/), where a direct call writes; and a
+ * directory given to a one-file reader is run once per file it reads there
+ * (tool-each.ts), each = the plan. These ran only on the job_run path, and a
+ * tool called directly read `job:j000003/x` as a file name.
+ */
+export async function directToolArgs(S: string, agentId: string, tool: string, args: Record<string, unknown>, man: { params?: Record<string, { type?: string; required?: boolean; description?: string }>; use?: unknown; description?: string }): Promise<DirectArgs> {
+  for (const [key, p] of Object.entries(man.params ?? {})) if (p && typeof p === "object" && p.required && (args[key] === undefined || args[key] === null)) return { ok: false, reason: `tool ${tool} needs ${key}` };
+  const refs = resolveToolArgs(S, tool, args, storeJobState(S));
+  if (!refs.ok) {
+    const more = refs.missing ? await elsewhereWords(S, refs.missing.kind, refs.missing.id, refs.missing.rel).catch(() => "") : "";
+    return { ok: false, reason: more ? `${refs.reason}; ${more}` : refs.reason };
+  }
+  const own = /^[a-z][a-z0-9_-]{0,31}$/.test(agentId) ? `work/${agentId}` : "work";
+  const out = withOut(refs.args, own);
+  const each = eachOf(S, tool, out, man as Parameters<typeof eachOf>[3]);
+  if (!each.ok) return { ok: false, reason: each.reason };
+  return { ok: true, args: out, resolved: refs.resolved, each: each.each };
 }

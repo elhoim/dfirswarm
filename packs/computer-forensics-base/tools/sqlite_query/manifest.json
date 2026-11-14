@@ -74,6 +74,17 @@
       "use": "sqlite_freespace"
     }
   ],
-  "version": 21,
-  "sha256": "2269eb623ae17925911be46e72d9368776b2a5871cc7ba5df32dcc72fbbeff2e"
+  "version": 22,
+  "sha256": "2269eb623ae17925911be46e72d9368776b2a5871cc7ba5df32dcc72fbbeff2e",
+  "companions": [
+    {
+      "param": "db_path",
+      "suffixes": [
+        "-wal",
+        "-shm",
+        "-journal"
+      ],
+      "why": "the write-ahead log, its index and the rollback journal beside the database, where its last writes may be"
+    }
+  ]
 }

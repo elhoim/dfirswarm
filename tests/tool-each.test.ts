@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobService, describe } from "../scripts/job-service.ts";
 import { storePaths } from "../scripts/evidence-store.ts";
-import { EACH_MAX, eachOf, oneFileParams } from "../scripts/tool-each.ts";
+import { EACH_MAX, eachDirectWords, eachOf, oneFileParams, runEachDirect } from "../scripts/tool-each.ts";
 import { listInputs, localWorker } from "./job-service-worker.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -185,4 +185,31 @@ test("a directory with none of its files, more than EACH_MAX of them, or a param
   assert.deepEqual(file, { ok: true, each: null }, "a file is a file");
   const outside = eachOf(S, "reader", { path: "/etc" }, man);
   assert.deepEqual(outside, { ok: true, each: null }, "a path outside the run is the tool's to refuse");
+});
+
+test("a direct call run once per file (a pack tool called in the seat) gives the worker's one answer: every run with its status, partial with its file named, what the clock left not run", async () => {
+  const each = { param: "path", directory: "store/jobs/j000001/out/d", files: ["d/a", "d/b", "d/c"] };
+  const seen: Array<[unknown, number]> = [];
+  const answers: Record<string, { ok: boolean; exit_code: number; stdout: string; stderr: string; timed_out: boolean }> = {
+    "d/a": { ok: true, exit_code: 0, stdout: '{"status": "complete", "n": 1}', stderr: "", timed_out: false },
+    "d/b": { ok: true, exit_code: 0, stdout: '{"status": "partial", "n": 2}', stderr: "", timed_out: false },
+    "d/c": { ok: false, exit_code: 2, stdout: "", stderr: "Traceback\nValueError: bad", timed_out: false },
+  };
+  const r = await runEachDirect("t", each, { path: "store/jobs/j000001/out/d", k: 1 }, 60, async (args, left) => {
+    seen.push([args, left]);
+    return answers[String(args.path)]!;
+  });
+  assert.deepEqual(seen.map(([a]) => a), each.files.map((f) => ({ path: f, k: 1 })), "each file in its own call, the other arguments as given");
+  assert.ok(seen.every(([, left]) => left > 0 && left <= 60), "each run gets what is left of the one clock");
+  const answer = JSON.parse(r.stdout) as { status: string; each: { files: number; ran: number }; runs: Array<{ file: string; status?: string; settled: boolean; result?: { n: number }; stderr?: string }>; status_basis: string[] };
+  assert.deepEqual([r.ok, r.exit_code, answer.status, answer.each], [true, 0, "partial", { param: "path", directory: "store/jobs/j000001/out/d", files: 3, ran: 3 }]);
+  assert.deepEqual(answer.runs.map((x) => [x.file, x.status, x.settled, x.result?.n]), [["d/a", "complete", true, 1], ["d/b", "partial", false, 2], ["d/c", undefined, false, undefined]]);
+  assert.deepEqual(answer.status_basis, ["d/b: its answer is not complete", "d/c: exit 2"]);
+  assert.match(answer.runs[2]!.stderr ?? "", /ValueError: bad/);
+  // The clock: a run that timed out stops the rest, named as not run.
+  const late = await runEachDirect("t", each, { path: "x" }, 60, async (args) => ({ ok: false, exit_code: null as unknown as number, stdout: "", stderr: "", timed_out: String(args.path) === "d/a" }));
+  const cut = JSON.parse(late.stdout) as { status: string; not_run: string[]; status_basis: string[] };
+  assert.deepEqual([cut.status, cut.not_run], ["partial", ["d/b", "d/c"]]);
+  assert.match(cut.status_basis.at(-1)!, /^2 file\(s\) not run \(clock\)$/);
+  assert.match(eachDirectWords(each), /^path named the directory store\/jobs\/j000001\/out\/d, so the tool was run once for each of the 3 file\(s\) in it it reads/);
 });

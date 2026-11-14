@@ -123,7 +123,7 @@ type Cycle = { turns: FakeTurn[]; resumedAt: number; events: RpcEvent[]; handoff
 /** One seat, scripted: three skill calls, the climb to the compact line, the hand-off, one more skill call, the result. */
 async function runCycle(d: Dir, packDirs: string[], { env = {} as Record<string, string>, forging = false, forge = false } = {}): Promise<Cycle> {
   const pre = [
-    ...(forge ? [{ name: "make_tool", arguments: { name: "count_lines", description: "Count lines", runtime: "python3", script: "print(1)\n", params: {} } }] : []),
+    ...(forge ? [{ name: "make_tool", arguments: { name: "count_lines", description: "Count lines", runtime: "python3", script: "print(1)\n", params: {}, selftest: { args: {}, expect: "1" } } }] : []),
     { name: "skill", arguments: { id: "evidence/one" } },
     { name: "skill", arguments: { id: "evidence/one" } },
     { name: "skill", arguments: { id: "pack-b:shared/dup" } },

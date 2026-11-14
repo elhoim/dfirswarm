@@ -24,10 +24,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DERIVED, derivedRank, describe, JobService, jobView, sealIsLarge, sealLeftStaging, SEAL_LARGE_FILES, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
+import { DERIVED, DERIVED_LIMITS, DERIVED_RESERVE, derivedPass, derivedRank, derivedRoom, describe, JobService, jobView, sealIsLarge, sealLeftStaging, SEAL_LARGE_FILES, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
+import { buildIndex, writeIndex } from "../scripts/manifest-index.ts";
 import { sealTree, storePaths, verifyJournalText, type JournalLine } from "../scripts/evidence-store.ts";
 import { listInputs, localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -269,7 +270,9 @@ test("the lane's order: a program in a profile's Temp first, a user's other file
 
 test("part of the ceiling is kept for what a user made or kept: vendor objects take the rest and no more, and a user's object offered later is still catalogued", async () => {
   const S = sandbox();
-  // Five generations, one of them kept (a fifth).
+  // Five generations, three of them kept (DERIVED_RESERVE, three fifths): the vendor's files get two.
+  const kept = Math.floor(5 * DERIVED_RESERVE);
+  assert.equal(kept, 3);
   const { svc } = service(S, { packDirs: [CFB], derived: true, derivedLimits: { generationsMax: 5 } });
   await svc.start();
   const tar = (dir: string, names: string[]) => `python3 - <<'PY'\nimport tarfile,io,os\nfor k,n in enumerate(${JSON.stringify(names)}):\n  d=os.path.join(os.environ['OUT'],${JSON.stringify(dir)}); os.makedirs(d,exist_ok=True)\n  with tarfile.open(os.path.join(d,n),'w') as t:\n    i=tarfile.TarInfo('m.txt'); b=(n*400).encode(); i.size=len(b); t.addfile(i,io.BytesIO(b))\nPY`;
@@ -277,14 +280,167 @@ test("part of the ceiling is kept for what a user made or kept: vendor objects t
   await until(svc, vendor.job.id);
   const gens = () => journal(S).filter((l) => l.type === "generation_committed" && l.trigger === "derived");
   await eventually(() => journal(S).some((l) => l.type === "derived_not_run" || (l.type === "job_cancelled" && String(l.reason).includes("kept for what a user made"))), "the vendor objects past the unreserved part are not run", 120000);
-  await eventually(() => gens().length === 4 && ![...svc.jobs.values()].some((j) => j.requester.agent === DERIVED && ["accepted", "running", "finished", "fenced"].includes(j.state)), "four generations, and the lane idle", 120000);
-  assert.equal(gens().length, 4, "the vendor's files took the four that are not kept back");
+  await eventually(() => gens().length === 5 - kept && ![...svc.jobs.values()].some((j) => j.requester.agent === DERIVED && ["accepted", "running", "finished", "fenced"].includes(j.state)), "two generations, and the lane idle", 120000);
+  assert.equal(gens().length, 5 - kept, "the vendor's files took the two that are not kept back");
   const user = ok(await svc.submit("a1", { kind: "command", command: tar("image/Users/x/Downloads", ["u.tar"]), inputs: [] }));
   await until(svc, user.job.id);
-  await eventually(() => gens().length === 5, "the user's object, offered later, takes the kept one", 120000);
-  assert.match(String((gens()[4].target as { ref?: string }).ref), /Users\/x\/Downloads\/u\.tar$/);
+  await eventually(() => gens().length === 5 - kept + 1, "the user's object, offered later, takes one of the kept ones", 120000);
+  assert.match(String((gens()[5 - kept].target as { ref?: string }).ref), /Users\/x\/Downloads\/u\.tar$/);
   assert.ok(![...svc.jobs.values()].some((j) => j.requester.agent === DERIVED && j.state === "accepted"), "nothing of the lane is left queued");
   await svc.stop("over");
+});
+
+/** A tree of a Windows image, the way extraction jobs commit it: objects a recipe would take, by path and size. */
+function windowsTree(): { vendor: string[]; runtime: string[]; profile: string[] } {
+  const vendor: string[] = [];
+  for (let v = 0; v < 6; v++) for (const f of ["setup.exe", "data1.cab", "data2.cab", "product.msi", "core.dll", "update.exe", "lang.cab", "help.zip"]) vendor.push(`image/Program Files/Vendor${v}/${f}`);
+  for (let i = 0; i < 20; i++) vendor.push(`image/Program Files (x86)/Common Files/Shared${i % 4}/component${i}.cab`);
+  for (let i = 0; i < 20; i++) vendor.push(`image/Windows/WinSxS/amd64_package_${i}/package.cab`);
+  for (let i = 0; i < 12; i++) vendor.push(`image/ProgramData/Package Cache/{${i}}/installer${i}.msi`);
+  for (let i = 0; i < 10; i++) vendor.push(`image/Windows/System32/driverstore${i}.zip`);
+  const runtime: string[] = [];
+  for (let i = 0; i < 20; i++) runtime.push(`image/Users/alex/AppData/Local/Programs/Python/Python311/DLLs/_mod${i}.pyd`);
+  for (let i = 0; i < 15; i++) runtime.push(`image/Users/alex/AppData/Local/Programs/Python/Python311/Lib/site-packages/pkg${i}/_core.pyd`);
+  for (let i = 0; i < 10; i++) runtime.push(`image/Users/alex/AppData/Roaming/npm/node_modules/mod${i}/prebuilt.zip`);
+  for (let i = 0; i < 5; i++) runtime.push(`image/Users/alex/AppData/Local/Microsoft/Edge/User Data/ext${i}.zip`);
+  const profile: string[] = [
+    ...["setup.exe", "install.ps1", "payload.zip", "helper.msi", "run.bat"].map((f) => `image/Users/alex/AppData/Local/Temp/${f}`),
+    ...["invoice.docx", "archive.7z", "tools.zip", "report.pdf", "image.iso", "client.exe", "notes.txt", "data.xlsx", "keys.kdbx", "mail.eml"].map((f) => `image/Users/alex/Downloads/${f}`),
+    ...["todo.docm", "budget.xlsm", "shortcut.lnk", "drop.zip"].map((f) => `image/Users/alex/Desktop/${f}`),
+    ...["plan.docx", "contract.pdf", "backup.pst", "old.rar"].map((f) => `image/Users/alex/Documents/${f}`),
+    ...["album.zip", "scan.pdf"].map((f) => `image/Users/alex/Pictures/${f}`),
+    ...["shared.docx", "sync.zip"].map((f) => `image/Users/alex/OneDrive/${f}`),
+    ...["memo.docx", "list.xlsx"].map((f) => `image/Users/Public/Documents/${f}`),
+    ...["state.db", "cache.dat", "store.sqlite"].map((f) => `image/Users/alex/AppData/Roaming/notesapp/${f}`),
+    "image/Users/alex/AppData/Roaming/updater/agent.exe",
+    "image/PerfLogs/svc.exe",
+  ];
+  return { vendor, runtime, profile };
+}
+
+/**
+ * The derived lane as it runs (job-service.ts maybeDrainDerived and the room check of fromDetect): one pass at a time over what
+ * waits, each object taken a generation when there is room for its rank, until the ceiling. `arrivals` are the offers of the jobs
+ * in the order they were committed; every pass the lane can make runs before the next job commits (the worst case: a vendor tree
+ * committed first is drained whole before the profile is offered).
+ */
+function replayLane(arrivals: string[][]): { made: string[]; notRun: number } {
+  const max = DERIVED_LIMITS.generationsMax;
+  const reserve = Math.floor(max * DERIVED_RESERVE);
+  const pending: Array<{ path: string; bytes: number; recipes: string[] }> = [];
+  const made: string[] = [];
+  let notRun = 0;
+  for (const offer of arrivals) {
+    // Vendor installers are the large objects of an image: largest first would put them first within a rank.
+    offer.forEach((path, i) => pending.push({ path, bytes: (derivedRank(path) >= 1 ? 50_000_000 : 1_000_000) - i, recipes: ["computer-forensics-base/archive-members"] }));
+    while (pending.length && made.length < max) {
+      const { take } = derivedPass(pending, (c) => derivedRank(c.path), { made: made.length, max, reserve, pairsPerPass: DERIVED_LIMITS.pairsPerPass });
+      if (!take.length) break;
+      for (const c of take) {
+        if (derivedRoom(derivedRank(c.path), made.length, max, reserve)) made.push(c.path);
+        else notRun += 1;
+      }
+    }
+  }
+  return { made, notRun };
+}
+
+test("replayed on a synthetic Windows image whose vendor trees are committed before the profile, at least 30 of the lane's 50 generations are a user's objects", (t) => {
+  const { vendor, runtime, profile } = windowsTree();
+  const user = (p: string) => derivedRank(p) < 1;
+  assert.ok(vendor.every((p) => !user(p)) && runtime.every((p) => !user(p)), "the vendor's and the runtime's objects are not a user's");
+  assert.ok(profile.every(user), `every object of the profile is a user's: ${profile.filter((p) => !user(p)).join(", ")}`);
+  // Executables outside the vendors' roots and the runtimes are with what a case turns on, wherever they sit.
+  assert.equal(derivedRank("image/PerfLogs/svc.exe"), 0);
+  assert.equal(derivedRank("image/Users/alex/AppData/Roaming/updater/agent.exe"), 0);
+  assert.ok(profile.length >= 30 && vendor.length + runtime.length > 100);
+  // As on the run E0: a prefix of Program Files committed first, a Python under the profile next, the profile last.
+  const late = replayLane([vendor, runtime, profile]);
+  assert.equal(late.made.length, DERIVED_LIMITS.generationsMax, "the lane reaches its ceiling");
+  const userMade = late.made.filter(user).length;
+  assert.ok(userMade >= 30, `${userMade} of ${late.made.length} generations went to a user's objects (vendor and runtime first)`);
+  t.diagnostic(`vendor and runtime committed first: ${userMade} of ${late.made.length} generations a user's objects`);
+  // Whatever the order, the same holds: the whole image at once, and the profile first.
+  for (const order of [[[...vendor, ...runtime, ...profile]], [profile, vendor, runtime]]) {
+    const r = replayLane(order);
+    assert.ok(r.made.filter(user).length >= 30, `${r.made.filter(user).length} user objects of ${r.made.length}`);
+  }
+  // With a fifth kept, as before, the late profile got ten: the replay fails without the larger reserve.
+  assert.ok(DERIVED_RESERVE >= 0.6);
+});
+
+test("a commit of 200,000 files tells its requester within 2 s, its files are offered from the manifest's index (the manifest itself unreadable), and a job committed meanwhile is told within 2 s", { timeout: 300_000 }, async (t) => {
+  const S = sandbox();
+  const N = 200_000;
+  const sha = (i: number) => createHash("sha256").update(`synthetic ${i}`).digest("hex");
+  let large = "";
+  const seal: typeof sealTree = async (sandboxDir, staging, dest, job, attempt, given, opts) => {
+    const real = await sealTree(sandboxDir, staging, dest, job, attempt, given, opts);
+    if (job !== large) return real;
+    const manifestPath = given ?? join(dest, "..", "manifest.json");
+    // The tree the worker wrote, and 200,000 files of a profile's cache beside it in the manifest (none on disk: a file the
+    // offer cannot open is read as empty, as one that vanished would be).
+    const files = [...real.manifest.files];
+    for (let i = 0; i < N; i++) {
+      const path = `image/Users/u${i % 50}/AppData/Local/Cache/d${i % 997}/f${i}.bin`;
+      files.push({ path, path_b64: Buffer.from(path).toString("base64"), bytes: 4096, sha256: sha(i), mode: "444" });
+    }
+    const manifest = { ...real.manifest, files, totals: { files: files.length, bytes: real.manifest.totals.bytes + N * 4096 } };
+    const text = `${JSON.stringify(manifest)}\n`;
+    chmodSync(manifestPath, 0o644);
+    writeFileSync(manifestPath, text);
+    const st = statSync(manifestPath);
+    const manifestSha256 = createHash("sha256").update(text).digest("hex");
+    await writeIndex(manifestPath, buildIndex(manifest, { sha256: manifestSha256, bytes: st.size, mtime_ms: st.mtimeMs }));
+    // From here on nothing can read the manifest whole: what the offer reads is the index.
+    chmodSync(manifestPath, 0);
+    return { ...real, manifest, manifestSha256 };
+  };
+  const { svc, posts } = service(S, { packDirs: [CFB], derived: true, sealTree: seal });
+  await svc.start();
+  try {
+    const command = "python3 -c \"import os,zipfile\nfor i in range(20): open(os.environ['OUT']+'/real%02d.bin'%i,'w').write('x'*100)\nwith zipfile.ZipFile(os.environ['OUT']+'/kept.zip','w') as z: z.writestr('m.txt','member '*50)\"";
+    const a = ok(await svc.submit("a1", { kind: "command", command, inputs: [] }));
+    large = a.job.id;
+    const done = await until(svc, a.job.id, undefined, 120_000);
+    assert.equal(done.outputs?.files, N + 21);
+    // Timers in the hub's process while the offer reads 200,000 rows of the index.
+    let late = 0;
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      late = Math.max(late, now - last - 20);
+      last = now;
+    }, 20);
+    try {
+      await eventually(() => posts.some(([to, b]) => to === "a1" && b.startsWith(`Job ${a.job.id} `)), "the requester of the large job is told");
+      const toldIn = (id: string) => {
+        const lines = journal(S);
+        const committed = lines.find((l) => l.type === "job_committed" && l.job === id)!;
+        const told = lines.find((l) => l.type === "job_notified" && l.job === id)!;
+        return Date.parse(told.at) - Date.parse(committed.at);
+      };
+      const aMs = toldIn(a.job.id);
+      assert.ok(aMs < 2000, `the requester of ${N} files was told ${aMs} ms after the commit`);
+      // A small job committed while the large one's files are being offered is told as soon.
+      const b = ok(await svc.submit("a2", { kind: "command", command: "echo small > \"$OUT/small.txt\"", inputs: [] }));
+      await until(svc, b.job.id);
+      await eventually(() => journal(S).some((l) => l.type === "job_notified" && l.job === b.job.id), "the small job's requester is told");
+      const bMs = toldIn(b.job.id);
+      assert.ok(bMs < 2000, `the small job's requester was told ${bMs} ms after its commit`);
+      await eventually(() => journal(S).some((l) => l.type === "derived_offered" && l.job === a.job.id), "the large job's files are offered, from the index", 240_000);
+      const offered = journal(S).find((l) => l.type === "derived_offered" && l.job === a.job.id)!;
+      assert.deepEqual((offered.offered as Array<{ path: string }>).map((o) => o.path), ["kept.zip"], "the one archive is offered, read from the index with the manifest unreadable");
+      assert.equal(offered.filtered, N + 20, "every other file was held to the recipes' measure");
+      t.diagnostic(`${N} files: told ${aMs} ms after the commit; a job committed meanwhile told ${bMs} ms after its own; a 20 ms timer at most ${Math.round(late)} ms late`);
+      assert.ok(late < 500, `a 20 ms timer in the hub's process was ${Math.round(late)} ms late while the offer ran`);
+    } finally {
+      clearInterval(timer);
+    }
+  } finally {
+    await svc.stop("over");
+    if (large) spawnSync("chmod", ["-R", "u+rw", join(storePaths(S).jobs, large)]);
+  }
 });
 
 // --- A11: the identical whole-object tool call is one job --------------------------------------------------

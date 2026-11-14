@@ -65,7 +65,7 @@
   "example": "{\"db\": \"work/extracted/knowledgeC.db\", \"stream\": \"/app/inFocus\", \"out_file\": \"work/<your id>/knowledgec.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 18,
+  "version": 19,
   "sha256": "be9599ff64c1cf8899461778cf8607bae3e229057e3608bbb1f10a295beafb2e",
   "use": {
     "names": [
@@ -77,5 +77,16 @@
       "write_values",
       "export_oversize"
     ]
-  }
+  },
+  "companions": [
+    {
+      "param": "db",
+      "suffixes": [
+        "-wal",
+        "-shm",
+        "-journal"
+      ],
+      "why": "the write-ahead log, its index and the rollback journal beside the database, where its last writes may be"
+    }
+  ]
 }

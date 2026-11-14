@@ -37,17 +37,19 @@
  * any import, and published as `import:<id>/<file>` with its trace provenance.
  */
 import { createHash } from "node:crypto";
-import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { INDEX_MIN_BYTES } from "./manifest-index.ts";
 import { hubAlive, hubProcessFor, Journal, manifestFile, manifestOf, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
-import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, SCOPE_DECLARED_MAX, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
+import { buildView, companionsOf, companionsWords, declaredScope, dropProjected, freeMb, PROJECTED_DIR, type Companions, resolveScope, SCOPE_DECLARED_MAX, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sampleJob, type JobProgress } from "./job-telemetry.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { argRefsWords, resolveToolArgs, type ArgRef } from "./tool-arg-refs.ts";
+import { elsewhereWords } from "./store-find.ts";
+import { coerceArgs, coercedWords } from "../extensions/forged-args.ts";
 import { EACH_SCRIPT, eachOf, eachPlan, eachWords, type EachSpec } from "./tool-each.ts";
 import { dumpMembers, dumpReaders, dumpsPost, membersTsv } from "./dump-members.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, SAME_AS_SHOWN, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
@@ -220,6 +222,10 @@ export type JobSpec = {
   args_resolved?: ArgRef[];
   /** A one-file reader given a directory: run once per file it reads there (tool-each.ts). */
   each?: EachSpec;
+  /** tool: the arguments taken as the types its manifest declares ("4096" for an integer, "[1, 2]" for an array), each said (extensions/forged-args.ts). */
+  args_coerced?: string[];
+  /** tool, declared scope: the companion files its manifest's rules brought into the scope (job-scope.ts companionsOf). */
+  companions?: Companions[];
   /** recipe: the one phase of the recipe to run, of those its recipe.json declares (`phases`); the recipe is told in RECIPE_PHASE. Without it the recipe runs whole. */
   phase?: string;
   experimental?: boolean;
@@ -589,8 +595,16 @@ export const SEALERS = 2;
 /** A tree of more files or bytes than this is a large seal: at most all sealers but one hold such trees. Counted by a bounded walk, never the whole tree. */
 export const SEAL_LARGE_FILES = 2000;
 export const SEAL_LARGE_BYTES = 256 * 1024 * 1024;
-/** The part of the derived catalogue's generations kept for what a user made or kept (derivedRank below 1), whenever it is offered. */
-export const DERIVED_RESERVE = 0.2;
+/**
+ * The part of the derived catalogue's generations kept for what a user made
+ * or kept (derivedRank below 1), whenever it is offered: anything else gets
+ * the rest and no more. A fifth was kept before, and on a run whose first
+ * committed tree was a prefix of Program Files (E0) four fifths of the
+ * ceiling went to a vendor's files before the profile's Temp and Downloads
+ * were offered; the plan holds the lane to 30 of 50 for a user's objects
+ * (tests/job-stages.test.ts replays such a run on a synthetic tree).
+ */
+export const DERIVED_RESERVE = 0.6;
 
 const JOB_ID = /^j\d{6}$/;
 export const TIMEOUT_MAX_SECONDS = 4 * 3600;
@@ -675,19 +689,94 @@ export const MSB_DEFAULT_QUOTA_MB = 4096;
 
 /**
  * The write quota of a job's $OUT, in MiB: `SWARM_JOB_OUT_QUOTA_MB` when set,
- * else the room free where it is kept less the room the service keeps free,
- * shared among the jobs that write at once (`sharers`: this job and every
- * other that runs), and never below microsandbox's default
- * (a job could write that much before). Each job used to be given all the
- * free room: three whole-image extractions of one run were promised the same
- * 64 GB, and the disk stood at 94%.
+ * else one budget, the room free where it is kept less the room the service
+ * keeps free, shared among the jobs that may write to that disk at once
+ * (`sharers`: this job, every other job of its run that runs, and the jobs
+ * of the other runs on the host that write to the same disk, as
+ * hostStagingWriters counts them). Each job used to be given all the free
+ * room (three whole-image extractions of one run were promised the same
+ * 64 GB, and the disk stood at 94%), and then a share of it never below
+ * microsandbox's default of 4 GiB, which promised a disk with less room than
+ * that 4 GiB a job, and counted no other run. The share is what there is:
+ * never 0 (a quota of 0 is none, and microsandbox's 4 GiB again), and
+ * microsandbox's default only when the room is not known.
  */
 export function outQuotaMb(free: number | null, minFreeMb: number, env: NodeJS.ProcessEnv = process.env, sharers = 1): number {
   const set = Number(env.SWARM_JOB_OUT_QUOTA_MB);
   if (Number.isFinite(set) && set > 0) return Math.floor(set);
   if (free === null) return MSB_DEFAULT_QUOTA_MB;
   const n = Number.isFinite(sharers) && sharers >= 1 ? Math.floor(sharers) : 1;
-  return Math.max(MSB_DEFAULT_QUOTA_MB, Math.floor((free - minFreeMb) / n));
+  return Math.max(1, Math.floor((free - minFreeMb) / n));
+}
+
+/** Beside a run's staging: how many of its jobs write there now, for the other runs on the host to count (hostStagingWriters). */
+export const STAGING_WRITERS = ".writers.json";
+
+/**
+ * The jobs of the other runs on this host that may write to the same disk
+ * as `staging` now: for each run the registry says is running whose hub
+ * lives (as swarm.sh's capacity check counts them), whose staging is on the
+ * same device, the count its job service last wrote beside its staging
+ * (STAGING_WRITERS, held to a live process), or, where it wrote none (a hub
+ * from before it did), the job workers it declared, the most it may run.
+ * `runs` names each run counted and what it was counted as.
+ */
+export function hostStagingWriters(registry: string | undefined, self: string, staging: string): { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } {
+  const out: { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } = { writers: 0, runs: [] };
+  if (!registry) return out;
+  let listed: unknown;
+  try {
+    listed = (JSON.parse(readFileSync(registry, "utf8")) as { runs?: unknown }).runs;
+  } catch {
+    return out;
+  }
+  const runs = (Array.isArray(listed) ? listed : listed && typeof listed === "object" ? Object.values(listed) : []) as Array<Record<string, unknown>>;
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const me = real(self);
+  let dev: number | null = null;
+  try {
+    dev = statSync(staging).dev;
+  } catch {
+    dev = null;
+  }
+  const alive = (pid: unknown) => {
+    try {
+      return Number.isInteger(pid) && (pid as number) > 0 && process.kill(pid as number, 0);
+    } catch {
+      return false;
+    }
+  };
+  for (const r of runs) {
+    if (!r || r.state !== "running" || typeof r.sandbox !== "string" || !r.sandbox) continue;
+    const sb = resolve(r.sandbox);
+    if (real(sb) === me || hubAlive(sb) === null) continue;
+    const theirs = storePaths(sb).staging;
+    let st;
+    try {
+      st = statSync(theirs);
+    } catch {
+      continue; // no staging yet: none of its jobs has written
+    }
+    if (dev !== null && st.dev !== dev) continue; // another disk, another budget
+    let n: number | null = null;
+    try {
+      const w = JSON.parse(readFileSync(join(theirs, STAGING_WRITERS), "utf8")) as { writers?: unknown; pid?: unknown };
+      if (Number.isInteger(w.writers) && (w.writers as number) >= 0 && alive(w.pid)) n = w.writers as number;
+    } catch {
+      n = null;
+    }
+    const iso = r.isolation as { jobs?: { workers?: unknown } } | undefined;
+    const declared = Math.max(1, Math.floor(Number(iso?.jobs?.workers) || 1));
+    out.runs.push({ run: String(r.id ?? sb), writers: n ?? declared, from: n === null ? "declared_workers" : "writers_file" });
+    out.writers += n ?? declared;
+  }
+  return out;
 }
 
 export class JobService {
@@ -807,6 +896,8 @@ export class JobService {
       if (!last || JSON.stringify({ default: last.default, images: last.images, pack_profiles: last.pack_profiles }) !== JSON.stringify(declared)) await this.journal.append({ type: "job_images", ...declared });
     }
     await this.recover();
+    // Whatever an earlier hub of this run said of its writers is this one's to say now.
+    this.publishWriters();
     await this.queueKickoffRecipes();
     let ticks = 0;
     this.timer = setInterval(() => {
@@ -1134,6 +1225,17 @@ export class JobService {
   }
 
   /**
+   * What a job would be accepted as, or the reason it would be refused: the
+   * checks of submit alone (its arguments typed, its references resolved,
+   * its scope), with nothing queued, journalled or run. The tool contract
+   * test asks it of every pack tool.
+   */
+  async preview(raw: Partial<JobSpec>): Promise<JobSpec | { reason: string }> {
+    const { seal: _seal, scope: _scope, ...asked } = raw;
+    return this.normalise(asked);
+  }
+
+  /**
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
@@ -1394,19 +1496,30 @@ export class JobService {
     if (programs.length && declared.kind === "declared") for (const p of programs) if (!inputs.some((x) => x.replace(/\/+$/, "") === p)) inputs.push(p);
     const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}), ...(raw.independent === true && (kind === "command" || kind === "tool") ? { independent: true } : {}), ...(raw.secret_output === true ? { secret_output: true } : {}), ...(programs.length ? { programs } : {}) } as JobSpec;
     if (kind === "tool") {
-      const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
+      const given = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
+      // What an argument plainly is under its declared type is taken as that, as on a direct call (forged-args.ts), and said.
+      const toolParams: unknown = /^[a-z0-9_]{1,64}$/.test(String(raw.tool ?? "")) ? await readFile(join(this.S, "tools", String(raw.tool), "manifest.json"), "utf8").then((t) => (JSON.parse(t) as { params?: unknown }).params, () => undefined) : undefined;
+      const typed = toolParams !== null && typeof toolParams === "object" && !Array.isArray(toolParams) ? coerceArgs(toolParams as Record<string, { type?: string }>, given as Record<string, unknown>) : { args: given as Record<string, unknown>, coerced: [] as string[] };
+      const args = typed.args;
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
       if (!checked.ok) return { reason: checked.reason };
       // A reference given as an argument is the path it names; one that names nothing is refused here, with the form that works.
       const refs = resolveToolArgs(this.S, String(raw.tool), args as Record<string, unknown>, (id) => this.jobs.get(id)?.state);
-      if (!refs.ok) return { reason: refs.reason };
+      if (!refs.ok) {
+        // A path that is not in the job named: which job holds it, the nearest names in that one, and store_find (D1).
+        const more = refs.missing ? await elsewhereWords(this.S, refs.missing.kind, refs.missing.id, refs.missing.rel).catch(() => "") : "";
+        return { reason: more ? `${refs.reason}; ${more}` : refs.reason };
+      }
       // A declared scope is given what the arguments name: the tool could not read it otherwise.
       if (declared.kind === "declared") for (const r of refs.resolved) if (!base.inputs.some((x) => x === r.object || x.startsWith(`${r.object}/`) || x === r.from) && base.inputs.length < SCOPE_DECLARED_MAX) base.inputs.push(r.from);
-      // A directory given to a one-file reader: the tool runs once per file it reads there, or the call is refused with what to do.
       const man = JSON.parse(await readFile(join(this.S, "tools", String(raw.tool), "manifest.json"), "utf8"));
+      // And what its manifest says a file it is given needs beside it (a hive's logs, a database's -wal, a LevelDB's directory: job-scope.ts companionsOf).
+      const companions = declared.kind === "declared" ? companionsOf(this.S, man, refs.args).slice(0, 16) : [];
+      for (const c of companions) for (const ref of c.add) if (!base.inputs.includes(ref) && base.inputs.length < SCOPE_DECLARED_MAX) base.inputs.push(ref);
+      // A directory given to a one-file reader: the tool runs once per file it reads there, or the call is refused with what to do.
       const each = eachOf(this.S, String(raw.tool), refs.args, man);
       if (!each.ok) return { reason: each.reason };
-      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}) };
+      const withRefs = { tool: String(raw.tool), args: refs.args, ...(refs.resolved.length ? { args_resolved: refs.resolved.slice(0, 32) } : {}), ...(each.each ? { each: each.each } : {}), ...(typed.coerced.length ? { args_coerced: typed.coerced.slice(0, 32) } : {}), ...(companions.length ? { companions } : {}) };
       // The tool's manifest says this job is secret output: so it is, whatever the agent said (false included).
       if (checked.secret) return { ...base, secret_output: true, secret_output_by: "tool_manifest", ...withRefs };
       return { ...base, ...withRefs };
@@ -1933,6 +2046,7 @@ export class JobService {
     const imageChoice = Object.keys(this.o.images ?? {}).length ? { image_choice: chosen.choice } : {};
     await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...imageChoice, lane, ...hostWait, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, scope, ...(atStart ? { sensitive_at_start: atStart } : {}), accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
     Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, lane, ...imageChoice, accessible, scope, ...(atStart ? { sensitive_at_start: atStart } : {}), network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
+    this.publishWriters();
     await this.project(job);
     maybeCrash("job:started");
     const started = Date.now();
@@ -2045,6 +2159,7 @@ export class JobService {
     const times = { command_ended_at: commandEnded, worker_gone_at: workerGone, noticed_at: iso(noticedAt), ...(result.overdue ? { overdue: result.overdue } : {}) };
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...times, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(commandEnded ? { command_ended_at: commandEnded } : {}), ...(workerGone ? { worker_gone_at: workerGone } : {}), ...(result.digest ? { image_digest: result.digest } : {}) });
+    this.publishWriters();
     // job.json says what the job is at each step, not only at its commit: a job waiting to be sealed read "running" for hours (the run s17fdfe).
     await this.project(job).catch(() => undefined);
     await this.workerHealth(job, exit === null && !cancelled && !stopped && !pastLimit ? (result.error ?? "the worker did not report an exit status") : null);
@@ -2784,8 +2899,12 @@ export class JobService {
       await this.derivedMayRun();
       return;
     }
-    const m = await readManifest(join(storePaths(this.S).jobs, job.id, "manifest.json"));
-    if (!m || !m.manifest.files.length) return;
+    // The manifest's index (manifest-index.ts), read as a stream a piece at a
+    // time, never the manifest whole: a tree of 201,202 files has a manifest
+    // of 60 MB, and parsing it held the hub's thread. An index that is not
+    // there yet is made in a thread of its own (evidence-store.ts manifestOf).
+    const m = await manifestOf(join(storePaths(this.S).jobs, job.id, "manifest.json")).catch(() => null);
+    if (!m || !m.head.totals.files) return;
     const reach = Math.min(Math.max(0, ...derived.flatMap((r) => (r.magic ?? []).map((g) => g.offset + g.bytes.length))), 1 << 20);
     const out = join(storePaths(this.S).jobs, job.id, "out");
     const inputsSha = await this.inputShas();
@@ -2794,14 +2913,15 @@ export class JobService {
     const seen = new Set<string>();
     let filtered = 0;
     let n = 0;
-    for (const f of m.manifest.files) {
+    for await (const rows of m.files()) for (const f of rows) {
       // In the background: the loop is given back every so many files, and a stop ends it (recovery offers the job again).
       n += 1;
       if (n % 500 === 0) {
         await new Promise<void>((res) => setImmediate(res));
         if (this.stopping) return;
       }
-      const name = Buffer.from(f.path_b64, "base64").toString("utf8");
+      // The name's own bytes where the shown path is not them (a backslash, a byte that is not UTF-8).
+      const name = f.path_b64 === undefined ? f.path : Buffer.from(f.path_b64, "base64").toString("utf8");
       const head = async (): Promise<Buffer> => {
         if (!reach) return Buffer.alloc(0);
         this.counters.offer_file_opens += 1;
@@ -2913,10 +3033,11 @@ export class JobService {
     }
     for (const id of ids) {
       if (this.importShaSeen.has(id)) continue;
-      const found = await readManifest(join(dir, id, "manifest.json")).catch(() => null);
+      // From the import's index, as a stream, like the job's own (offerFrom): never a manifest whole in the hub's thread.
+      const found = await manifestOf(join(dir, id, "manifest.json")).catch(() => null);
       if (!found) continue;
       this.importShaSeen.add(id);
-      for (const f of found.manifest.files) if (!m.has(f.sha256)) m.set(f.sha256, `import:${id}/${Buffer.from(f.path_b64, "base64").toString("utf8")}`);
+      for await (const rows of found.files()) for (const f of rows) if (!m.has(f.sha256)) m.set(f.sha256, `import:${id}/${f.path_b64 === undefined ? f.path : Buffer.from(f.path_b64, "base64").toString("utf8")}`);
     }
     return m;
   }
@@ -2990,10 +3111,7 @@ export class JobService {
    * made: the lane runs one job at a time to its end, and each start asks.
    */
   private derivedRoomFor(rank: number): boolean {
-    const L = this.limits();
-    const made = this.derivedMade();
-    if (made >= L.generationsMax) return false;
-    return rank < 1 || made < L.generationsMax - this.derivedReserve();
+    return derivedRoom(rank, this.derivedMade(), this.limits().generationsMax, this.derivedReserve());
   }
 
   /** A queued job of the lane, cancelled on the record with why. */
@@ -3035,18 +3153,7 @@ export class JobService {
     this.draining = true;
     try {
       const L = this.limits();
-      const ranks = new Map(this.derivedPending.map((c) => [c, this.rankOf(c)]));
-      this.derivedPending.sort((a, b) => ranks.get(a)! - ranks.get(b)! || b.bytes - a.bytes);
-      const userOnly = !this.derivedRoomFor(1);
-      const take: Candidate[] = [];
-      let pairs = 0;
-      while (this.derivedPending.length && (pairs === 0 || pairs + this.derivedPending[0].recipes.length <= L.pairsPerPass) && take.length < DETECT_FILES_MAX) {
-        // Sorted by rank: the first that is not a user's ends the pass when only the kept part is left.
-        if (userOnly && ranks.get(this.derivedPending[0])! >= 1) break;
-        const c = this.derivedPending.shift()!;
-        take.push(c);
-        pairs += c.recipes.length;
-      }
+      const { take, userOnly } = derivedPass(this.derivedPending, (c) => this.rankOf(c), { made: this.derivedMade(), max: L.generationsMax, reserve: this.derivedReserve(), pairsPerPass: L.pairsPerPass });
       if (!take.length) {
         if (userOnly && this.derivedPending.length && !this.derivedSaid.has("derived_reserved:generations")) {
           this.derivedSaid.add("derived_reserved:generations");
@@ -3283,11 +3390,39 @@ export class JobService {
     }
   }
 
-  /** The jobs that may still write at once: this one and every other that runs (what an ended job wrote is already out of the free room). */
+  /**
+   * The jobs that may still write to this disk at once: this one, every
+   * other of this run that runs, and the other runs' on the host
+   * (hostStagingWriters). What an ended job wrote is already out of the free
+   * room.
+   */
   private stagingSharers(id: string): number {
     let n = 1;
     for (const j of this.jobs.values()) if (j.id !== id && j.state === "running") n += 1;
-    return n;
+    const registry = this.o.registry ?? (process.env.SWARM_RUNS_DIR ? join(process.env.SWARM_RUNS_DIR, "registry.json") : undefined);
+    return n + hostStagingWriters(registry, this.S, storePaths(this.S).staging).writers;
+  }
+
+  private writersSaid: number | null = null;
+  /**
+   * How many of this run's jobs write to its staging now, written beside it
+   * (STAGING_WRITERS) whenever that changes, for the other runs on the host
+   * to share the disk's room with them. A file that cannot be written leaves
+   * the others counting this run's declared workers.
+   */
+  private publishWriters(): void {
+    const n = [...this.jobs.values()].filter((j) => j.state === "running").length;
+    if (n === this.writersSaid) return;
+    const dir = storePaths(this.S).staging;
+    const tmp = join(dir, `${STAGING_WRITERS}.${process.pid}.tmp`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify({ v: 1, run: this.o.run, pid: process.pid, writers: n, at: new Date().toISOString() })}\n`);
+      renameSync(tmp, join(dir, STAGING_WRITERS));
+      this.writersSaid = n;
+    } catch (err) {
+      this.log(`how many jobs write to the staging (${n}) could not be written beside it: ${(err as Error).message}`);
+    }
   }
 
   /** The kickoff's plan: every recipe the census found applies, run once the hub is up. */
@@ -3788,6 +3923,41 @@ export function programLines(ids: readonly string[], importsDir: string): string
 }
 
 /**
+ * Whether the derived lane may still spend a generation on an object of this
+ * rank (derivedRank), `made` of the ceiling `max` being made and `reserve`
+ * of it kept for what a user made or kept: anything while the unreserved
+ * part lasts, then only a user's objects (rank below 1), up to the ceiling.
+ */
+export function derivedRoom(rank: number, made: number, max: number, reserve: number): boolean {
+  if (made >= max) return false;
+  return rank < 1 || made < max - reserve;
+}
+
+/**
+ * What one derived pass takes of what waits: `pending` sorted in place, a
+ * user's objects first and a vendor's last (`rank`), the largest first
+ * within each, and taken from its head up to the pass's pairs (always one
+ * object at least) and DETECT_FILES_MAX objects. Once only the kept part of
+ * the ceiling is left (`userOnly`), the first object that is not a user's
+ * ends the pass. What is taken is removed from `pending`.
+ */
+export function derivedPass<C extends { bytes: number; recipes: readonly string[] }>(pending: C[], rank: (c: C) => number, o: { made: number; max: number; reserve: number; pairsPerPass: number }): { take: C[]; userOnly: boolean } {
+  const ranks = new Map(pending.map((c) => [c, rank(c)]));
+  pending.sort((a, b) => ranks.get(a)! - ranks.get(b)! || b.bytes - a.bytes);
+  const userOnly = !derivedRoom(1, o.made, o.max, o.reserve);
+  const take: C[] = [];
+  let pairs = 0;
+  while (pending.length && (pairs === 0 || pairs + pending[0].recipes.length <= o.pairsPerPass) && take.length < DETECT_FILES_MAX) {
+    // Sorted by rank: the first that is not a user's ends the pass when only the kept part is left.
+    if (userOnly && ranks.get(pending[0])! >= 1) break;
+    const c = pending.shift()!;
+    take.push(c);
+    pairs += c.recipes.length;
+  }
+  return { take, userOnly };
+}
+
+/**
  * Where a derived object stands in the derived catalogue's queue, lowest
  * first. Words of the path only: no file is read.
  *
@@ -3823,9 +3993,14 @@ export function derivedRank(path: string, o: { picked?: boolean } = {}): number 
   const kept = /\/(users|home|documents and settings)\/[^/]+\/(desktop|documents|my documents|downloads|pictures|videos|music|onedrive[^/]*|dropbox|appdata\/local\/temp|local settings\/temp)\//.test(p) || /\/(users\/public|windows\/temp|\$recycle\.bin|tmp|var\/tmp|dev\/shm)\//.test(p);
   if (kept) return CASE_FILE.test(p) ? 0 : 0.5;
   if (/\/(program files( \(x86\))?|programdata|windows|winsxs|\$windows\.~bt|system volume information|usr|lib|lib64|opt|snap)\//.test(p) || /\.(so(\.\d+)*|dll|mui|cat|manifest)$/.test(p)) return 2;
+  // A program or a script outside the vendors' roots and the runtimes, wherever it sits (a profile's AppData, a folder at the root).
+  if (RUNNABLE.test(p)) return 0;
   if (/\/(users|home|documents and settings)\/[^/]+\//.test(p)) return 0.5;
   return 1;
 }
+
+/** A program or a script, by its name's ending (a library is a vendor's or a runtime's: .dll and .so rank with them). */
+const RUNNABLE = /\.(exe|scr|com|pif|cpl|msi|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|jar|elf|apk)$/;
 
 /** A program, a script, a document, a mail, an archive or an image of a disk, by its name's ending. */
 const CASE_FILE = /\.(exe|dll|scr|com|pif|cpl|sys|msi|msix|appx|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|lnk|url|jar|py|sh|elf|bin|apk|dmg|pkg|deb|rpm|doc[xm]?|dot[xm]?|xls[xmb]?|xlt[xm]?|ppt[xm]?|pps[xm]?|rtf|pdf|one|odt|ods|odp|csv|txt|eml|msg|pst|ost|mbox|zip|7z|rar|tar|gz|tgz|bz2|xz|cab|iso|img|vhdx?|vmdk|ova|e01|ad1|kdbx|sqlite|db)$/;
@@ -3856,7 +4031,7 @@ export function describe(job: JobRecord): string {
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
   const sameN = job.same_as_total?.files ?? job.same_as?.length ?? 0;
   const same = sameN ? ` ${sameN} of its files are an earlier job's output byte for byte (job_status ${job.id} names ${job.same_as_total?.list ? `the first, ${job.same_as_total.list} every one` : "them"}).` : "";
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.spec.args_coerced?.length ? ` ${coercedWords(job.spec.args_coerced)}` : ""}${job.spec.companions?.length ? ` ${companionsWords(job.spec.companions)}` : ""}${job.spec.args_resolved?.length ? ` ${argRefsWords(job.spec.args_resolved)}` : ""}${job.spec.each ? ` ${eachWords(job.spec.each)}` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
 }
 
 /**
@@ -3906,6 +4081,8 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number; wa
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
+    ...(job.spec.args_coerced?.length ? { args_coerced: coercedWords(job.spec.args_coerced) } : {}),
+    ...(job.spec.companions?.length ? { companions: job.spec.companions } : {}),
     ...(job.spec.programs?.length ? { programs: job.spec.programs } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
     ...(job.spec.secret_output_by ? { secret_output_by: job.spec.secret_output_by } : {}),
