@@ -1476,7 +1476,10 @@ export type UnrecordedHold = { seat: string; job: string; ended: string; last: s
  * that does not wait for such a seat ends without it. It holds the done (scripts/finish-gate.ts, unrecorded_work) and
  * cannot hold it for ever: a seat that records anything, is done, is marked dead or falls silent past the stale limit
  * releases it, and a hold a done named lapses `unrecordedGraceMs` after that done (the finish log's check that first
- * named it), when it turns a warning.
+ * named it), when it turns a warning. A job the record already names is not unrecorded work, whoever recorded it: a
+ * standing entry that cites it (job:<id> in refs or result_refs, or its id in source or evidence, as an entry recorded
+ * from a page of its stdout before it finished names it) or an interpretation of it on the leads register. A seat
+ * was held for a job a peer had recorded, and for one it recorded from a partial page before the job's finished_at.
  */
 export async function unrecordedHolds(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<UnrecordedHold[]> {
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
@@ -1493,6 +1496,7 @@ export async function unrecordedHolds(sandboxRoot: string, s: L.LeadsSnapshot, n
   for (const d of await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[])) saw(d.by, d.at);
   const st = await readFinish(sandboxRoot).catch(() => null);
   const grace = unrecordedGraceMs();
+  const named = recordedJobs(s);
   const out: UnrecordedHold[] = [];
   for (const id of ids) {
     if (["done", "dead"].some((m) => existsSync(join(sandboxRoot, "done", "agents", `${id}.${m}`)))) continue;
@@ -1501,15 +1505,28 @@ export async function unrecordedHolds(sandboxRoot: string, s: L.LeadsSnapshot, n
     const last = lastRecord.get(id) ?? 0;
     let newest: { job: string; at: number } | null = null;
     for (const j of s.jobs) {
-      if (j.agent !== id || (j.kind !== "command" && j.kind !== "tool") || j.status !== "ok" || !j.finished_at) continue;
+      if (j.agent !== id || (j.kind !== "command" && j.kind !== "tool") || j.status !== "ok" || !j.finished_at || named.has(j.id)) continue;
       const at = Date.parse(j.finished_at);
       if (Number.isFinite(at) && at > last && (!newest || at > newest.at)) newest = { job: j.id, at };
     }
     if (!newest) continue;
     const since = last ? new Date(last).toISOString() : "none";
-    const named = st?.checks.find((c) => ((c.run as { gate?: { defects?: Array<{ code?: string; seat?: string; since?: string }> } } | undefined)?.gate?.defects ?? []).some((d) => d.code === "unrecorded_work" && d.seat === id && d.since === since));
-    const askedAt = named ? Date.parse(named.at) : NaN;
-    out.push({ seat: id, job: newest.job, ended: new Date(newest.at).toISOString(), last: last ? since : null, since, ...(Number.isFinite(askedAt) ? { asked: named!.at, lapsed: now - askedAt >= grace } : {}) });
+    const check = st?.checks.find((c) => ((c.run as { gate?: { defects?: Array<{ code?: string; seat?: string; since?: string }> } } | undefined)?.gate?.defects ?? []).some((d) => d.code === "unrecorded_work" && d.seat === id && d.since === since));
+    const askedAt = check ? Date.parse(check.at) : NaN;
+    out.push({ seat: id, job: newest.job, ended: new Date(newest.at).toISOString(), last: last ? since : null, since, ...(Number.isFinite(askedAt) ? { asked: check!.at, lapsed: now - askedAt >= grace } : {}) });
+  }
+  return out;
+}
+
+/** The jobs the record names: cited by a standing ledger entry (refs, result_refs, or the id in source or evidence), or interpreted on the leads register. */
+export function recordedJobs(s: Pick<L.LeadsSnapshot, "ledger" | "state">): Set<string> {
+  const out = new Set<string>(s.state.interpretations.keys());
+  const replaced = P.supersededBy(s.ledger.entries);
+  for (const e of s.ledger.entries) {
+    if (replaced.has(e.seq)) continue;
+    const x = e as { refs?: unknown; result_refs?: unknown; source?: unknown; evidence?: unknown };
+    const text = [...[x.refs, x.result_refs].flatMap((r) => (Array.isArray(r) ? r : [])), x.source, x.evidence].map((v) => String(v ?? "")).join("\n");
+    for (const m of text.matchAll(/\bj\d{6,}\b/g)) out.add(m[0]);
   }
   return out;
 }
@@ -1538,7 +1555,8 @@ export async function unrecordedWork(sandboxRoot: string, s: L.LeadsSnapshot, no
 export async function askUnrecorded(sandboxRoot: string, by: string, defects: ReadonlyArray<{ code: string; seat?: string; job?: string; since?: string; what?: string }>, post: (args: { tag: string; body: string; to: string; key: string; via: string }) => Promise<unknown>): Promise<string[]> {
   const asked: string[] = [];
   for (const d of defects) {
-    if (d.code !== "unrecorded_work" || !d.seat) continue;
+    // The seat whose done this is is told by its own refusal, not asked on the board by itself.
+    if (d.code !== "unrecorded_work" || !d.seat || d.seat === by) continue;
     const key = `unrecorded:${d.seat}:${String(d.since ?? "none").replace(/[^A-Za-z0-9:._-]/g, "")}`;
     const body =
       `${by} called done, and the finish waits for you: ${d.what ?? `your work ended after your last record`}. ` +
