@@ -20,6 +20,7 @@ import {
   cardIndex,
   cardSentences,
   chooseCard,
+  commonWords,
   HAND_CARD_MAX,
   HAND_CARD_SENTENCES,
   readPackIndexes,
@@ -169,6 +170,27 @@ test("every hand-written card is reached: in every run its pack is in, a call br
     }
   }
   console.log(`# ${checked} card-runs checked; with every pack: ${[...routes].map(([k, v]) => `${v} by ${k}`).join(", ")}`);
+  // What the routes are worth as a seat meets them, with every pack: a form whose placeholders are given an opaque path
+  // (the call names nothing of the placeholder), and a lead that is the note's title alone, not its when line.
+  const index = await indexOf(PACK_IDS);
+  const fresh = new Set<string>();
+  const none = () => false;
+  const opaque = (v: unknown): unknown => (typeof v === "string" ? (/<[^<>]*>/.test(v) ? "inputs/x/item0001" : v) : Array.isArray(v) ? v.map(opaque) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, opaque(x)])) : v);
+  let byOpaque = 0;
+  let leadOnly = 0;
+  let byTitle = 0;
+  for (const n of index.notes.filter((x) => x.hand)) {
+    const brings = (c: CardCall, lead = "") => {
+      const got = chooseCard(index, c, fresh, none, lead);
+      return got?.kind === "note" && got.note === n;
+    };
+    if (n.tools.some((t) => (n.examples.get(t) ?? []).some((f) => brings(call(t, opaque(f) as Record<string, unknown>))))) byOpaque++;
+    if ((await reach(index, n))?.route !== "a lead it fits") continue;
+    leadOnly++;
+    const title = (await readSkillFile(n.pack, n.id))?.title ?? "";
+    if (n.tools.some((t) => brings(call(t), title))) byTitle++;
+  }
+  console.log(`# with every pack: ${byOpaque} by a form whose placeholders are an opaque path; of ${leadOnly} reached by a lead only, ${byTitle} by the note's title alone`);
   assert.deepEqual(unreached, []);
 });
 
@@ -228,3 +250,34 @@ test("a card is reached as a seat meets it: its own argument form brings it, ano
   // A command that runs a program a note names: the note it matches.
   assert.equal(picked({ tool: null, programs: ["capa"], args: {}, text: "capa -j inputs/sample.exe", lead: null }), note("reverse-engineering", "capabilities/mapping"));
 });
+
+test("words common to a tool's notes tell none apart: a regkv call under Microsoft\\ or ControlSet001\\Control brings the general rules, not a note whose form shares only those words (D2)", async () => {
+  const index = await indexOf(PACK_IDS);
+  const fresh = new Set<string>();
+  const none = () => false;
+  const W = "inputs/C/Windows/System32/config/";
+  const got = (c: CardCall) => {
+    const g = chooseCard(index, c, fresh, none);
+    return g?.kind === "note" ? `${g.note.pack.id}:${g.note.id} (${g.by})` : (g?.kind ?? "nothing");
+  };
+  // The common words are the notes' own: what more than a quarter of regkv's notes hold, not a hand list.
+  const common = commonWords(index.byTool.get("regkv")!);
+  for (const w of ["software", "system", "microsoft", "windows", "currentversion", "control", "controlset00n"]) assert.ok(common(w), `${w} is common to regkv's notes`);
+  for (const w of ["timezoneinformation", "domains", "sam"]) assert.ok(!common(w), `${w} is a form's own`);
+  // Each of these brought registry/system-profile (score 6 to 8) or registry/clock (4) by args before: now the rules regkv's notes give.
+  for (const [hive, key] of [
+    ["SOFTWARE", "Microsoft\\Windows\\CurrentVersion\\Uninstall"],
+    ["SOFTWARE", "Microsoft\\Windows Defender\\Exclusions\\Paths"],
+    ["SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion\\Winlogon"],
+    ["SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tasks"],
+    ["SOFTWARE", "Microsoft\\Windows\\CurrentVersion\\Run"],
+    ["SYSTEM", "ControlSet001\\Control\\ComputerName\\ComputerName"],
+  ]) {
+    assert.equal(got(call("regkv", { hive: W + hive, key })), "rules", `${hive} ${key}`);
+  }
+  // A key a form is about still brings its note: by a word of its own, or the form's value given whole.
+  assert.equal(got(call("regkv", { hive: W + "SAM", key: "SAM\\Domains\\Account\\Users\\Names" })), "windows-forensics:accounts/logons (args)");
+  assert.equal(got(call("regkv", { hive: W + "SYSTEM", key: "ControlSet001\\Control\\TimeZoneInformation" })), "windows-forensics:registry/clock (args)");
+  assert.equal(got(call("regkv", { hive: W + "SOFTWARE", key: "Microsoft\\Windows NT\\CurrentVersion" })), "windows-forensics:registry/system-profile (args)");
+});
+

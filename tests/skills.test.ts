@@ -862,6 +862,24 @@ test("a lead opened or claimed names the notes that fit it after the result, onc
   }
 });
 
+test("a note's card a call matched does not spend the first call of a tool many notes name: the general rules come with the first call that matches none (D2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const spec: Record<string, SkillSpec> = {};
+    for (const k of ["alpha", "beta", "gamma", "delta", "epsilon"]) spec[`area/${k}`] = { title: `Note ${k}`, when: `Case ${k}.`, tools: ["many_tool"], card: `many_tool {"kind": "${k}"} reads the ${k} records only. A rule of ${k}: many_tool never says more than it read.`, body: `Body of ${k}.` };
+    const pack = await writePack(root, "p", "1.0.0", spec);
+    const seat = await cardSeat([pack]);
+    assert.match((await seat.result("many_tool", { kind: "beta" }))!, /from the note `area\/beta`/);
+    // The next call names no note's kind: the rules the notes give of the tool, once.
+    assert.match((await seat.result("many_tool", { path: "inputs/x" }))!, /^Before you read this result, the rules of many_tool from the notes that name it/);
+    assert.equal(await seat.result("many_tool", { path: "inputs/y" }), null);
+    // A kind not yet shown still brings its note.
+    assert.match((await seat.result("many_tool", { kind: "delta" }))!, /from the note `area\/delta`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a lead names no note the seat already holds, whatever pack carries it: the ledger is asked by pack:id (D8)", async () => {
   const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
   try {
