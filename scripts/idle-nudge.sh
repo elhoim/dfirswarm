@@ -267,12 +267,19 @@ PY
 
 # Whether the agent has a job of its own still to finish: then its waiting is
 # what the job asked of it, and the job's post wakes it.
-has_open_job() { # <agent id>
-  local f
+has_open_job() { # <agent id>: a job of its own still to finish, or one it was joined to (job_deduplicated), which it waits on as on its own
+  local f j
   for f in "$SANDBOX"/store/jobs/*/job.json; do
     [[ -f "$f" ]] || continue
     jq -e --arg id "$1" '.requester.agent == $id and (.state | IN("accepted", "running", "finished", "fenced"))' "$f" >/dev/null 2>&1 && return 0
   done
+  [[ -f "$SANDBOX/store/journal.jsonl" ]] || return 1
+  while IFS= read -r j; do
+    [[ "$j" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+    f="$SANDBOX/store/jobs/$j/job.json"
+    [[ -f "$f" ]] && jq -e '.state | IN("accepted", "running", "finished", "fenced")' "$f" >/dev/null 2>&1 && return 0
+  done < <(grep -F '"job_deduplicated"' "$SANDBOX/store/journal.jsonl" 2>/dev/null \
+    | jq -R -r --arg id "$1" 'fromjson? | select(.type == "job_deduplicated" and ((.by | if type == "object" then .agent else . end) == $id)) | .job // empty' 2>/dev/null | sort -u)
   return 1
 }
 

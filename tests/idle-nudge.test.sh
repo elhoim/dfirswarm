@@ -192,6 +192,20 @@ wait_once --wait-idle-sec 600
 [[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 1 ]] || fail "once the job was done the waiting agent was not nudged"
 pass "an agent waiting on a job of its own that is still running is left to wait"
 
+# Joined to another seat's identical call (job_deduplicated), it waits on that job as on its own.
+: > "$PROMPT_LOG"
+: > "$WS/traces/idle-nudge.state"
+mkdir -p "$WS/store/jobs/j000002"
+printf '{"id":"j000002","requester":{"agent":"w9"},"state":"running"}\n' > "$WS/store/jobs/j000002/job.json"
+{ printf 'torn\n'; printf '{"type":"job_deduplicated","job":"j000002","by":{"agent":"w0","name":"w0"},"dedup_key":"k"}\n'; } > "$WS/store/journal.jsonl"
+wait_once --wait-idle-sec 600
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent waiting on a running job it was joined to was nudged"
+printf '{"id":"j000002","requester":{"agent":"w9"},"state":"committed"}\n' > "$WS/store/jobs/j000002/job.json"
+wait_once --wait-idle-sec 600
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 1 ]] || fail "once the joined job was done the waiting agent was not nudged"
+rm -f "$WS/store/journal.jsonl"
+pass "an agent waiting on a running job it was joined to is left to wait"
+
 # Its last wait long past: it is in some other long call, not waiting.
 : > "$PROMPT_LOG"
 : > "$WS/traces/idle-nudge.state"
