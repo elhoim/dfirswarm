@@ -189,13 +189,12 @@ test("raw jobs are never merged: another seat's same work over the same objects 
   const second = await call("a2", "jobSubmit", { ...spec, timeout_seconds: 60 });
   assert.equal(first.ok && second.ok, true);
   assert.notEqual(first.job.job, second.job.job, "the second request is a job of its own: nothing was merged");
-  assert.deepEqual(second.similar.map((x: Record<string, unknown>) => [x.job, x.seat, x.match, x.objects]), [[first.job.job, "a1", "same command", "same"]], "a timeout of its own does not hide it");
-  assert.match(second.similar_note, /read their outputs/);
+  assert.match(second.similar, new RegExp(`^Other seats did this work over these objects: ${first.job.job} by a1-name \\(\\w+[^)]*; same command\\)\\. Read their outputs`), "a timeout of its own does not hide it");
   assert.equal(journal().filter((l) => l.type === "job_would_merge").length, 0, "the shadow merge is retired");
   assert.equal(journal().filter((l) => l.type === "job_similar").length, 1);
   // Its own earlier job, a job over everything (live work/), and a file of one's own are never similar.
   const own = await call("a1", "jobSubmit", spec);
-  assert.deepEqual(own.similar.map((x: Record<string, unknown>) => x.job), [second.job.job], "a seat's own earlier job is not named, the other seat's is");
+  assert.match(own.similar, new RegExp(`over these objects: ${second.job.job} by [^,.]*\\. `), "a seat's own earlier job is not named, the other seat's is");
   assert.equal((await call("a2", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] })).similar, undefined);
   await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
   assert.equal((await call("a2", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] })).similar, undefined);
