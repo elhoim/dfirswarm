@@ -20,8 +20,8 @@
  * the item that removes it; the list may only shrink.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -206,10 +206,11 @@ export function secretJob(manifest: Manifest, args: Record<string, unknown>): bo
   return d.ok && declaredSecretOutput(d.declaration as SecretDeclaration | null, args);
 }
 
-function runAsJob(root: string, tool: Tool, jobId: string, args: Record<string, unknown>): Promise<Run> {
+function runAsJob(root: string, tool: Tool, jobId: string, args: Record<string, unknown>, extraEnv: Record<string, string> = {}): Promise<Run> {
   return new Promise((resolve) => {
     const out = join(root, ".jobs", jobId);
     const env: Record<string, string> = {
+      ...extraEnv,
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: process.env.HOME ?? root,
       JOB_ID: jobId,
@@ -367,4 +368,230 @@ test("the job_run check finds a path said not to be there, a traceback, a hang, 
   const both = notThere(`{"errors":["definitions not found","${ABSENT_DIR} does not exist"]}`, root);
   assert.equal(sameAsAbsent(notThere('{"errors":["definitions not found"]}', root), both), null);
   assert.equal(sameAsAbsent(notThere('{"status":"complete"}', root), []), null);
+});
+
+// ---- E12: a valid input per tool family, so the code past the format check runs on the job's path ---------------------------------
+
+/**
+ * The calls above give every tool a file that is no artefact, so a tool refuses it at its format check and the code after it, where
+ * the path is handed on (to a reader child, a second open, a directory walk), never runs: browser_storage gave its reader, which runs
+ * with / as its working directory, the caller's relative path (0.3, I-11), and passed. Here a tool family whose input is cheap to make
+ * whole is given one, at a run-relative path with spaces, and must read it: no traceback, one JSON answer, no member of the input said
+ * not to be there (FileNotFoundError, ENOENT, "no such file"), and a status other than failed, unless the tool says its reader is not
+ * on this host (unavailable) or a module it imports is missing.
+ */
+type Family = {
+  name: string;
+  /** The input, made under the run root; its path relative to the root has a space in it. */
+  make: (root: string) => Promise<string>;
+  /** The tools that read it, each with the parameter it goes in and the rest of the call. */
+  calls: Array<{ tool: string; param: string; args?: Record<string, unknown> }>;
+  /** What the run's environment needs for the family's reader (browser_storage's runs in a venv of its own). */
+  env?: (root: string) => Promise<Record<string, string>>;
+};
+
+const pyMake = (code: string, ...argv: string[]) => {
+  const r = spawnSync(PYTHON3, ["-c", code, ...argv], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+};
+
+/** A stand-in for ccl_chromium_reader's process (tests/pack-base-job-call.test.ts): it opens each data file by the path the tool hands it, from the working directory the tool gives it. */
+async function standInReader(root: string): Promise<Record<string, string>> {
+  const src = join(root, "work", "reader src");
+  const bin = join(src, "ccl_indexeddb_dump", ".venv", "bin");
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(src, "reader.py"), [
+    "import json, os, sys",
+    "spec = json.load(sys.stdin)",
+    "files = []",
+    "for name, kind in spec['files']:",
+    "    entry = {'name': name, 'kind': kind, 'size': None, 'records': 0, 'put': 0, 'delete': 0, 'unknown': 0, 'records_in_compressed_blocks': 0, 'status': 'read'}",
+    "    try:",
+    "        fd = os.open(os.path.join(spec['path'], name), os.O_RDONLY | os.O_NOFOLLOW)",
+    "        entry['size'] = os.fstat(fd).st_size",
+    "        os.close(fd)",
+    "    except OSError as exc:",
+    "        entry.update({'status': 'failed', 'stage': 'open', 'error_class': type(exc).__name__})",
+    "    files.append(entry)",
+    "print(json.dumps({'ok': True, 'versions': {}, 'files': files, 'format': 'leveldb', 'records_total': 0, 'counts': {}, 'previews': [], 'decode_errors': {}, 'leveldb': {}}))",
+  ].join("\n") + "\n");
+  // The tool starts it as <python> -I -c <the reader's code>, the specification on stdin: the stand-in takes the stdin and ignores the code.
+  await writeFile(join(bin, "python"), `#!/bin/sh\nexec '${PYTHON3}' '${join(src, "reader.py")}'\n`);
+  await chmod(join(bin, "python"), 0o755);
+  return { DFIRSWARM_SRC_DIR: src };
+}
+
+export const FAMILIES: Family[] = [
+  {
+    name: "a Chromium LevelDB directory",
+    make: async (root) => {
+      const dir = "inputs/case files/Local Storage/leveldb";
+      await mkdir(join(root, dir), { recursive: true });
+      await writeFile(join(root, dir, "000003.log"), Buffer.alloc(64, 0));
+      await writeFile(join(root, dir, "MANIFEST-000001"), Buffer.alloc(16, 0));
+      return dir;
+    },
+    calls: [{ tool: "browser_storage", param: "path" }],
+    env: standInReader,
+  },
+  {
+    name: "a SQLite database",
+    make: async (root) => {
+      const db = "inputs/case files/a store.db";
+      pyMake("import sqlite3,sys\nc=sqlite3.connect(sys.argv[1]);c.execute('create table t (a text)');c.execute(\"insert into t values ('x')\");c.commit();c.close()", join(root, db));
+      return db;
+    },
+    calls: [
+      { tool: "sqlite_query", param: "db_path", args: { sql: "select count(*) from t;" } },
+      { tool: "sqlite_snapshot", param: "db_path", args: { out_dir: "{OUT}/snapshot" } },
+      { tool: "sqlite_freespace", param: "db" },
+    ],
+  },
+  {
+    name: "a ZIP archive",
+    make: async (root) => {
+      const zip = "inputs/case files/an archive.zip";
+      pyMake("import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1],'w');z.writestr('dir one/a member.txt','not an artefact\\n');z.close()", join(root, zip));
+      return zip;
+    },
+    calls: [
+      { tool: "archive_extract", param: "path", args: { out_dir: "{OUT}/members" } },
+      { tool: "archive_probe", param: "path" },
+      { tool: "archive_metadata", param: "path" },
+    ],
+  },
+  {
+    name: "a property list",
+    make: async (root) => {
+      const plist = "inputs/case files/com.example.agent.plist";
+      pyMake("import plistlib,sys\nopen(sys.argv[1],'wb').write(plistlib.dumps({'Label':'com.example.agent','ProgramArguments':['/bin/true']}))", join(root, plist));
+      return plist;
+    },
+    calls: [{ tool: "plist_read", param: "path" }],
+  },
+  {
+    name: "a syslog authentication log",
+    make: async (root) => {
+      const log = "inputs/case files/var log/auth.log";
+      await mkdir(dirname(join(root, log)), { recursive: true });
+      await writeFile(join(root, log), "Mar  3 10:00:01 host sshd[101]: Accepted publickey for alice from 192.0.2.7 port 50000 ssh2\n");
+      return log;
+    },
+    calls: [{ tool: "auth_log", param: "path", args: { year: 2026 } }],
+  },
+  {
+    name: "a CloudTrail file",
+    make: async (root) => {
+      const file = "inputs/case files/cloud trail/events.json";
+      await mkdir(dirname(join(root, file)), { recursive: true });
+      await writeFile(join(root, file), JSON.stringify({ Records: [{ eventVersion: "1.08", eventTime: "2026-03-03T10:00:01Z", eventSource: "s3.amazonaws.com", eventName: "ListBuckets", awsRegion: "us-east-1", eventID: "00000000-0000-0000-0000-000000000001", userIdentity: { type: "IAMUser", arn: "arn:aws:iam::000000000000:user/example" } }] }));
+      return file;
+    },
+    calls: [{ tool: "cloudtrail_parse", param: "path" }],
+  },
+  {
+    name: "a home directory with a shell history",
+    make: async (root) => {
+      const tree = "inputs/case files/extracted root";
+      await mkdir(join(root, tree, "home", "alice"), { recursive: true });
+      await writeFile(join(root, tree, "home", "alice", ".bash_history"), "ls -la\nwhoami\n");
+      return tree;
+    },
+    calls: [{ tool: "shell_history", param: "root" }],
+  },
+];
+
+/** Why a tool's answer to a whole input it was given is not a reading of it, or null. */
+export function validInputFailure(r: { stdout: string; stderr: string; killed: boolean; code: number | null }): string | null {
+  const first = jobRunFailure(r);
+  if (first) return first;
+  const doc = JSON.parse(r.stdout.trim()) as Record<string, unknown>;
+  for (const said of strings(doc)) if (/FileNotFoundError|NotADirectoryError|ENOENT|no such file/i.test(said)) return `says a member of a whole input is not there ("${said.slice(0, 160)}")`;
+  if (doc.status === "failed" || doc.ok === false) return `status ${String(doc.status ?? "failed")}: ${String(doc.status_basis ?? doc.error ?? "").slice(0, 200)}`;
+  return null;
+}
+
+/** The tool says its reader is not on this host (its program, or the venv it runs in): it cannot read the input here, said, not judged. */
+const unavailable = (stdout: string): string | null => {
+  try {
+    const a = JSON.parse(stdout.trim()) as { unavailable?: unknown; status_basis?: unknown; error?: unknown };
+    return a.unavailable === true ? String(a.status_basis ?? a.error ?? "unavailable").slice(0, 120) : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Every family, each tool as job_run calls it: what failed, and what this host could not run. */
+async function familyRuns(toolsDir: (name: string) => string | null): Promise<{ failures: Map<string, string>; skipped: string[]; runs: number }> {
+  const all = await bundledTools();
+  const top = await mkdtemp(join(tmpdir(), "jobrun-valid-"));
+  const root = join(top, "run");
+  const failures = new Map<string, string>();
+  const skipped: string[] = [];
+  let runs = 0;
+  try {
+    await mkdir(join(root, "work"), { recursive: true });
+    for (const t of all) await cp(toolsDir(t.name) ?? join(ROOT, "packs", t.id.split("/")[0]!, "tools", t.name), join(root, "tools", t.name), { recursive: true });
+    let n = 0;
+    for (const family of FAMILIES) {
+      const input = await family.make(root);
+      assert.match(input, / /, "the path holds a space");
+      const env = family.env ? await family.env(root) : {};
+      for (const c of family.calls) {
+        const tool = all.find((t) => t.name === c.tool);
+        assert.ok(tool, `${c.tool} is a bundled tool`);
+        assert.ok(Object.hasOwn(tool.manifest.params ?? {}, c.param), `${c.tool} takes ${c.param}`);
+        const args = { ...callFor(tool.manifest, c.param), ...(c.args ?? {}), [c.param]: input };
+        const r = await runAsJob(root, tool, `j${String(++n).padStart(6, "0")}`, args, env);
+        runs++;
+        const missing = (/Traceback/.test(r.stderr) && missingModule(r.stderr)) || missingLibrary(r.stdout) || unavailable(r.stdout);
+        if (missing) {
+          skipped.push(`${c.tool} (${missing})`);
+          continue;
+        }
+        const why = validInputFailure(r);
+        if (why) failures.set(c.tool, `${family.name} at ${JSON.stringify(input)}: ${why}`);
+      }
+    }
+  } finally {
+    await rm(top, { recursive: true, force: true });
+  }
+  return { failures, skipped, runs };
+}
+
+test("a tool family with a cheap whole input reads it as job_run calls it, past its format check: a run-relative path with spaces reaches the code that opens it (E12)", { timeout: 600_000 }, async () => {
+  const { failures, skipped, runs } = await familyRuns(() => null);
+  console.log(`# ${runs} calls of ${FAMILIES.length} families; ${failures.size} failing, ${skipped.length} skipped${skipped.length ? `: ${skipped.join("; ")}` : ""}`);
+  assert.equal(runs, FAMILIES.reduce((k, f) => k + f.calls.length, 0));
+  assert.deepEqual([...failures].map(([t, why]) => `${t}: ${why}`), []);
+});
+
+test("the family check finds the 0.3 defect: browser_storage before 52c2b7dc, which handed its reader the relative path, fails it (E12)", { timeout: 300_000 }, async (t) => {
+  // The tool as it was, read with git show (the commit's parent), never checked out. A clone without that history skips, said.
+  const files = ["run.py", "manifest.json"].map((f) => spawnSync("git", ["show", `52c2b7dc^:packs/computer-forensics-base/tools/browser_storage/${f}`], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 << 20 }));
+  if (files.some((r) => r.status !== 0)) {
+    t.skip("commit 52c2b7dc is not in this clone's history");
+    return;
+  }
+  const old = await mkdtemp(join(tmpdir(), "browser-storage-0.3-"));
+  try {
+    await writeFile(join(old, "run.py"), files[0]!.stdout);
+    await writeFile(join(old, "manifest.json"), files[1]!.stdout);
+    const { failures } = await familyRuns((name) => (name === "browser_storage" ? old : null));
+    assert.match(failures.get("browser_storage") ?? "", /a Chromium LevelDB directory at "inputs\/case files\/Local Storage\/leveldb": says a member of a whole input is not there \("FileNotFoundError"\)/);
+    assert.deepEqual([...failures.keys()], ["browser_storage"], "the other tools of the families, as they are, still pass");
+  } finally {
+    await rm(old, { recursive: true, force: true });
+  }
+});
+
+test("the valid-input check: a reading passes; a member said not there, a failed status, a traceback and no JSON fail", () => {
+  const ok = (stdout: string, stderr = ""): Run => ({ code: 0, stdout, stderr, killed: false });
+  assert.equal(validInputFailure(ok('{"status":"complete","files":[{"name":"000003.log","status":"read"}]}')), null);
+  assert.equal(validInputFailure(ok('{"status":"partial","note":"a record was cut"}')), null);
+  assert.match(validInputFailure(ok('{"status":"failed","status_basis":"no data file could be read","files":[{"name":"000003.log","status":"failed","error_class":"FileNotFoundError"}]}')) ?? "", /not there \("FileNotFoundError"\)/);
+  assert.match(validInputFailure(ok('{"status":"failed","status_basis":"not a SQLite database"}')) ?? "", /status failed: not a SQLite database/);
+  assert.match(validInputFailure(ok("", "Traceback (most recent call last):\nOSError: x")) ?? "", /traceback/);
+  assert.match(validInputFailure(ok("")) ?? "", /no JSON/);
+  assert.equal(unavailable('{"status":"failed","unavailable":true,"status_basis":"the venv is not installed"}'), "the venv is not installed");
 });
