@@ -147,13 +147,18 @@ const SIGHT_TEXT_MAX = 512 * 1024;
  * characters with no space or separator in it here.
  */
 export function formatScanner(questionText: string): { format: string; re: RegExp } | null {
+  const known = scanners.get(questionText);
+  if (known !== undefined) return known;
   const f = questionFormat(questionText);
-  if (!f || !f.pieces.length) return null;
-  const distinctive = f.pieces.length >= 2 ? f.pieces.some((p) => p.kind !== "text") : f.pieces[0]!.kind === "clock" && /[-.]/.test(f.format);
-  if (!distinctive) return null;
-  const body = f.pieces.map((p) => `${p.join}${p.kind === "text" ? "[^\\s|,;\"'<>()\\[\\]{}_:/@]+" : `(?:${p.re})`}`).join("");
-  return { format: f.format, re: new RegExp(`(?<![0-9A-Za-z])${body}(?![0-9A-Za-z])`, "i") };
+  const distinctive = f && f.pieces.length ? (f.pieces.length >= 2 ? f.pieces.some((p) => p.kind !== "text") : f.pieces[0]!.kind === "clock" && /[-.]/.test(f.format)) : false;
+  const body = f && distinctive ? f.pieces.map((p) => `${p.join}${p.kind === "text" ? "[^\\s|,;\"'<>()\\[\\]{}_:/@]+" : `(?:${p.re})`}`).join("") : null;
+  const out = f && body ? { format: f.format, re: new RegExp(`(?<![0-9A-Za-z])${body}(?![0-9A-Za-z])`, "i") } : null;
+  if (scanners.size > 256) scanners.clear();
+  scanners.set(questionText, out);
+  return out;
 }
+/** Each question's scanner, by its words: a question's words change only with its revision. */
+const scanners = new Map<string, { format: string; re: RegExp } | null>();
 
 /**
  * The open questions whose asked format a result's text holds: each question once, with its format. The value that
