@@ -212,7 +212,7 @@ import {
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
+import { askUnrecorded, checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
 import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
@@ -4944,6 +4944,8 @@ export default function (pi: ExtensionAPI) {
         }).catch(() => undefined);
         if (!verdict.proceed) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: verdict.reason }).catch(() => undefined);
+          // A seat the gate holds the done for, for work it has not recorded, is asked for what it holds: once a hold (B5).
+          await askUnrecorded(toolCtx.cwd, agentId, run?.gate?.defects ?? [], (a) => systemPost(toolCtx.cwd, a)).catch(() => []);
           return {
             content: [{ type: "text" as const, text: verdict.reason }],
             details: { ok: false, reason: verdict.reason, failing: verdict.failing, passed: run?.passed ?? 0, total: run?.total ?? 0 },

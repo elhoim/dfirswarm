@@ -1434,37 +1434,101 @@ async function closeChanged(sandboxRoot: string, s: L.LeadsSnapshot, all: string
   return after.filter((w) => changed.has(w.section));
 }
 
+/** How long a seat a done named for what it has not recorded has to record it before the finish goes on without it (SWARM_UNRECORDED_GRACE_SEC, 600). */
+export function unrecordedGraceMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SWARM_UNRECORDED_GRACE_SEC?.trim();
+  return (raw && /^\d+$/.test(raw) ? Number(raw) : 600) * 1000;
+}
+
+/**
+ * A seat at work whose evidence work ended after its last record (unrecordedHolds): the done waits for it.
+ * - `job`: the newest job of evidence (a command or tool job that ended ok) that ended after the seat's last record;
+ * - `last`: the seat's last record (a ledger entry it wrote or co-wrote, an attest, a dispute), or null for none;
+ * - `since`: the key the hold is asked and lapses by, the seat's last record; a record moves it, and a new hold begins;
+ * - `asked`: when a finish-line check first named this hold (the done that asked the seat); `lapsed` once the grace
+ *   since has passed: the finish then goes on without it, and says so as a warning.
+ */
+export type UnrecordedHold = { seat: string; job: string; ended: string; last: string | null; since: string; asked?: string; lapsed?: boolean };
+
 /**
  * The seats still at work (on the team, neither done nor marked dead, with a working row on the trace within the stale
- * limit) whose newest ended job of evidence (a command or tool job that ended ok) ended after their newest ledger entry:
- * one item a seat. In the run s082123 a seat had computed an answer at minute 152 and never recorded it, and the run was
- * stopped with the value in its context alone; a finish that does not wait for such a seat ends without it.
+ * limit) whose evidence work ended after their last record: one hold a seat. In the run s082123 a seat had computed an
+ * answer at minute 152 and never recorded it, and the run was stopped with the value in its context alone; a finish
+ * that does not wait for such a seat ends without it. It holds the done (scripts/finish-gate.ts, unrecorded_work) and
+ * cannot hold it for ever: a seat that records anything, is done, is marked dead or falls silent past the stale limit
+ * releases it, and a hold a done named lapses `unrecordedGraceMs` after that done (the finish log's check that first
+ * named it), when it turns a warning.
  */
-export async function unrecordedWork(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<string[]> {
+export async function unrecordedHolds(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<UnrecordedHold[]> {
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
   if (!ids.length) return [];
-  const act = await L.recentActivity(sandboxRoot, L.leadStaleMs(), now);
-  const lastEntry = new Map<string, number>();
-  for (const e of s.ledger.entries) {
-    const at = Date.parse(e.at ?? "");
-    if (!Number.isFinite(at)) continue;
-    for (const by of [e.by, ...((e as { authors?: string[] }).authors ?? [])]) if (by) lastEntry.set(by, Math.max(lastEntry.get(by) ?? 0, at));
-  }
-  const out: string[] = [];
+  const stale = L.leadStaleMs();
+  const act = await L.recentActivity(sandboxRoot, stale, now);
+  const lastRecord = new Map<string, number>();
+  const saw = (by: string | undefined, raw: string | undefined) => {
+    const at = Date.parse(raw ?? "");
+    if (by && Number.isFinite(at)) lastRecord.set(by, Math.max(lastRecord.get(by) ?? 0, at));
+  };
+  for (const e of s.ledger.entries) for (const by of [e.by, ...((e as { authors?: string[] }).authors ?? [])]) saw(by, e.at);
+  for (const a of await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[])) saw(a.by, a.at);
+  for (const d of await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[])) saw(d.by, d.at);
+  const st = await readFinish(sandboxRoot).catch(() => null);
+  const grace = unrecordedGraceMs();
+  const out: UnrecordedHold[] = [];
   for (const id of ids) {
     if (["done", "dead"].some((m) => existsSync(join(sandboxRoot, "done", "agents", `${id}.${m}`)))) continue;
     const row = act.get(id);
-    if (!row?.last || now - row.last >= L.leadStaleMs()) continue;
-    let newest: { id: string; at: number } | null = null;
+    if (!row?.last || now - row.last >= stale) continue;
+    const last = lastRecord.get(id) ?? 0;
+    let newest: { job: string; at: number } | null = null;
     for (const j of s.jobs) {
       if (j.agent !== id || (j.kind !== "command" && j.kind !== "tool") || j.status !== "ok" || !j.finished_at) continue;
       const at = Date.parse(j.finished_at);
-      if (Number.isFinite(at) && (!newest || at > newest.at)) newest = { id: j.id, at };
+      if (Number.isFinite(at) && at > last && (!newest || at > newest.at)) newest = { job: j.id, at };
     }
-    if (!newest || newest.at <= (lastEntry.get(id) ?? 0)) continue;
-    out.push(`${id} is at work and its job ${newest.id} ended after its last record (${lastEntry.has(id) ? new Date(lastEntry.get(id)!).toISOString() : "none"}): ask it to record what that job showed, or wait for it`);
+    if (!newest) continue;
+    const since = last ? new Date(last).toISOString() : "none";
+    const named = st?.checks.find((c) => ((c.run as { gate?: { defects?: Array<{ code?: string; seat?: string; since?: string }> } } | undefined)?.gate?.defects ?? []).some((d) => d.code === "unrecorded_work" && d.seat === id && d.since === since));
+    const askedAt = named ? Date.parse(named.at) : NaN;
+    out.push({ seat: id, job: newest.job, ended: new Date(newest.at).toISOString(), last: last ? since : null, since, ...(Number.isFinite(askedAt) ? { asked: named!.at, lapsed: now - askedAt >= grace } : {}) });
   }
   return out;
+}
+
+/** What a hold says, as an item: the seat, the work, its last record, and what ends the wait. */
+export function unrecordedWhat(h: UnrecordedHold, grace = unrecordedGraceMs()): string {
+  const until = h.asked ? `; asked at ${h.asked}, the finish waits until ${new Date(Date.parse(h.asked) + grace).toISOString()}` : "";
+  return `${h.seat} is at work and its job ${h.job} ended after its last record (${h.last ?? "none"}): what that job showed is on no record yet${until}`;
+}
+
+/** How a hold ends, as a fix: the seat records, or goes, or the grace passes. */
+export function unrecordedFix(h: Pick<UnrecordedHold, "seat">, grace = unrecordedGraceMs()): string {
+  return `${h.seat} is asked on the board to record what it holds: a value for a question as the answer, as a finding with answers: [n], or unverified as a candidate (record_candidate: question, value, ref); anything it records ends the hold, as its done or its going does, and a hold a done named lapses ${Math.round(grace / 60_000)} minute(s) after it`;
+}
+
+/** The holds as readiness lists them: the ones that have not lapsed, one item a seat. */
+export async function unrecordedWork(sandboxRoot: string, s: L.LeadsSnapshot, now = Date.now()): Promise<string[]> {
+  return (await unrecordedHolds(sandboxRoot, s, now)).filter((h) => !h.lapsed).map((h) => `${unrecordedWhat(h)}: ask it to record what it holds, or wait for it`);
+}
+
+/**
+ * The ask a done makes of each seat its finish line named for unrecorded work (B5): one post to that seat, once for
+ * each of its holds (keyed by the seat and its last record, so a done refused again posts nothing new). The seat is
+ * told what the hold is, what to record, and when the finish goes on without it. Posts made, by seat.
+ */
+export async function askUnrecorded(sandboxRoot: string, by: string, defects: ReadonlyArray<{ code: string; seat?: string; job?: string; since?: string; what?: string }>, post: (args: { tag: string; body: string; to: string; key: string; via: string }) => Promise<unknown>): Promise<string[]> {
+  const asked: string[] = [];
+  for (const d of defects) {
+    if (d.code !== "unrecorded_work" || !d.seat) continue;
+    const key = `unrecorded:${d.seat}:${String(d.since ?? "none").replace(/[^A-Za-z0-9:._-]/g, "")}`;
+    const body =
+      `${by} called done, and the finish waits for you: ${d.what ?? `your work ended after your last record`}. ` +
+      `Record now every value you hold and have not recorded: a value for a question as its answer if you hold its lead, as a finding with answers: [n] if not, or, if it is not verified, as a candidate (record_candidate: question, value, ref); and what that work showed that bears on the case. ` +
+      `What is not on the ledger when the run ends is lost. Anything you record ends the wait; if the work showed nothing, say so here. The finish goes on without you ${Math.round(unrecordedGraceMs() / 60_000)} minute(s) after this ask.`;
+    const r = await post({ tag: "ask", to: d.seat, key, via: by, body }).catch(() => null);
+    if (r && !(r as { existing?: boolean }).existing) asked.push(d.seat);
+  }
+  return asked;
 }
 
 async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revision: string): Promise<Readiness> {
@@ -1702,7 +1766,15 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
 /** The check recorded for a revision, if any: a done at the same revision takes it instead of running the finish line again. */
 export async function checkAt(sandboxRoot: string, revision: string): Promise<FinishState["checks"][number] | null> {
   if (!revision) return null;
-  return (await readFinish(sandboxRoot)).checks.filter((c) => c.revision === revision).at(-1) ?? null;
+  // A check held on unrecorded work is not taken again (B5): what ends that hold (a seat falling silent, its grace
+  // passing) moves no part of the revision, so the finish line is run again for each done while it holds.
+  return (await readFinish(sandboxRoot)).checks.filter((c) => c.revision === revision && !heldOnUnrecorded(c.run)).at(-1) ?? null;
+}
+
+/** Whether a finish-line run's gate held the done on a seat's unrecorded work. */
+export function heldOnUnrecorded(run: unknown): boolean {
+  const defects = (run as { gate?: { defects?: Array<{ code?: unknown }> } } | null | undefined)?.gate?.defects;
+  return Array.isArray(defects) && defects.some((d) => d?.code === "unrecorded_work");
 }
 
 /** Record what the finish line said at a revision (whole: the run the verdict was made from). */
