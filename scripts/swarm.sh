@@ -12,7 +12,27 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The launcher runs from a frozen copy of itself. Bash reads a script as it goes: a start or a stop, which run for
+# minutes, read on from the checkout as it was being edited (a start that had worked ended "line 12500: syntax error",
+# exit 2). So `start` and `stop` copy this file first and run the copy, and a VM run's frozen host copy
+# (freeze_harness) takes these same bytes for scripts/swarm.sh: the launcher and the hub run one file. The block is
+# one command, read whole before it runs; the copy goes when the launcher ends, and its status is the launcher's.
+if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop ) ]]; then
+  _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.XXXXXX" 2>/dev/null)" || _launcher_dir=""
+  if [[ -n "$_launcher_dir" ]] && cp "${BASH_SOURCE[0]}" "$_launcher_dir/swarm.sh" 2>/dev/null; then
+    _launcher_rc=0
+    SWARM_LAUNCHER_COPY="$_launcher_dir/swarm.sh" SWARM_LAUNCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
+      bash "$_launcher_dir/swarm.sh" "$@" || _launcher_rc=$?
+    rm -rf "$_launcher_dir"
+    exit "$_launcher_rc"
+  fi
+  [[ -z "$_launcher_dir" ]] || rm -rf "$_launcher_dir"
+fi
+
+# The checkout, also when this is the launcher's copy; the copy's path is the launcher's own, and neither is passed on.
+ROOT="${SWARM_LAUNCHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+LAUNCHER_COPY="${SWARM_LAUNCHER_COPY:-}"
+unset SWARM_LAUNCHER_ROOT SWARM_LAUNCHER_COPY
 # trace_emit: a harness line into a run's trace, through its collector. A
 # copy of this script alone (a suite runs one from a bare directory) goes
 # without it, and puts nothing of its own on a trace.
@@ -74,6 +94,18 @@ VM_HOST_WAY_ON="Or run the agents unisolated with --isolation host: each is then
 # pid file held the pid of a bash that was not the daemon, so `stop` killed
 # that and left the daemon running. With the exec, the subshell becomes setsid
 # and setsid becomes the daemon, all one pid, and `$!` is right again.
+# A daemon's log, each line stamped with the UTC time it was written: a log without times could not be laid beside
+# the trace. Fed by the daemon's output (`> >(log_stamper FILE)`), it appends to FILE, ends when the daemon closes its
+# output, and ignores the terminal's hangup and interrupt as the detached daemon does, so it never takes the daemon's
+# output away from it.
+log_stamper() { # <log file>
+  trap '' HUP INT QUIT TERM
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+  done >> "$1"
+}
+
 detach_exec() {
   if command -v setsid >/dev/null 2>&1; then
     exec setsid "$@"
@@ -1163,6 +1195,12 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
+  # The launcher runs a copy of swarm.sh it took when it began: the frozen copy has those bytes, whatever the
+  # checkout's file holds now, so the hub's stop and the launcher are one script.
+  if [[ -n "${LAUNCHER_COPY:-}" && -f "$LAUNCHER_COPY" ]]; then
+    cp "$LAUNCHER_COPY" "$host/scripts/swarm.sh"
+    cp "$LAUNCHER_COPY" "$dir/scripts/swarm.sh"
+  fi
   # The draft release the hub seals after custody renders the report, which
   # reads the Markdown renderer, the version and the mark: frozen with it.
   rm -rf "${host:?}/ui" "${host:?}/brand"
@@ -3100,20 +3138,67 @@ finish_contract() { # <sandbox>
   fi
 }
 
+# A process's start time as ps gives it: with its pid, it names that process and never a later one given the same pid.
+proc_started() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# Whether <pid> is still the launcher that began at <started>.
+launcher_alive() { # <pid> <started>
+  [[ -n "${1:-}" && -n "${2:-}" ]] && kill -0 "$1" 2>/dev/null && [[ "$(proc_started "$1")" == "$2" ]]
+}
+
+# A start's claim on this host, written before it asks whether it fits and kept up to date until its registry record
+# names its launcher: three starts launched together each count the ones before them, though none has a record or a
+# hub yet. <launcher pid>.json in a directory of the temporary area named for the runs directory (a refused start
+# leaves nothing under runs/); a claim whose launcher has ended is nothing, and is removed by whoever reads it.
+kickoffs_dir() { printf '%s/dfirswarm-kickoffs/%s\n' "${TMPDIR:-/tmp}" "$(printf '%s' "$RUNS_DIR" | cksum | cut -d' ' -f1)"; }
+kickoff_claim() { # <seats> <seat vCPUs> <seat MiB> <workers> <worker vCPUs> <worker MiB>
+  local dir
+  dir="$(kickoffs_dir)"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson n "${1:-0}" --argjson c "${2:-0}" --argjson m "${3:-0}" --argjson w "${4:-0}" --argjson wc "${5:-0}" --argjson wm "${6:-0}" \
+    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}' \
+    > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null || true
+}
+
 # The memory and vCPUs the other microVM runs going on this host may ask for, as arguments of `vm.ts capacity`:
-# each running run's seats (n x its VM size) and its tool-job workers. A run is counted only while its hub lives.
+# each run's seats (n x its VM size) and its tool-job workers. A run counts while its hub lives, and while it is still
+# in its kickoff (the catalogue, the image pull: no hub yet), known by its launcher in its record (kickoff.pid with
+# the process's start time) or, before its record is written, by its claim (kickoff_claim). Each run once.
 other_runs_load() { # <this run's id, or empty>
   local self="${1:-}"
-  [[ -f "$REGISTRY" ]] || { echo ""; return 0; }
-  local mem=0 cpus=0 runs=0 id sb m c pid
-  while IFS=$'\t' read -r id sb m c; do
-    [[ -n "$id" && "$id" != "$self" ]] || continue
-    pid="$(cat "$sb/hub.pid" 2>/dev/null || true)"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || continue
-    mem=$((mem + m)); cpus=$((cpus + c)); runs=$((runs + 1))
-  done < <(jq -r '.runs | (if type == "array" then .[] else (.[]) end) | select(.state == "running" and ((.isolation | type) == "object") and .isolation.mode == "microvm")
-      | [.id, (.sandbox // ""), ((.n // 0) * (.isolation.memory_mib // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.memory_mib // 0))), ((.n // 0) * (.isolation.cpus // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.cpus // 0)))] | @tsv' "$REGISTRY" 2>/dev/null)
-  if [[ "$runs" -gt 0 ]]; then echo "--others-memory $mem --others-cpus $cpus --others-runs $runs"; else echo ""; fi
+  local mem=0 cpus=0 runs=0 kicking=0 id sb m c pid kpid kst seen=" " f
+  if [[ -f "$REGISTRY" ]]; then
+    while IFS=$'\t' read -r id sb m c kpid kst; do
+      [[ -n "$id" && "$id" != "$self" ]] || continue
+      pid="$(cat "$sb/hub.pid" 2>/dev/null || true)"
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        :
+      elif [[ "$kpid" != "$$" ]] && launcher_alive "$kpid" "$kst"; then
+        kicking=$((kicking + 1))
+      else
+        continue
+      fi
+      [[ -n "$kpid" ]] && seen+="$kpid "
+      mem=$((mem + m)); cpus=$((cpus + c)); runs=$((runs + 1))
+    done < <(jq -r '.runs | (if type == "array" then .[] else (.[]) end) | select((.state == "running" or .state == "prepared") and ((.isolation | type) == "object") and .isolation.mode == "microvm")
+        | [.id, (.sandbox // ""), ((.n // 0) * (.isolation.memory_mib // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.memory_mib // 0))), ((.n // 0) * (.isolation.cpus // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.cpus // 0))), (.kickoff.pid // "" | tostring), (.kickoff.started // "")] | @tsv' "$REGISTRY" 2>/dev/null)
+  fi
+  for f in "$(kickoffs_dir)"/*.json; do
+    [[ -f "$f" ]] || continue
+    kpid="" kst="" m=0 c=0
+    IFS=$'\t' read -r kpid kst m c < <(jq -r '[(.pid | tostring), .started, (.memory_mib // 0), (.cpus // 0)] | @tsv' "$f" 2>/dev/null || true) || true
+    [[ -n "${kpid:-}" && "$kpid" != "$$" ]] || continue
+    [[ "$seen" == *" $kpid "* ]] && continue
+    if launcher_alive "$kpid" "$kst"; then
+      mem=$((mem + m)); cpus=$((cpus + c)); runs=$((runs + 1)); kicking=$((kicking + 1))
+    else
+      rm -f "$f" 2>/dev/null || true
+    fi
+  done
+  OTHER_RUNS_ARGS=""
+  [[ "$runs" -gt 0 ]] && OTHER_RUNS_ARGS="--others-memory $mem --others-cpus $cpus --others-runs $runs"
+  OTHER_RUNS_KICKING="$kicking"
+  echo "$OTHER_RUNS_ARGS"
 }
 
 # A swarm with no definition of done is the failure mode the incident write-up
@@ -5010,8 +5095,16 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     # An operator's own --workers N is kept or refused, never lowered.
     local vm_capacity cap_n cap_cpus cap_mem try_workers fitted=""
     # What the other microVM runs going on this host may take (their seats and their workers): a run fits beside them or it does not.
-    local others_args=()
-    read -r -a others_args <<<"$(other_runs_load "${swarm_id:-}")"
+    local others_args=() others_line
+    # This start's own claim first, at the most it may ask for, so a start launched beside it counts it.
+    kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" "$worker_cpus" "$worker_memory"
+    OTHER_RUNS_ARGS="" OTHER_RUNS_KICKING=0
+    other_runs_load "${swarm_id:-}" >/dev/null
+    others_line="$OTHER_RUNS_ARGS"
+    read -r -a others_args <<<"$others_line"
+    if [[ -n "$others_line" ]]; then
+      echo "Capacity:     counted beside $(awk '{print $6}' <<<"$others_line") other microVM run(s) on this host$([[ "${OTHER_RUNS_KICKING:-0}" -gt 0 ]] && printf ', %s of them still in their kickoff (no hub yet)' "$OTHER_RUNS_KICKING"): $(awk '{print $4}' <<<"$others_line") vCPU and $(awk '{print $2}' <<<"$others_line") MiB they may ask for"
+    fi
     for try_workers in $(seq "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" -1 0); do
       cap_n="$n" cap_cpus="$vm_cpus" cap_mem="$vm_memory"
       if [[ "$try_workers" -gt 0 ]]; then
@@ -5025,6 +5118,12 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
       fi
       [[ "$workers_given" -eq 1 && "$jobs" -eq 1 ]] && break
     done
+    # The claim is what was fitted: none when nothing fits, the workers that fit otherwise.
+    if [[ -z "$fitted" ]]; then
+      rm -f "$(kickoffs_dir)/$$.json"
+    else
+      kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$fitted" "$worker_cpus" "$worker_memory"
+    fi
     if [[ -z "$fitted" ]]; then
       echo "BLOCKER: $(jq -r '.blockers | join("; ")' <<<"$vm_capacity" 2>/dev/null || printf '%s' "$vm_capacity")" >&2
       [[ "$workers_given" -eq 1 && "$jobs" -eq 1 ]] && echo "  The $workers tool-job worker VM(s) of --workers count with the seats: lower --workers or --worker-memory, or run without jobs (--no-jobs)." >&2
@@ -6232,6 +6331,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson until_solved "${until_solved:-0}" \
     --arg stop_policy "${stop_policy:-cap-pause}" \
     --arg stall_minutes "${stall_minutes:-}" \
+    --argjson kickoff_pid "$$" \
+    --arg kickoff_started "$(proc_started "$$")" \
     '{
       id: $id,
       "label": $run_label,
@@ -6320,7 +6421,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       allow_root: ($allow_root == 1),
       hold: null,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
-      state: "prepared"
+      state: "prepared",
+      kickoff: {pid: $kickoff_pid, started: $kickoff_started}
     } + (if $pack_tools_as_jobs == "" then {} else {pack_tools_as_jobs: ($pack_tools_as_jobs | split(","))} end)')"
   # A resumed run is the same record: its start, its hold and what it was
   # given stay; what this start set comes on top, with the resume beside it.
@@ -6970,9 +7072,11 @@ EOF
   fi
   # The run's frozen copy when it has one, as the hub and its keeper.
   nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
-  detach_exec env SWARM_LOG_TS=1 SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+  # Every line of its log carries the time it was written (log_stamper), not only its own "idle-nudge:" lines.
+  : > "$sandbox/traces/idle-nudge.log"
+  detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
     bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-    >"$sandbox/traces/idle-nudge.log" 2>&1 &
+    > >(log_stamper "$sandbox/traces/idle-nudge.log") 2>&1 &
   echo $! > "$sandbox/idle-nudge.pid"
   # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
   # found dead a minute later: an empty log, no state file, nothing in the
@@ -6983,9 +7087,9 @@ EOF
   # watchdog sits idle until the wall clock, which is what run 6 showed.
   sleep 2
   if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-    detach_exec env SWARM_LOG_TS=1 SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+    detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-      >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
+      > >(log_stamper "$sandbox/traces/idle-nudge.log") 2>&1 </dev/null &
     echo $! > "$sandbox/idle-nudge.pid"
     sleep 2
     if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
@@ -9538,7 +9642,7 @@ start_image_capabilities() { # <sandbox> <hub dir> <run record JSON>
   cap_profiles="$(jq -r 'keys | join(",")' <<<"$images" 2>/dev/null || true)"
   [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]] || return 0
   ( node --experimental-strip-types --no-warnings "$(run_script "$hub_dir" scripts/image-capabilities.ts)" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" \
-      --images "$images" --cache "$(image_capabilities_cache)" >"$sandbox/traces/image-capabilities.log" 2>&1 & ) >/dev/null 2>&1
+      --images "$images" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
   echo "Capabilities: each job image ($cap_profiles) is being tested now with known-answer probes; the seats are told on the board (job-capabilities.json), and SWARM.md says it"
 }
 
