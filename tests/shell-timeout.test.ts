@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { READY_COMMAND_MAX, readyJobRun, SHELL_TIMEOUT_DEFAULT_S, SHELL_TIMEOUT_MAX_S, shellTimeout, shellTimeoutNote, sleepLoopOverJobs } from "../extensions/agent-swarm.ts";
-import { initSandbox } from "../extensions/protocol.ts";
+import extension from "../extensions/agent-swarm.ts";
+import { initSandbox, WAIT_MAX_SECONDS } from "../extensions/protocol.ts";
 
 const REPO = resolve(import.meta.dirname, "..");
 const dirs: string[] = [];
@@ -32,7 +33,7 @@ test("the limit: the default for a call that names none, the most for one that n
   assert.match(shellTimeoutNote({ seconds: 1800, why: "capped", asked: 7200 }), /the 7200 s it asked for is over the harness's limit of 1800 s/);
 });
 
-test("the default is two minutes; a shell loop that sleeps to wait on a job is refused and pointed at job_status", () => {
+test("the default is two minutes; a shell loop that sleeps to wait on a job is refused and pointed at wait, and at job_status for where it stands", () => {
   assert.equal(SHELL_TIMEOUT_DEFAULT_S, 120);
   assert.match(shellTimeoutNote({ seconds: 120, why: "default" }), /job_run with the same command.*names its own timeout, up to 1800 s/);
   for (const [loop, id] of [
@@ -40,12 +41,94 @@ test("the default is two minutes; a shell loop that sleeps to wait on a job is r
     ["for i in $(seq 1 20); do ls store/jobs/j000040/out 2>/dev/null && break; sleep 15; done", "j000040"],
     ["until [ -f store/jobs/j000012/manifest.json ]; do\n  sleep 5\ndone", "j000012"],
     ["while true; do echo waiting for j000218; sleep 60; done", "j000218"],
-  ] as const) assert.ok((sleepLoopOverJobs(loop) ?? "").includes(`send job_status({"job_id":"${id}","wait_seconds":100}) instead`), loop);
-  assert.match(sleepLoopOverJobs("while [ ! -s store/jobs/j000001/out/a ] || [ ! -s store/jobs/j000002/out/b ]; do sleep 10; done") ?? "", /job_status\(\{"job_id":"j000001","wait_seconds":100\}\) and job_status\(\{"job_id":"j000002","wait_seconds":100\}\)/, "each job the loop names");
-  assert.match(sleepLoopOverJobs("while ! ls store/jobs/*/out/done; do sleep 5; done") ?? "", /job_status\(\{"job_id":"<the job's id>","wait_seconds":100\}\)/, "a loop that names no job");
+  ] as const) {
+    const said = sleepLoopOverJobs(loop) ?? "";
+    assert.ok(said.includes(`send wait({"seconds":${WAIT_MAX_SECONDS}}) instead. It sleeps at no cost and wakes on the post tagged result that says a job is done`), loop);
+    assert.ok(said.includes(`job_status({"job_id":"${id}"}) says where it stands now`), loop);
+    assert.doesNotMatch(said, /wait_seconds|job_status[^.]*waits/, "job_status is never said to wait");
+  }
+  assert.match(sleepLoopOverJobs("while [ ! -s store/jobs/j000001/out/a ] || [ ! -s store/jobs/j000002/out/b ]; do sleep 10; done") ?? "", /job_status\(\{"job_id":"j000001"\}\) and job_status\(\{"job_id":"j000002"\}\) say where each job stands now/, "each job the loop names");
+  assert.match(sleepLoopOverJobs("while ! ls store/jobs/*/out/done; do sleep 5; done") ?? "", /job_status\(\{"job_id":"<the job's id>"\}\)/, "a loop that names no job");
   for (const fine of ["sleep 2; ls work/", "for f in work/*.bin; do xxd $f | head -2; done", "while read l; do echo $l; done < store/jobs/j000001/out/list.txt", "grep -r needle store/jobs/j000003/out | head", 42, undefined]) {
     assert.equal(sleepLoopOverJobs(fine), null, String(fine));
   }
+});
+
+/** Each `name({...})` call a text holds: the tool it names and the keys of its argument object. */
+function readyCalls(text: string): Array<{ call: string; tool: string; args: Record<string, unknown> }> {
+  const calls: Array<{ call: string; tool: string; args: Record<string, unknown> }> = [];
+  for (const m of text.matchAll(/\b([a-z_]+)\(\{/g)) {
+    const start = m.index! + m[1]!.length + 1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let i = start; i < text.length && end < 0; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) end = i;
+    }
+    assert.ok(end > 0, `the call at ${m.index} closes: ${text.slice(m.index!, m.index! + 120)}`);
+    const body = text.slice(start, end + 1);
+    let args: Record<string, unknown>;
+    try {
+      args = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      // A command too long to repeat is named by its length: the keys are still the call's.
+      args = Object.fromEntries([...body.matchAll(/"([a-z_]+)"\s*:/g)].map((k) => [k[1]!, "<named>"]));
+    }
+    calls.push({ call: `${m[1]}(${body})`, tool: m[1]!, args });
+  }
+  return calls;
+}
+
+type Schema = { properties: Record<string, { maximum?: number }>; required?: string[] };
+/** The extension loaded against a stand-in for Pi that only records the tools it registers. */
+function registered(): Map<string, Schema> {
+  const tools = new Map<string, Schema>();
+  const base: Record<string, unknown> = { registerTool: (t: { name: string; parameters: Schema }) => tools.set(t.name, t.parameters) };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  process.env.AGENT_ID = "agent00";
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_ID;
+    else process.env.AGENT_ID = saved;
+  }
+  return tools;
+}
+
+test("every ready call the harness prints in a refusal names a registered tool and only parameters its schema declares", () => {
+  const tools = registered();
+  const texts = [
+    ...["while ! grep -q done store/jobs/j000097/stdout.log; do sleep 30; done", "while [ ! -s store/jobs/j000001/out/a ] || [ ! -s store/jobs/j000002/out/b ]; do sleep 10; done", "while ! ls store/jobs/*/out/done; do sleep 5; done"].map((l) => sleepLoopOverJobs(l)!),
+    shellTimeoutNote({ seconds: 120, why: "default" }, "python3 tools/x/run.py --in 'a b' > work/a0/out.txt"),
+    shellTimeoutNote({ seconds: 1800, why: "capped", asked: 99999 }, "sleep 1"),
+    shellTimeoutNote({ seconds: 120, why: "default" }),
+    shellTimeoutNote({ seconds: 120, why: "default" }, `echo ${"x".repeat(READY_COMMAND_MAX)}`),
+  ];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    const calls = readyCalls(text);
+    assert.ok(calls.length > 0, `a ready call in: ${text.slice(0, 120)}`);
+    for (const { call, tool, args } of calls) {
+      seen.add(tool);
+      const schema = tools.get(tool);
+      assert.ok(schema, `${call}: ${tool} is a registered tool`);
+      for (const key of Object.keys(args)) assert.ok(key in schema!.properties, `${call}: ${tool} declares ${key} (it declares ${Object.keys(schema!.properties).join(", ")})`);
+      for (const key of schema!.required ?? []) assert.ok(key in args, `${call}: ${tool} requires ${key}`);
+    }
+  }
+  assert.deepEqual([...seen].sort(), ["job_run", "job_status", "wait"]);
+  // The wait the refusal names is one the tool takes whole.
+  assert.ok(texts[0]!.includes(`wait({"seconds":${WAIT_MAX_SECONDS}})`));
+  assert.match(tools.get("wait")!.properties.seconds ? JSON.stringify(tools.get("wait")!.properties.seconds) : "", new RegExp(`max ${WAIT_MAX_SECONDS}\\b`));
 });
 
 test("a call stopped at its limit is told the job_run call that runs it as a job, ready to send", () => {

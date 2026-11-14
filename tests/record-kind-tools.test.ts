@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import extension from "../extensions/agent-swarm.ts";
 import { EVENTS_REL, readLedger } from "../extensions/protocol.ts";
-import { F, run } from "./negative-bar-fixture.ts";
+import { A, F, planned, run } from "./negative-bar-fixture.ts";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Tool = {
@@ -235,6 +235,105 @@ test("the kinds' tools are offered to the weak model class only; the rest are de
   for (const n of KIND_TOOL_NAMES) assert.ok(active.includes(n), `${n} is back for the weak class`);
   await fire("model_select", { model: { provider: "anthropic", id: "claude-opus-4-5" } }, { cwd: c.S });
   assert.ok(!active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
+});
+
+/**
+ * A seat's active tools once its session started on a model, and what the extension registered. As Pi does, the
+ * configured tools (getAllTools) are those the allowlist (--tools) keeps, and the session starts with `restored` active
+ * when it is a relaunch whose tool set Pi restored, else with the allowlist.
+ */
+async function seat(model: { provider: string; id: string }, cwd: string, allowed: string[], restored?: string[]): Promise<{ active: string[]; tools: Map<string, Tool>; fire: (event: string, e: Json, ctx: Json) => Promise<void>; set: (names: string[]) => void }> {
+  const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
+  const tools = new Map<string, Tool>();
+  const state = { active: [...(restored ?? allowed)] };
+  const base: Record<string, unknown> = {
+    registerTool: (t: Tool) => tools.set(t.name, t),
+    on: (event: string, fn: (e: unknown, c: unknown) => unknown) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
+    getActiveTools: () => [...state.active],
+    getAllTools: () => [...tools.values()].filter((t) => allowed.includes(t.name)).map((t) => ({ name: t.name, description: t.description })),
+    setActiveTools: (names: string[]) => {
+      state.active = [...names];
+    },
+  };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  delete process.env.AGENT_ID;
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved !== undefined) process.env.AGENT_ID = saved;
+  }
+  const fire = async (event: string, e: Json, ctx: Json) => {
+    for (const fn of handlers.get(event) ?? []) await fn({ type: event, ...e }, ctx);
+  };
+  await fire("session_start", {}, { cwd, hasUI: false, ui: {}, sessionManager: { getEntries: () => [], buildContextEntries: () => [], getBranch: () => [] }, model });
+  return {
+    get active() {
+      return state.active;
+    },
+    tools,
+    fire,
+    set: (names: string[]) => {
+      state.active = [...names];
+    },
+  };
+}
+
+/** The record tools a text tells a seat to call: every record_<name> outside a clause that says "when your tool list has". */
+function toldToCall(text: string): string[] {
+  return text
+    .split(/[.;]\s/)
+    .filter((clause) => !/when your tool list (also )?has/i.test(clause))
+    .flatMap((clause) => clause.match(/\brecord_[a-z]+\b/g) ?? []);
+}
+
+test("what record's description and an answer's refusals tell a seat to call is a tool that seat has, strong or weak", async () => {
+  const { KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  const { KIND_TOOL_KINDS } = await import("../extensions/ledger-rules.ts");
+  assert.deepEqual([...KIND_TOOL_KINDS].map((k) => `record_${k}`), [...KIND_TOOL_NAMES], "the refusals' kinds are the tools' kinds");
+  const c = await run();
+  await planned(c.a0, "1");
+  const P = await import("../extensions/protocol.ts");
+  const refusals: string[] = [];
+  for (const extra of [{ refs: ["job:j000001/hits.txt"], basis: "observed", indicates: "alice was at the console" }, { ts: "2024-01-01T09:14:00Z" }, { time_range: "all of it" }]) {
+    const r = await P.recordEntry(c.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: "the log shows it", ...A, result: "established", ...extra } as never);
+    assert.equal(r.ok, false);
+    refusals.push((r as { reason: string }).reason);
+  }
+  assert.match(refusals[0]!, /record it first \(record with kind: "finding" and answers: \["1"\]; record_finding takes the same when your tool list has it\)/);
+  assert.match(refusals[0]!, /\(1\) record with kind=finding \(or record_finding, when your tool list has it\) with the fact/);
+  assert.match(refusals[1]!, /\(1\) record with kind=event with the fact/, "no record_event: there is no such tool");
+  assert.match(refusals[2]!, /\(1\) record with kind=coverage \(or record_coverage, when your tool list has it\)/);
+  const allowed = ["read", "bash", "record", ...KIND_TOOL_NAMES, "record_candidate", "ledger", "attest", "done"];
+  for (const model of [{ provider: "openai", id: "gpt-5.4" }, { provider: "z-ai", id: "glm-5.3" }]) {
+    const s = await seat(model, c.S, allowed);
+    const weak = s.active.includes("record_finding");
+    assert.equal(weak, model.provider === "z-ai", `${model.provider}/${model.id}: the kinds' tools are the weak class's`);
+    for (const [what, text] of [["record's description", s.tools.get("record")!.description], ...refusals.map((r, i) => [`refusal ${i + 1}`, r] as const)] as const) {
+      const told = toldToCall(text);
+      for (const name of told) assert.ok(s.active.includes(name), `${model.id}: ${what} tells it to call ${name}, which it does not have`);
+      assert.match(text, /\brecord with kind|Every kind is recorded here, with kind/, `${what} names record with the kind as the way`);
+    }
+  }
+});
+
+test("a strong seat relaunched with its tool set restored gets the kinds' tools back when it switches to a weak model, and only those the allowlist keeps", async () => {
+  const { KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  const c = await run();
+  const allowed = ["read", "bash", "record", ...KIND_TOOL_NAMES, "record_candidate", "ledger", "attest", "done"];
+  // Pi restored the relaunched session's tools as the strong seat had them: record alone.
+  const restored = allowed.filter((n) => !(KIND_TOOL_NAMES as readonly string[]).includes(n));
+  const s = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, allowed, restored);
+  assert.deepEqual(s.active, restored, "still record alone");
+  await s.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(KIND_TOOL_NAMES.filter((n) => !s.active.includes(n)), [], "every kind's tool is back for the weak class");
+  await s.fire("model_select", { model: { provider: "anthropic", id: "claude-opus-4-5" } }, { cwd: c.S });
+  assert.ok(!s.active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
+  // An allowlist that keeps only some of them: only those are put back.
+  const some = ["read", "record", "record_finding", "record_answer", "done"];
+  const t = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, some, ["read", "record", "done"]);
+  await t.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(t.active.filter((n) => n.startsWith("record_")).sort(), ["record_answer", "record_finding"]);
 });
 
 test("the kinds' rules are in the tools, not in the worker prompt (B2)", async () => {

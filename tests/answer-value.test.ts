@@ -132,6 +132,31 @@ test("the format's own readers: a sentence, a known piece, an extra digest", () 
   for (const [line, is] of [["DESKTOP-EXAMPLE1_Fiji Standard Time", false], ["The PC name is FOO and the zone is BAR_BAZ", true], ["A 22-character overlay is visible.", true], ["mssetup.exe", false]] as const) assert.equal(looksLikeSentence(line), is, line);
 });
 
+test("a digest is counted where it stands as its own value, not inside the name a Name_md5 question asks for", () => {
+  // Synthetic digests: no sample's.
+  const D1 = "0123456789abcdef0123456789abcdef";
+  const D2 = "fedcba9876543210fedcba9876543210";
+  const name = "What is the dropped attachment? Format: *Name_md5(file)*";
+  // A sample named by its own digest: one name, one digest, as asked (it was refused with extra_digests 2).
+  assert.equal(formatMiss(name, `${D2}.exe_${D1}`), null);
+  assert.equal(formatMiss(name, `${D1}.exe_${D1}`), null, "named by the very digest it has");
+  assert.equal(formatMiss(name, `sample-${D2}.bin_${D1}`), null);
+  assert.equal(formatMiss(name, `${D2}_${D1}`), null, "a name that is a digest alone is the name asked for");
+  assert.equal(formatMiss(name, `invoice.docm_${D1}`), null);
+  // A second digest standing as its own value is still a second candidate (B3).
+  assert.equal(formatMiss(name, `invoice.docm_${D1} or invoice.docm_${D2}`)?.extra_digests, 2);
+  assert.equal(formatMiss(name, `invoice.docm_${D1} ${D2}`)?.extra_digests, 2);
+  assert.equal(formatMiss(name, `${D2}.exe_${D1} or ${D2}.exe_${D2}`)?.extra_digests, 2, "two candidates, each named by a digest: the names' digests are not counted, the two asked ones are");
+  assert.equal(formatMiss(name, `invoice.docm_${D1} (md5=${D2})`)?.extra_digests, 2);
+  const md5 = "What is the md5 of the file? Format: *md5(file)*";
+  assert.equal(formatMiss(md5, D1), null);
+  assert.equal(formatMiss(md5, `${D1} ${D2}`)?.extra_digests, 2);
+  assert.equal(formatMiss(md5, `${D1} or **${D2}**`)?.extra_digests, 2);
+  const pair = "Format: *md5(password)_md5(data-in-the-site)*";
+  assert.equal(formatMiss(pair, `${D1}_${D2}`), null);
+  assert.equal(formatMiss(pair, `${D1}_${D2} ${D1}`)?.extra_digests, 3);
+});
+
 test("a drop in confidence or a dispute changes confidence and result, never the asked string; a candidate is not removed by argument", async () => {
   const { c, f } = await withFindings();
   const first = ok(await rec(c.a1, answer("1", MD5, `E-${f["1"]} shows it`))).entry;

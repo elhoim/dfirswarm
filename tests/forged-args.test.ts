@@ -8,7 +8,7 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { coerceArgs, coercedWords, selfTestCandidate, selfTestProblem, type CandidateRun } from "../extensions/forged-args.ts";
@@ -101,5 +101,149 @@ test("job_run takes a tool's arguments as the types its manifest declares, as a 
     await svc.stop("over");
     spawnSync("chmod", ["-R", "u+w", join(S, "..")]);
     await rm(join(S, ".."), { recursive: true, force: true });
+  }
+});
+
+// --- a forged tool's call ends at its limit, whatever its descendants do -----------------------------------------
+
+const EXT = { python3: "py", bash: "sh", node: "mjs" } as const;
+/** A tool written under tools/<name>/ and run as runForgedTool runs one, with its seal given. */
+async function stagedTool(root: string, name: string, runtime: keyof typeof EXT, script: string, timeout_seconds: number) {
+  await mkdir(join(root, "tools", name), { recursive: true });
+  const entry = `run.${EXT[runtime]}`;
+  await writeFile(join(root, "tools", name, entry), script);
+  const sha256 = createHash("sha256").update(script).digest("hex");
+  const manifest: ForgedToolManifest = { name, description: "", params: {}, runtime, entry, timeout_seconds, by: "a1", at: "t", version: 1, sha256 };
+  return { manifest, sealed: sha256 };
+}
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const readPid = async (file: string) => Number((await readFile(file, "utf8").catch(() => "")).trim()) || 0;
+/** True once nothing is left in the process group (a killed member may need a moment to be reaped). */
+async function groupGone(pgid: number): Promise<boolean> {
+  for (let i = 0; i < 40; i++) {
+    if (!alive(-pgid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+/** A process the tool started in a session of its own: ended by the test, which the harness cannot see. */
+async function endEscaped(file: string) {
+  for (let i = 0; i < 20; i++) {
+    const pid = await readPid(file);
+    if (pid) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+// Waits until the forked child has its own session, so the group kill cannot reach it first.
+const SETSID_PY = (tail: string) =>
+  `import os, sys, time\nif os.fork() == 0:\n    os.setsid()\n    open('esc.pid', 'w').write(str(os.getpid()))\n    time.sleep(30)\n    os._exit(0)\nwhile not os.path.exists('esc.pid'):\n    time.sleep(0.02)\nopen('grp.pid', 'w').write(str(os.getpgrp()))\nprint('x')\nsys.stdout.flush()\n${tail}`;
+
+test("a tool whose child leaves the group and keeps stdout open returns when the tool ends, with its output, not when the child does", async () => {
+  const root = await mkdtemp(join(tmpdir(), "forged-limit-"));
+  try {
+    const t = await stagedTool(root, "daemon_left", "python3", SETSID_PY(""), 10);
+    const started = Date.now();
+    const run = await runForgedTool(root, t.manifest, {}, { sealed: t.sealed });
+    const took = Date.now() - started;
+    assert.deepEqual([run.ok, run.exit_code, run.timed_out, run.stdout.trim()], [true, 0, false, "x"], JSON.stringify(run));
+    assert.ok(took < 3000, `returned after ${took} ms, not after the 30 s child`);
+    assert.ok(alive(await readPid(join(root, "esc.pid"))), "the child that left the group is the one the call no longer waits on");
+    assert.ok(await groupGone(await readPid(join(root, "grp.pid"))), "nothing is left in the tool's group");
+  } finally {
+    await endEscaped(join(root, "esc.pid"));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a tool that hangs while its child holds stdout from a session of its own ends at its limit with what it printed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "forged-limit-"));
+  try {
+    const t = await stagedTool(root, "daemon_hang", "python3", SETSID_PY("time.sleep(30)\n"), 2);
+    const started = Date.now();
+    const run = await runForgedTool(root, t.manifest, {}, { sealed: t.sealed });
+    const took = Date.now() - started;
+    assert.deepEqual([run.ok, run.timed_out, run.stdout.trim()], [false, true, "x"], JSON.stringify(run));
+    assert.ok(took < 2000 + 2500, `returned ${took} ms after it started, its limit being 2 s`);
+    assert.ok(await groupGone(await readPid(join(root, "grp.pid"))), "nothing is left in the tool's group");
+  } finally {
+    await endEscaped(join(root, "esc.pid"));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a tool that ignores SIGTERM ends at its limit; a backgrounded child in its group ends when the tool does", async () => {
+  const root = await mkdtemp(join(tmpdir(), "forged-limit-"));
+  try {
+    const stubborn = await stagedTool(root, "stubborn", "bash", "trap '' TERM\necho $$ > grp.pid\necho started\nwhile :; do sleep 1; done\n", 2);
+    let started = Date.now();
+    const run = await runForgedTool(root, stubborn.manifest, {}, { sealed: stubborn.sealed });
+    let took = Date.now() - started;
+    assert.deepEqual([run.ok, run.timed_out, run.stdout.trim()], [false, true, "started"], JSON.stringify(run));
+    assert.ok(took < 2000 + 2500, `returned after ${took} ms`);
+    assert.ok(await groupGone(await readPid(join(root, "grp.pid"))), "nothing is left in the tool's group");
+
+    // The tool exits at once; its `sleep` holds stdout from the same group. The call used to wait for the limit.
+    const bg = await stagedTool(root, "backgrounded", "bash", "echo $$ > grp2.pid\nsleep 30 &\necho x\n", 20);
+    started = Date.now();
+    const bgRun = await runForgedTool(root, bg.manifest, {}, { sealed: bg.sealed });
+    took = Date.now() - started;
+    assert.deepEqual([bgRun.ok, bgRun.timed_out, bgRun.stdout.trim()], [true, false, "x"], JSON.stringify(bgRun));
+    assert.ok(took < 3000, `returned after ${took} ms, not at its 20 s limit`);
+    assert.ok(await groupGone(await readPid(join(root, "grp2.pid"))), "the backgrounded sleep ended with the tool");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("make_tool's self-test (the same runner) ends at the tool's limit when a child left the group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "forged-limit-"));
+  try {
+    await mkdir(join(root, "work", "a1"), { recursive: true });
+    const run: CandidateRun = (r, m, args, o) => runForgedTool(r, m as unknown as ForgedToolManifest, args, o);
+    let started = Date.now();
+    const quick = await selfTestCandidate(root, "a1", { name: "daemon", runtime: "python3", script: SETSID_PY(""), timeout_seconds: 2 }, { args: {}, expect: "x" }, run);
+    assert.deepEqual([quick.passed, quick.exit, quick.timed_out], [true, 0, false], quick.said);
+    assert.ok(Date.now() - started < 3000, "the self-test passed when the tool ended, not when its child did");
+    await endEscaped(join(root, "esc.pid"));
+    await rm(join(root, "esc.pid"), { force: true });
+    started = Date.now();
+    const hung = await selfTestCandidate(root, "a1", { name: "daemon", runtime: "python3", script: SETSID_PY("time.sleep(30)\n"), timeout_seconds: 2 }, { args: {}, expect: "x" }, run);
+    assert.deepEqual([hung.passed, hung.timed_out], [false, true], hung.said);
+    assert.match(hung.said, /timed out/);
+    assert.ok(Date.now() - started < 2000 + 2500, "the self-test failed at its limit");
+  } finally {
+    await endEscaped(join(root, "esc.pid"));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const HAS_SETSID = process.platform === "linux" && spawnSync("setsid", ["true"]).status === 0;
+test("a bash tool that starts `setsid sh -c 'sleep 30' &` holding stdout ends at its limit (Linux)", { skip: HAS_SETSID ? false : "setsid(1) is Linux's" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "forged-limit-"));
+  try {
+    const t = await stagedTool(root, "setsid_sleep", "bash", "echo $$ > grp.pid\nsetsid sh -c 'echo $$ > esc.pid; exec sleep 30' &\necho started\nsleep 30\n", 2);
+    const started = Date.now();
+    const run = await runForgedTool(root, t.manifest, {}, { sealed: t.sealed });
+    const took = Date.now() - started;
+    assert.deepEqual([run.ok, run.timed_out, run.stdout.trim()], [false, true, "started"], JSON.stringify(run));
+    assert.ok(took < 2000 + 2500, `returned after ${took} ms, its limit being 2 s`);
+    assert.ok(await groupGone(await readPid(join(root, "grp.pid"))), "nothing is left in the tool's group");
+  } finally {
+    await endEscaped(join(root, "esc.pid"));
+    await rm(root, { recursive: true, force: true });
   }
 });

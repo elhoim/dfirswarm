@@ -6322,6 +6322,15 @@ export const TOOL_SCRIPT_MAX_BYTES = 64 * 1024;
 export const TOOL_OUTPUT_MAX_BYTES = 64 * 1024;
 /** Where the harness keeps the whole output of a call whose result reached the model as a prefix. */
 export const TOOL_OUTPUT_REL = "tool-output";
+/**
+ * How long a forged tool's call reads its pipes after the tool's own process
+ * has ended and its group was killed. What is still holding them then left
+ * the group (setsid) and is not waited on: the call used to end only when
+ * every holder of its stdout closed it, so a 2 s tool whose child started its
+ * own session returned after that child's 12 s, and one that never ended hung
+ * the call.
+ */
+export const TOOL_PIPE_DRAIN_MS = 1_000;
 
 /** A whole output kept on disk, as the trace and the model's result name it. */
 export type FullOutputRef = {
@@ -7596,6 +7605,9 @@ export async function runForgedTool(
     const stderr = new StreamCapture(TOOL_OUTPUT_MAX_BYTES / 4, sandboxRoot, toolOutputRel(options.agentId, manifest.name, "err"));
     let timedOut = false;
     let settled = false;
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    let drain: NodeJS.Timeout | undefined;
+    let backstop: NodeJS.Timeout | undefined;
     // Its own process group, so a timeout or an abort kills the grandchildren
     // too — a `bash` entry that spawned `sleep` must not outlive the call.
     // Colour is forced off: a tool's stdout is data for a model, not a terminal.
@@ -7629,7 +7641,13 @@ export async function runForgedTool(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(drain);
+      clearTimeout(backstop);
       options.signal?.removeEventListener("abort", onAbort);
+      // A process that left the group may still hold the pipes: the call
+      // stops reading them and keeps what it already has.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       const fullOutput = stdout.close();
       const fullStderr = stderr.close();
       resolveRun({
@@ -7645,11 +7663,18 @@ export async function runForgedTool(
         ...(fullStderr ? { full_stderr: fullStderr } : {}),
       });
     };
+    const ended = () => finish(exited?.code ?? null, exited?.signal ?? null);
+    // Killed at the limit or on an abort: the call ends a drain after the
+    // kill even if the tool's own exit is never seen.
+    const kill = () => {
+      killTree();
+      backstop ??= setTimeout(ended, 2 * TOOL_PIPE_DRAIN_MS);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree();
+      kill();
     }, timeoutMs);
-    const onAbort = () => killTree();
+    const onAbort = () => kill();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -7657,7 +7682,16 @@ export async function runForgedTool(
       stderr.push(Buffer.from(`${manifest.runtime}: ${err.message}\n`));
       finish(null, null);
     });
-    child.on("close", (code, signal) => finish(code, signal));
+    // The tool's own process ended: what is left in its group ends with it,
+    // and the pipes are read for a short drain, not until every holder
+    // closes them (one that left the group with setsid may never).
+    child.on("exit", (code, signal) => {
+      exited = { code, signal };
+      clearTimeout(timer);
+      killTree();
+      drain ??= setTimeout(ended, TOOL_PIPE_DRAIN_MS);
+    });
+    child.on("close", (code, signal) => finish(exited?.code ?? code, exited?.signal ?? signal));
     child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(args ?? {}));
   });

@@ -3800,6 +3800,8 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
 // --- answers --------------------------------------------------------------------------------
 
 /** The fields an answer never takes: it rests on entries, not objects, and states no event. */
+/** The kinds with a record tool of their own (record_<kind>), offered to the weak model class only (agent-swarm.ts KIND_TOOL_NAMES): a refusal names `record` with the kind, and these only as "when your tool list has it". */
+export const KIND_TOOL_KINDS: ReadonlySet<string> = new Set(["finding", "answer", "coverage", "limitation", "absence"]);
 const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance", "carriers", "decoy", "control", "images_read", ...COVERAGE_ONLY_FIELDS] as const;
 
 /** Each ref of an entry whose job did not succeed and that the entry does not qualify itself. */
@@ -4750,7 +4752,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput, D: Defects): 
   if (wrong.length) {
     const fact = wrong.some((f) => (COVERAGE_ONLY_FIELDS as readonly string[]).includes(f)) ? "coverage" : wrong.includes("ts") ? "event" : "finding";
     D.add(
-      `${wrong.join(", ")} ${wrong.length === 1 ? "is" : "are"} not an answer's: an answer rests on ledger entries it cites as E-<seq>; record the fact itself as a finding, an event or an indicator first. Two calls, in this order: (1) record_${fact} (record with kind=${fact}) with the fact and ${wrong.length === 1 ? "that field" : "those fields"}${fact === "finding" ? `, and answers: ["${question && secIn.ok ? sec.id : "<question id>"}"]` : ""}; its reply gives the entry's seq, E-<n>. (2) this answer again without ${wrong.join(", ")}, citing E-<n> in reasoning. If the fact is on the ledger already, send only the second call, citing its E-<seq>`,
+      `${wrong.join(", ")} ${wrong.length === 1 ? "is" : "are"} not an answer's: an answer rests on ledger entries it cites as E-<seq>; record the fact itself as a finding, an event or an indicator first. Two calls, in this order: (1) record with kind=${fact}${KIND_TOOL_KINDS.has(fact) ? ` (or record_${fact}, when your tool list has it)` : ""} with the fact and ${wrong.length === 1 ? "that field" : "those fields"}${fact === "finding" ? `, and answers: ["${question && secIn.ok ? sec.id : "<question id>"}"]` : ""}; its reply gives the entry's seq, E-<n>. (2) this answer again without ${wrong.join(", ")}, citing E-<n> in reasoning. If the fact is on the ledger already, send only the second call, citing its E-<seq>`,
     );
   }
   let value = String(input.value ?? "").trim();
@@ -5223,7 +5225,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput, D: Defects): 
         const forIt = (kinds: string[]) => entries.filter((e) => kinds.includes(e.kind) && !replaced.has(e.seq) && (e.answers ?? []).some((a) => sectionKey(a) === id) && !standingCites.includes(e)).map((e) => `E-${e.seq}`);
         const hint = (kinds: string[]) => {
           const there = forIt(kinds);
-          return there.length ? `; the ledger holds ${there.slice(0, 8).join(", ")}${there.length > 8 ? ", …" : ""} recorded for it: cite ${there.length === 1 ? "it" : "the ones this answer rests on"} in reasoning` : `; none is on the ledger yet: record it first (record_finding with answers: ["${id}"]), then this answer citing it`;
+          return there.length ? `; the ledger holds ${there.slice(0, 8).join(", ")}${there.length > 8 ? ", …" : ""} recorded for it: cite ${there.length === 1 ? "it" : "the ones this answer rests on"} in reasoning` : `; none is on the ledger yet: record it first (record with kind: "finding" and answers: ["${id}"]; record_finding takes the same when your tool list has it), then this answer citing it`;
         };
         if (!naming(["finding", "absence", "limitation", "coverage"]).length) {
           D.add(`an answer to ${sec.section} rests on at least one standing finding, search, limitation or coverage record recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}${hint(["finding", "absence", "limitation", "coverage"])}`);

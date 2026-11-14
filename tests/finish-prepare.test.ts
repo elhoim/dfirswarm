@@ -482,6 +482,32 @@ test("a seat at work whose evidence job ended after its last record holds the fi
   assert.deepEqual(await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now()), []);
 });
 
+test("a job the record already names holds nothing, whoever recorded it; the coordinator is not asked on the board by itself", async () => {
+  const r = await run("fp-unrec-named");
+  await established(r);
+  await new Promise((res) => setTimeout(res, 5));
+  const later = new Date(Date.now() + 60_000).toISOString();
+  // a1's job ended after its last record, and a2 recorded what it showed: (b) a peer recorded it.
+  await job(r.S, "j000002", "out.txt", { requester: { agent: "a1" }, spec: { kind: "command", command: "decode" }, finished_at: later });
+  const peer = await P.recordEntry(r.a2, { kind: "finding", ...FINDING, value: "the decoded block holds the second account", source: "the decode job", evidence: "out.txt line 1", refs: ["job:j000002/out.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(peer.ok, JSON.stringify(peer));
+  // a0's job ended after its records too, and its own finding named it from a page of its stdout before it finished: (c).
+  await job(r.S, "j000003", "o.txt", { requester: { agent: "a0" }, spec: { kind: "tool", tool: "t" }, finished_at: later });
+  const own = await P.recordEntry(r.a0, { kind: "finding", ...FINDING, value: "the first page of the listing names the tool", source: "job j000003's stdout, first page, read while it ran", evidence: "stdout lines 1-40", refs: ["job:j000001/hits.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(own.ok, JSON.stringify(own));
+  const snap = await L.leadsSnapshot(r.S);
+  assert.deepEqual(await F.unrecordedHolds(r.S, snap), [], "both jobs are on the record");
+  assert.ok(F.recordedJobs(snap).has("j000002") && F.recordedJobs(snap).has("j000003"));
+  // A job nobody names still holds, and (a) the seat whose done it is is told by its own refusal, not asked by itself on the board.
+  await job(r.S, "j000004", "x.txt", { requester: { agent: "a0" }, spec: { kind: "command", command: "carve" }, finished_at: later });
+  const gate = await finishGate(r.S, { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] });
+  const held = gate.defects.filter((x) => x.code === "unrecorded_work") as Array<{ code: string; seat: string; job: string }>;
+  assert.deepEqual(held.map((x) => [x.seat, x.job]), [["a0", "j000004"]]);
+  const post = (a: { tag: string; body: string; to: string; key: string; via: string }) => P.systemPost(r.S, a);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), [], "a0 is not asked by its own done");
+  assert.deepEqual(await F.askUnrecorded(r.S, "a1", gate.defects, post), ["a0"], "another seat's done asks it");
+});
+
 test("unrecorded work holds the coordinator's done by seat and job, the seat is asked once, and the hold ends when it records or a grace after it was asked (B5)", async () => {
   const r = await run("fp-unrec-done");
   await established(r);
