@@ -183,7 +183,7 @@ type CacheEntry = { image: string; digest: string; profile: string; at: string; 
  * cached line is said to be an earlier run's (when, and which image) until this run's own result replaces it.
  */
 export async function seedCapabilities(sandbox: string, images: Record<string, string>, cacheDir: string | null, digests: Record<string, string | null> = {}): Promise<Record<string, unknown>> {
-  const cached: Record<string, { image: string; tested_at: string }> = {};
+  const cached: Record<string, { image: string; digest: string; tested_at: string }> = {};
   const found: ByProfile = {};
   for (const [profile, ref] of Object.entries(images)) {
     if (!cacheDir) break;
