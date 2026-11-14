@@ -1317,6 +1317,25 @@ const READINESS_ATTEMPTS = 3;
  * never there). A state that never holds still is answered, never cached.
  */
 export async function readiness(sandboxRoot: string): Promise<Readiness> {
+  // Callers at the same revision at once share one reading (Plan 2, A15): eight seats asking for the finish's status
+  // after a restart each read the registers whole, at once.
+  const { revision } = await P.stateRevision(sandboxRoot);
+  const key = `${sandboxRoot}\u0000${revision}`;
+  const hit = readinessCache.get(key);
+  if (hit) return hit;
+  const running = readinessRunning.get(key);
+  if (running) return running;
+  const mine = readinessNow(sandboxRoot).finally(() => {
+    if (readinessRunning.get(key) === mine) readinessRunning.delete(key);
+  });
+  readinessRunning.set(key, mine);
+  return mine;
+}
+
+/** The readings under way, by sandbox and revision. */
+const readinessRunning = new Map<string, Promise<Readiness>>();
+
+async function readinessNow(sandboxRoot: string): Promise<Readiness> {
   let last: Readiness | null = null;
   for (let i = 0; i < READINESS_ATTEMPTS; i++) {
     const { revision } = await P.stateRevision(sandboxRoot);
