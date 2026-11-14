@@ -36,6 +36,7 @@
  * at an import job's start and held to the trace's digest there, sealed like
  * any import, and published as `import:<id>/<file>` with its trace provenance.
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -699,40 +700,68 @@ export const MSB_DEFAULT_QUOTA_MB = 4096;
 
 /**
  * The write quota of a job's $OUT, in MiB: `SWARM_JOB_OUT_QUOTA_MB` when set,
- * else one budget, the room free where it is kept less the room the service
- * keeps free, shared among the jobs that may write to that disk at once
- * (`sharers`: this job, every other job of its run that runs, and the jobs
- * of the other runs on the host that write to the same disk, as
- * hostStagingWriters counts them). Each job used to be given all the free
- * room (three whole-image extractions of one run were promised the same
- * 64 GB, and the disk stood at 94%), and then a share of it never below
- * microsandbox's default of 4 GiB, which promised a disk with less room than
- * that 4 GiB a job, and counted no other run. The share is what there is:
- * never 0 (a quota of 0 is none, and microsandbox's 4 GiB again), and
- * microsandbox's default only when the room is not known.
+ * else one budget for the disk: the room free where it is kept, less the
+ * room the service keeps free, less what is promised and not yet written
+ * (`promisedMb`: the unused part of the quotas of the jobs that write there
+ * now, this run's and the other live runs'), so that jobs started at
+ * different times are never promised together more than the disk holds.
+ * Of what is left, each worker slot that may start a job while this one
+ * runs (`idleSlots`) keeps up to microsandbox's default (4 GiB) or its even
+ * share, whichever is less, and the job takes the rest, shared with the jobs
+ * of the other runs whose promises are not known (`sharers` less one: a run
+ * whose job service says only how many jobs write, or nothing).
+ *
+ * Each job used to be given all the free room (three whole-image extractions
+ * of one run were promised the same 64 GB, and the disk stood at 94%), then a
+ * share of it at its own start, which a job started later did not count
+ * against: two jobs a minute apart were promised the room once and a half.
+ * The quota is what there is: never 0 (a quota of 0 is none, and
+ * microsandbox's 4 GiB again), and microsandbox's default only when the room
+ * is not known.
  */
-export function outQuotaMb(free: number | null, minFreeMb: number, env: NodeJS.ProcessEnv = process.env, sharers = 1): number {
+export function outQuotaMb(free: number | null, minFreeMb: number, env: NodeJS.ProcessEnv = process.env, sharers = 1, o: { promisedMb?: number; idleSlots?: number } = {}): number {
   const set = Number(env.SWARM_JOB_OUT_QUOTA_MB);
   if (Number.isFinite(set) && set > 0) return Math.floor(set);
   if (free === null) return MSB_DEFAULT_QUOTA_MB;
   const n = Number.isFinite(sharers) && sharers >= 1 ? Math.floor(sharers) : 1;
-  return Math.max(1, Math.floor((free - minFreeMb) / n));
+  const idle = Number.isFinite(o.idleSlots) && o.idleSlots! > 0 ? Math.floor(o.idleSlots!) : 0;
+  const avail = free - minFreeMb - Math.max(0, Number(o.promisedMb) || 0);
+  const kept = idle * Math.max(0, Math.min(MSB_DEFAULT_QUOTA_MB, avail / (n + idle)));
+  return Math.max(1, Math.floor((avail - kept) / n));
+}
+
+/** Megabytes a directory holds now (du's allocated blocks), or null when that cannot be read within `timeoutMs`. */
+export function writtenMb(dir: string, timeoutMs = 5000): Promise<number | null> {
+  return new Promise((done) => {
+    execFile("du", ["-sk", dir], { timeout: timeoutMs, maxBuffer: 1 << 20 }, (_err, stdout) => {
+      // du says what it could total even when a file went away under it.
+      const m = /^(\d+)\s/.exec(String(stdout ?? ""));
+      done(m ? Math.ceil(Number(m[1]) / 1024) : null);
+    });
+  });
 }
 
 /** Beside a run's staging: how many of its jobs write there now, for the other runs on the host to count (hostStagingWriters). */
 export const STAGING_WRITERS = ".writers.json";
 
+/** One other run on the host as hostStagingWriters counted it. */
+export type StagingRun = { run: string; writers: number; from: "writers_file" | "declared_workers" | "promises"; promised_mb?: number; idle?: number };
+
 /**
  * The jobs of the other runs on this host that may write to the same disk
  * as `staging` now: for each run the registry says is running whose hub
  * lives (as swarm.sh's capacity check counts them), whose staging is on the
- * same device, the count its job service last wrote beside its staging
- * (STAGING_WRITERS, held to a live process), or, where it wrote none (a hub
- * from before it did), the job workers it declared, the most it may run.
- * `runs` names each run counted and what it was counted as.
+ * same device, what its job service last wrote beside its staging
+ * (STAGING_WRITERS, held to a live process). A run that says what it has
+ * promised and not yet written (`unused_mb`) and its workers is counted by
+ * them (`promised_mb`, and `idle`, its slots that may still start a job);
+ * one that says only how many jobs write, or nothing (a hub from before it
+ * did: then the job workers it declared, the most it may run), is counted
+ * among the `writers` the rest is shared with. `runs` names each run counted
+ * and what it was counted as.
  */
-export function hostStagingWriters(registry: string | undefined, self: string, staging: string): { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } {
-  const out: { writers: number; runs: Array<{ run: string; writers: number; from: "writers_file" | "declared_workers" }> } = { writers: 0, runs: [] };
+export function hostStagingWriters(registry: string | undefined, self: string, staging: string): { writers: number; promised_mb: number; idle: number; runs: StagingRun[] } {
+  const out: { writers: number; promised_mb: number; idle: number; runs: StagingRun[] } = { writers: 0, promised_mb: 0, idle: 0, runs: [] };
   if (!registry) return out;
   let listed: unknown;
   try {
@@ -775,15 +804,27 @@ export function hostStagingWriters(registry: string | undefined, self: string, s
     }
     if (dev !== null && st.dev !== dev) continue; // another disk, another budget
     let n: number | null = null;
+    let promised: { unused: number; workers: number } | null = null;
     try {
-      const w = JSON.parse(readFileSync(join(theirs, STAGING_WRITERS), "utf8")) as { writers?: unknown; pid?: unknown };
-      if (Number.isInteger(w.writers) && (w.writers as number) >= 0 && alive(w.pid)) n = w.writers as number;
+      const w = JSON.parse(readFileSync(join(theirs, STAGING_WRITERS), "utf8")) as { writers?: unknown; pid?: unknown; unused_mb?: unknown; workers?: unknown };
+      if (Number.isInteger(w.writers) && (w.writers as number) >= 0 && alive(w.pid)) {
+        n = w.writers as number;
+        if (typeof w.unused_mb === "number" && Number.isFinite(w.unused_mb) && w.unused_mb >= 0 && Number.isInteger(w.workers) && (w.workers as number) >= 1) promised = { unused: w.unused_mb, workers: w.workers as number };
+      }
     } catch {
       n = null;
     }
+    const run = String(r.id ?? sb);
+    if (n !== null && promised) {
+      const idle = Math.max(0, promised.workers - n);
+      out.runs.push({ run, writers: n, from: "promises", promised_mb: promised.unused, idle });
+      out.promised_mb += promised.unused;
+      out.idle += idle;
+      continue;
+    }
     const iso = r.isolation as { jobs?: { workers?: unknown } } | undefined;
     const declared = Math.max(1, Math.floor(Number(iso?.jobs?.workers) || 1));
-    out.runs.push({ run: String(r.id ?? sb), writers: n ?? declared, from: n === null ? "declared_workers" : "writers_file" });
+    out.runs.push({ run, writers: n ?? declared, from: n === null ? "declared_workers" : "writers_file" });
     out.writers += n ?? declared;
   }
   return out;
@@ -1765,7 +1806,7 @@ export class JobService {
     for (const pack of this.o.packDirs) if (existsSync(pack)) tail.push({ host: pack, guest: pack, readonly: true });
     // $OUT's write quota: what the disk holds beyond the room the service keeps free, never below microsandbox's own default (4 GiB),
     // which stopped whole-image extractions part way through a file (outQuotaMb).
-    tail.push({ host: st.out, guest: this.outPath(job), noexec: true, quota_mb: outQuotaMb(freeMb(st.out), this.o.minFreeMb, process.env, this.stagingSharers(job.id)) });
+    tail.push({ host: st.out, guest: this.outPath(job), noexec: true, quota_mb: await this.promiseOut(job.id, st.out) });
     tail.push({ host: st.ctl, guest: "/job", noexec: true });
     const accessOf = (list: Array<Mount & { note?: string }>) => list.map((m) => ({ path: m.guest ?? m.host, access: `${m.readonly ? "read-only" : "read-write"}${m.noexec ? ", no-exec" : ""}${m.quota_mb ? `, writes up to ${m.quota_mb} MiB` : ""}${m.note ? `; ${m.note}` : ""}` }));
     const strip = (list: Array<Mount & { note?: string }>) => list.map(({ note: _note, ...m }) => m);
@@ -3415,36 +3456,65 @@ export class JobService {
     }
   }
 
+  /** Per job of this run that may write to its $OUT (placed, not yet finished): the quota it was promised, where, and what of it is not written yet. */
+  private readonly outPromises = new Map<string, { quota_mb: number; out: string; unused_mb: number }>();
+
   /**
-   * The jobs that may still write to this disk at once: this one, every
-   * other of this run that runs, and the other runs' on the host
-   * (hostStagingWriters). What an ended job wrote is already out of the free
-   * room.
+   * $OUT's quota for this job, promised against one budget (outQuotaMb):
+   * the free room less what this run's other writing jobs (their quota less
+   * what their $OUT holds now) and the other live runs (as their job services
+   * last said) were promised and have not written; each slot of this run
+   * and of theirs that may still start a job keeps its part. The promise is
+   * held until the job finishes, and said beside the staging for the other
+   * runs (publishWriters).
    */
-  private stagingSharers(id: string): number {
-    let n = 1;
-    for (const j of this.jobs.values()) if (j.id !== id && j.state === "running") n += 1;
+  private async promiseOut(id: string, out: string): Promise<number> {
+    this.prunePromises(id);
+    let promised = 0;
+    for (const p of this.outPromises.values()) {
+      const written = await writtenMb(p.out);
+      // What cannot be read counts as not written: the whole quota stays promised.
+      if (written !== null) p.unused_mb = Math.max(0, p.quota_mb - written);
+      promised += p.unused_mb;
+    }
     const registry = this.o.registry ?? (process.env.SWARM_RUNS_DIR ? join(process.env.SWARM_RUNS_DIR, "registry.json") : undefined);
-    return n + hostStagingWriters(registry, this.S, storePaths(this.S).staging).writers;
+    const host = hostStagingWriters(registry, this.S, storePaths(this.S).staging);
+    const idle = Math.max(0, this.o.workers - this.outPromises.size - 1) + host.idle;
+    const quota = outQuotaMb(freeMb(out), this.o.minFreeMb, process.env, 1 + host.writers, { promisedMb: promised + host.promised_mb, idleSlots: idle });
+    this.outPromises.set(id, { quota_mb: quota, out, unused_mb: quota });
+    this.publishWriters();
+    return quota;
   }
 
-  private writersSaid: number | null = null;
+  /** The promises of jobs that no longer write (finished, or never started) are let go; `except` too, which is being promised again. */
+  private prunePromises(except?: string): void {
+    for (const id of [...this.outPromises.keys()]) {
+      const state = this.jobs.get(id)?.state;
+      if (id === except || (state !== "accepted" && state !== "running")) this.outPromises.delete(id);
+    }
+  }
+
+  private writersSaid: string | null = null;
   /**
-   * How many of this run's jobs write to its staging now, written beside it
-   * (STAGING_WRITERS) whenever that changes, for the other runs on the host
-   * to share the disk's room with them. A file that cannot be written leaves
-   * the others counting this run's declared workers.
+   * How many of this run's jobs write to its staging now, its workers, and
+   * what of their quotas they have not written (as last measured), written
+   * beside it (STAGING_WRITERS) whenever that changes, for the other runs on
+   * the host to count against the disk's room. A file that cannot be written
+   * leaves the others counting this run's declared workers.
    */
   private publishWriters(): void {
-    const n = [...this.jobs.values()].filter((j) => j.state === "running").length;
-    if (n === this.writersSaid) return;
+    this.prunePromises();
+    const n = this.outPromises.size;
+    const unused = [...this.outPromises.values()].reduce((a, p) => a + p.unused_mb, 0);
+    const said = `${n}/${unused}`;
+    if (said === this.writersSaid) return;
     const dir = storePaths(this.S).staging;
     const tmp = join(dir, `${STAGING_WRITERS}.${process.pid}.tmp`);
     try {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(tmp, `${JSON.stringify({ v: 1, run: this.o.run, pid: process.pid, writers: n, at: new Date().toISOString() })}\n`);
+      writeFileSync(tmp, `${JSON.stringify({ v: 2, run: this.o.run, pid: process.pid, writers: n, workers: this.o.workers, unused_mb: unused, at: new Date().toISOString() })}\n`);
       renameSync(tmp, join(dir, STAGING_WRITERS));
-      this.writersSaid = n;
+      this.writersSaid = said;
     } catch (err) {
       this.log(`how many jobs write to the staging (${n}) could not be written beside it: ${(err as Error).message}`);
     }
