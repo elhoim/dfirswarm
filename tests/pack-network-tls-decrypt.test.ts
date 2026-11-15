@@ -690,7 +690,9 @@ for (const flood of CUT_FLOODERS) {
             if (!/the program printed more than 65536 bytes/.test(said)) assert.ok(out.program_group.left_behind >= 1, JSON.stringify(out.program_group));
             for (const pid of await pids(cwd)) assert.equal(alive(pid), false, `flooder ${pid} is gone`);
           } else {
-            assert.equal(out.program_group.left_behind, 0, "nothing was found: the cut alone makes it partial");
+            // Where nothing adopts the flooder the cut alone makes it partial. Cut while the program ran, its group (the flooder in it)
+            // may still be ended and counted: then nothing it counted is left.
+            if (out.program_group.left_behind > 0) for (const pid of await pids(cwd)) assert.equal(alive(pid), false, `flooder ${pid} is gone`);
           }
         } finally {
           await reap(cwd);

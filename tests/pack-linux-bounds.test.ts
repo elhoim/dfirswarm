@@ -459,14 +459,18 @@ async function terminated(script: string, cwd: string, args: unknown, signal: No
   await mkdir(join(cwd, "out"), { recursive: true });
   const run = startDetached(script, cwd, args, JOB_ENV(cwd));
   const until = Date.now() + 60_000;
+  // The signal goes once the paging file the tool began holds the rows the test then looks for: sent at the file's first byte,
+  // a fast host's tool had written one row of it.
+  const rowsIn = async (name: string) => (await readFile(join(dir, name), "utf8").catch(() => "")).split("\n").length - 1;
   for (;;) {
     const names = await readdir(dir).catch(() => [] as string[]);
-    if (names.some((n) => n.startsWith("."))) break;
+    const paging = names.find((n) => n.startsWith("."));
+    if (paging && (await rowsIn(paging)) >= 6) break;
     if (Date.now() > until) {
       run.killGroup();
-      assert.fail("the tool never began a paging file");
+      assert.fail(paging ? "the tool's paging file never held six rows" : "the tool never began a paging file");
     }
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 20));
   }
   run.signal(signal);
   const code = await Promise.race([run.closed, new Promise<"late">((r) => setTimeout(() => r("late"), 30_000))]);

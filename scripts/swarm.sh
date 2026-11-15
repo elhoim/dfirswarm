@@ -5129,8 +5129,9 @@ STRIP
     local vm_capacity cap_n cap_cpus cap_mem try_workers fitted=""
     # What the other microVM runs going on this host may take (their seats and their workers): a run fits beside them or it does not.
     local others_args=() others_line
-    # This start's own claim first, at the most it may ask for, so a start launched beside it counts it.
-    kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" "$worker_cpus" "$worker_memory"
+    # This start's own claim first, at the most it may ask for, so a start launched beside it counts it. A prepared run
+    # (--no-start) boots no VM and no worker: it claims nothing, and its record names no launcher to count.
+    [[ "$start_agents" -eq 1 ]] && kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" "$worker_cpus" "$worker_memory"
     OTHER_RUNS_ARGS="" OTHER_RUNS_KICKING=0
     other_runs_load "${swarm_id:-}" >/dev/null
     others_line="$OTHER_RUNS_ARGS"
@@ -5154,7 +5155,7 @@ STRIP
     # The claim is what was fitted: none when nothing fits, the workers that fit otherwise.
     if [[ -z "$fitted" ]]; then
       rm -f "$(kickoffs_dir)/$$.json"
-    else
+    elif [[ "$start_agents" -eq 1 ]]; then
       kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$fitted" "$worker_cpus" "$worker_memory"
     fi
     if [[ -z "$fitted" ]]; then
@@ -6365,7 +6366,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg stop_policy "${stop_policy:-cap-pause}" \
     --arg stall_minutes "${stall_minutes:-}" \
     --arg no_packs "$no_packs" \
-    --argjson kickoff_pid "$$" \
+    --argjson kickoff_pid "$([[ "$start_agents" -eq 1 ]] && echo "$$" || echo null)" \
     --arg kickoff_started "$(proc_started "$$")" \
     '{
       id: $id,
@@ -6456,7 +6457,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       hold: null,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared",
-      kickoff: {pid: $kickoff_pid, started: $kickoff_started},
+      kickoff: (if $kickoff_pid == null then null else {pid: $kickoff_pid, started: $kickoff_started} end),
       no_packs: ($no_packs | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))
     } + (if $pack_tools_as_jobs == "" then {} else {pack_tools_as_jobs: ($pack_tools_as_jobs | split(","))} end)')"
   # A resumed run is the same record: its start, its hold and what it was

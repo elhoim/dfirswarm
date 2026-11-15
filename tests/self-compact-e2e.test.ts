@@ -170,14 +170,19 @@ test("lifecycle: notice, warning, lock, note, compaction with our prompt, verbat
     const expectedNote = noteFromFakeTrace(d);
     assert.ok(expectedNote.length > 10, "the fake's trace holds the note it handed off");
     assert.ok(handoffText.startsWith("[self-compact · handoff] cycle 1 · you are agent00"), handoffText.slice(0, 120));
-    assert.match(handoffText, /Live claims: none\./);
+    // The note waits at most 500 ms for the hub's facts (0.11): on a slow host they follow in a message of their own.
+    const factsLate = /being read from the hub; they follow in a message of their own/.test(handoffText);
+    const factsText = factsLate
+      ? messageText((await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === "self-compact-facts", 15_000)).message)
+      : handoffText;
+    assert.match(factsText, /Live claims: none\./);
     assert.match(handoffText, /Your note follows verbatim/);
     assert.ok(handoffText.endsWith(`\n---\n${expectedNote}`), "the note is the last thing in the message, byte for byte");
     const details = handoffEvent.message as { details?: { note?: string; cycle?: number } };
     assert.equal(details.details?.note, expectedNote);
     assert.equal(details.details?.cycle, 1);
     const persisted = eventsOfType(events, "message_end").map((e) => `${(e.message as { role?: string }).role}:${(e.message as { customType?: string }).customType ?? ""}`);
-    assert.equal(persisted.filter((r) => r.startsWith("custom:")).length, 1, "the only persisted custom message is the hand-off; guidance never lands");
+    assert.equal(persisted.filter((r) => r.startsWith("custom:") && r !== "custom:self-compact-facts").length, 1, "the only persisted custom message is the hand-off (and its facts, when they came late); guidance never lands");
     assert.equal(persisted.filter((r) => r === "user:").length, 1, "the only user message is the prompt");
 
     // 6. Tools were restored and real work resumed in the agent's own scratch.

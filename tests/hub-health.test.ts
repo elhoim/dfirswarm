@@ -163,6 +163,9 @@ test("a disk probe that never ends holds no health sample: it is said slow or hu
   const exit = process.exit;
   let exited: number | undefined;
   process.exit = ((code?: number) => void (exited = code)) as typeof process.exit;
+  // The probe's bound does not hold the process (its timer is unref'd): a running hub's listening sockets do. This hub was never
+  // started, so a handle stands in for them; without one the loop can empty while the probe hangs, and the test is cancelled.
+  const alive = setInterval(() => undefined, 1_000);
   try {
     const loop = { read: () => ({ p50: 1, p99: 2, max: 3 }) };
     await hub.healthTick(loop);
@@ -184,6 +187,7 @@ test("a disk probe that never ends holds no health sample: it is said slow or hu
     assert.equal(exited, 75, "and the restart past its line was decided");
     assert.ok(said.some(([t]) => t === "hub_recycled"));
   } finally {
+    clearInterval(alive);
     process.exit = exit;
     for (const k of keys) {
       if (saved[k] === undefined) delete process.env[k];

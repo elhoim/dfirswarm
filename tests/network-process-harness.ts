@@ -172,7 +172,15 @@ export async function pids(cwd: string): Promise<number[]> {
   return (await readFile(join(cwd, "stub", "left.pids"), "utf8").catch(() => "")).split(/\s+/).filter(Boolean).map(Number);
 }
 export async function reap(cwd: string): Promise<void> {
-  for (const pid of await pids(cwd)) if (alive(pid)) process.kill(pid, "SIGKILL");
+  for (const pid of await pids(cwd)) {
+    if (!alive(pid)) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (e) {
+      // Gone between the look and the kill: what reap is for.
+      if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+    }
+  }
 }
 
 

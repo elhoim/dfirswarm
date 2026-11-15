@@ -749,3 +749,22 @@ test("a recipe's coverage says what the images lack, in its own words, and nothi
   assert.deepEqual(missingOf(null), []);
   assert.deepEqual(missingOf({ missing: "not a list" }), []);
 });
+
+test("one job's job.json projections are written in turn, the last from the job as it then is: an older state never stands", async () => {
+  const S = mkdtempSync(join(tmpdir(), "job-project-"));
+  for (const d of ["inputs", "tools", "catalog"]) mkdirSync(join(S, d), { recursive: true });
+  const { svc } = service(S);
+  const project = (svc as unknown as { project(j: unknown): Promise<void> }).project.bind(svc);
+  const path = join(storePaths(S).jobs, "j000001", "job.json");
+  // A slow projection (a large record) is still being written when the job changes and a quick one follows: written at once,
+  // the quick one landed first and the slow one, an older state, was renamed over it.
+  const job = { id: "j000001", state: "running", big: "x".repeat(80_000_000) } as { id: string; state: string; big?: string; sensitive?: { why: string } };
+  const slow = project(job);
+  await new Promise((r) => setTimeout(r, 15));
+  delete job.big;
+  job.state = "committed";
+  job.sensitive = { why: "secret_output" };
+  await Promise.all([slow, project(job)]);
+  const onDisk = JSON.parse(readFileSync(path, "utf8")) as typeof job;
+  assert.deepEqual([onDisk.state, onDisk.sensitive?.why, "big" in onDisk], ["committed", "secret_output", false]);
+});

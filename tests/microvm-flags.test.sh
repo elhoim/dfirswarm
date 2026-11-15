@@ -210,6 +210,8 @@ sbx="$(sandbox_of "$out")"
 [[ "$(jq -r '.guard' "$sbx/inputs.json")" == "microvm" ]] || fail "inputs.json does not say the VM holds the evidence"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "bind" ]] || fail "inputs.json does not say the evidence was used in place"
 [[ "$(reg vm-ev '.isolation.disk_mib')" == "8192" ]] || fail "the VM disk size is not recorded"
+# A prepared run boots no VM and no worker: it names no launcher for another start's capacity check to count.
+[[ "$(reg vm-ev '.kickoff')" == "null" ]] || fail "a --no-start run's record names a launcher to count: $(reg vm-ev '.kickoff')"
 [[ "$(jq -r '.files | length' "$sbx/inputs.json")" == "2" ]] || fail "the manifest does not list both files"
 # No --quarantine was given, and each seat's holes are no-exec in its VM all
 # the same: the record a malware entry's check reads says so.

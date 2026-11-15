@@ -3729,7 +3729,25 @@ export class JobService {
   }
 
   /** A readable copy of the job's state beside its outputs; the journal is the record. */
-  private async project(job: JobRecord): Promise<void> {
+  /**
+   * job.json, written whole. One job's projections go one at a time, each written when its turn comes from the job as it is
+   * then: two at once could each rename into place, and the one renamed last, an older state, stood (a job's `sensitive`, set
+   * at commit, was seen gone).
+   */
+  private project(job: JobRecord): Promise<void> {
+    const prev = this.projecting.get(job.id) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(() => this.projectNow(job));
+    this.projecting.set(job.id, next);
+    void next
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.projecting.get(job.id) === next) this.projecting.delete(job.id);
+      });
+    return next;
+  }
+  /** The projection each job has going (project), so the next one follows it. */
+  private projecting = new Map<string, Promise<void>>();
+  private async projectNow(job: JobRecord): Promise<void> {
     const dir = join(storePaths(this.S).jobs, job.id);
     await mkdir(dir, { recursive: true });
     const path = join(dir, "job.json");

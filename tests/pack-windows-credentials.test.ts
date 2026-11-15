@@ -747,7 +747,10 @@ test("dpapi_masterkey: a SID with a line break is refused, a path that is not th
       assert.equal(readFileSync(join(env.OUT, "dpapi_masterkey-keys.jsonl")).length, 0, "no key was verified and written before the refusal");
     }
     const state = await call("chromium_logins", cwd, { login_data: p.loginData, local_state: secretFile(cwd, "work/nested-state", nested), masterkey: p.protect, password_file: pw }, secretJob(cwd));
-    assert.match(state.out.error, /local_state is not JSON/);
+    // JSON nested this deep is past what Python 3.12's parser descends (said "not JSON"); Python 3.14 reads it, and it holds no
+    // encrypted_key: either way nothing is decrypted and the tool answers in its own words.
+    if (state.out.status === "failed") assert.match(String(state.out.error), /local_state is not JSON/, JSON.stringify(state.out).slice(0, 600));
+    else assert.match(String(state.out.status_basis), /Local State has no os_crypt\.encrypted_key/, JSON.stringify(state.out).slice(0, 600));
     assert.equal(state.out.secret_values.written, 0, "the failed answer names the values file it made");
   });
 });
