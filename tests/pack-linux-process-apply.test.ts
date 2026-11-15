@@ -344,9 +344,12 @@ for (const which of ["package_verify", "audit_events"] as const) {
             } else assert.match(JSON.stringify(answer.program_group.notes), /the program printed more than \d+ bytes/);
             // (the host "linux" is this machine: a machine that cannot adopt orphans, macOS, finds nothing here, and the cut alone makes it partial, as on the other hosts)
             // (on a real macOS the tool also looks at the processes it saw below the program, and may find and end the flooder: then it counts it; the cut makes the answer partial either way)
+            // (where nothing adopts it, the processes the tool saw below the program may still hold the flooder, as on a real macOS: then it is
+            // ended and counted, and nothing it counted is left; a Linux runner under load has been seen to count 2 this way)
             if (NO_ADOPTION) assert.ok(answer.program_group.left_behind >= 0, "the flooder is counted if it was found");
-            else if (host !== "linux" || running) assert.equal(answer.program_group.left_behind, 0, "nothing was left (the cap ended it with the program) or found: the cut alone makes it partial");
-            else assert.ok(answer.program_group.left_behind >= 1);
+            else if (host !== "linux" || running) {
+              if (answer.program_group.left_behind > 0) for (const pid of await pids(cwd)) assert.equal(alive(pid), false, `flooder ${pid} was counted and is gone`);
+            } else assert.ok(answer.program_group.left_behind >= 1);
             if (host === "linux" && !NO_ADOPTION) for (const pid of await pids(cwd)) assert.equal(alive(pid), false, `flooder ${pid} is gone`);
           } finally {
             await reap(cwd);
