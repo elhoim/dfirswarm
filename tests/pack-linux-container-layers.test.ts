@@ -279,8 +279,10 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
       const docs = run.stdout().trim().split("\n").filter(Boolean);
       assert.equal(docs.length, 1, "exactly one document");
       const doc = JSON.parse(docs[0]);
-      // the walk was still going: a last word; if the tool had already answered, it is the answer and exit 0
-      if (doc.stopped_by_signal !== undefined) {
+      // the walk was still going: a last word; a signal that came before the tool's own handlers were in (a slow start on a loaded
+      // host) is answered by the SHARED ENDS block's one document, which names it `interrupted`; if the tool had already answered, it
+      // is the answer and exit 0
+      if (doc.stopped_by_signal !== undefined || doc.interrupted !== undefined) {
         assert.equal(code, 128 + num);
         assert.equal(doc.status, "failed");
       } else {
