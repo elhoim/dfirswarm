@@ -179,8 +179,29 @@ async function rulesTimesMembers(cwd: string, n: number, tied: boolean): Promise
   for (let i = 0; i < n - 1; i++) {
     await writeFile(join(cwd, "work", "share", `m${String(i).padStart(5, "0")}.zz.locked`), tied ? same : Buffer.concat([p, randomBytes(162), Buffer.alloc(96)]));
   }
-  await writeFile(join(cwd, "work", "share", "zdecoy.zz.locked"), Buffer.concat([Buffer.from([0, 1]), randomBytes(260)]));
+  // (untied members share only their head and their zero tail: only a place there can give a rule of N-1 members)
+  await writeFile(join(cwd, "work", "share", "zdecoy.zz.locked"), decoyNoRuleExplains(tied ? same : Buffer.concat([p, Buffer.alloc(258)]), p, 262));
   await writeFile(join(cwd, "work", "v.jsonl"), Array.from({ length: 64 }, (_v, i) => JSON.stringify({ finding_id: `F${i}`, key_hex: Buffer.concat([p, randomBytes(30)]).toString("hex") })).join("\n") + "\n");
+}
+
+/** The decoy no rule explains, built so rather than left to chance. A rule's place (a window at the head or the tail) gives the decoy the key
+ * its own window there XOR the rule's mask; with the 2-byte crib that key opens the decoy when the decoy's two bytes at the window are
+ * [0, 1] ^ p ^ the members' two bytes at the same window. Random bytes held that pattern about once in a thousand runs, and a rule then
+ * explained every member (one_rule_explains_every_member); each byte here is chosen so that no pair of the decoy, read from its start or from
+ * its end (it is longer than the members), is that pattern. */
+function decoyNoRuleExplains(ref: Buffer, p: Buffer, length: number): Buffer {
+  const out = Buffer.alloc(length);
+  out[1] = 1;
+  const shift = length - ref.length;
+  const pattern = (j: number): [number, number] | null => (j >= 0 && j + 1 < ref.length ? [p[0]! ^ ref[j]!, 1 ^ p[1]! ^ ref[j + 1]!] : null);
+  for (let i = 2; i < length; i++) {
+    const bad = new Set<number>();
+    for (const t of [pattern(i - 1), pattern(i - 1 - shift)]) if (t && out[i - 1] === t[0]) bad.add(t[1]);
+    let b = randomInt(256);
+    while (bad.has(b)) b = randomInt(256);
+    out[i] = b;
+  }
+  return out;
 }
 
 const M1 = { dir: "work/share", max_files: 5000, magics: { zz: "0000" }, ciphers: ["xor"], key_sources: [{ candidates: "work/v.jsonl" }],
