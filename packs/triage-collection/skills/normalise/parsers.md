@@ -3,6 +3,7 @@ id: normalise/parsers
 title: Handing delivered files to the platform parsers
 when: A delivered file goes to a parser.
 needs: []
+card: Cite a parsed file by delivered path and hash (collection_index {"root": "<collection dir>", "contains": "<regex>"}), its source path only where a mapping supports it. A command needing an image or inode cannot run on a copy. Keep a reading's companions (transaction logs, WAL); replay only on a derived copy; parse credential stores in secret_output jobs. Does not show: that a parse is complete.
 tools: [collection_index]
 requires_host: []
 ---

@@ -92,6 +92,27 @@ test("a pack over its budget shows its router only; a pack within it is shown wh
   assert.ok(report.shown_tokens < report.index_tokens);
 });
 
+test("collapsed, a pack shows beside its router the notes its index names as core, one pack's at a time, as the run's budget allows", () => {
+  assert.deepEqual(parseIndex("Router: `a/router`\nCore: `a/two`, `a/one`, `a/router`, `a/none`\n\n- `a/router` R: r.\n- `a/one` One: o.\n- `a/two` Two: t.").core, ["a/two", "a/one"], "the core it lists, in its order, without the router or an id it does not list");
+  const mk = (id: string) => ({ ...fakePack(id, [[`${id}/router`, "Router: go."], [`${id}/one`, "One: " + "o".repeat(60)], [`${id}/two`, "Two: " + "t".repeat(60)], [`${id}/leaf`, "Leaf: " + "z".repeat(200)]], `${id}/router`), core: [`${id}/two`, `${id}/one`] });
+  const packs = [mk("p1"), mk("p2"), { ...fakePack("p3", [["p3/router", "Router: go."], ["p3/leaf", "Leaf: " + "z".repeat(300)]], "p3/router") }];
+  const router = packs[0]!.entries[0]!.tokens;
+  const one = packs[0]!.entries[1]!.tokens;
+  // Room for the three routers and three core notes: p1 and p2 get their first core note, then p1 its second.
+  const run = 3 * router + 3 * one;
+  const { text, report } = renderSkillsSection(packs, { entry: 1000, pack: 10_000, run });
+  assert.equal(report.mode, "routers");
+  assert.deepEqual(report.packs.map((p) => [p.id, p.shown, p.core_shown ?? []]), [["p1", "router", ["p1/two", "p1/one"]], ["p2", "router", ["p2/two"]], ["p3", "router", []]]);
+  assert.match(text, /p1 1\.0\.0 \(4 skills, router and 2 core notes\)\n- `p1\/router` Router: go\.\n- `p1\/one`/);
+  assert.match(text, /p2 1\.0\.0 \(4 skills, router and 1 core note\)/);
+  assert.match(text, /p3 1\.0\.0 \(2 skills, router only\)/);
+  assert.ok(!text.includes("p1/leaf") && !text.includes("p2/one"), "what does not fit stays out");
+  assert.ok(report.shown_tokens <= run, `${report.shown_tokens} > ${run}`);
+  // A pack held to its own budget gets no core note past it.
+  const held = renderSkillsSection([mk("p1")], { entry: 1000, pack: router + one - 1, run: 10_000 });
+  assert.deepEqual(held.report.packs[0]!.core_shown, undefined);
+});
+
 test("a run over its budget shows every pack's router only", () => {
   const mk = (id: string) => fakePack(id, [[`${id}/router`, "Router: go."], [`${id}/leaf`, "Leaf: " + "z".repeat(120)]], `${id}/router`);
   const packs = [mk("p1"), mk("p2"), mk("p3")];
@@ -390,8 +411,10 @@ test("pack:id names one pack's copy; a bare id two packs carry is served by the 
       // A pack-qualified id for a skill the pack does not have, and a pack the run does not carry.
       const wrongPack = await seat.skill("pack-b:evidence/one");
       assert.match(wrongPack.text, /No skill "pack-b:evidence\/one"/);
-      const noPack = await seat.skill("nope:evidence/one");
+      const noPack = await seat.skill("nope:evidence/none");
       assert.match(noPack.text, /No pack "nope" in this run \(it carries: pack-a, pack-b\)/);
+      // A name no pack goes by, in front of an id one pack carries: that pack's note, and the id to use from then on.
+      assert.match((await seat.skill("nope:evidence/one")).text, /Asked as `nope:evidence\/one`: its id is `evidence\/one` \(pack pack-a\)/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -473,7 +496,8 @@ test("skill_done records what the seat took, marks the body releasable, and says
     await withSeat(t, [a, b], async (seat) => {
       const early = await seat.done("evidence/one", "never loaded");
       assert.match(early.text, /is not among the notes you have loaded/);
-      assert.deepEqual([early.details.ok, early.details.error], [false, "not loaded"]);
+      // Nothing to release is an answer, not an error: the note is already out of the context.
+      assert.deepEqual([early.details.ok, early.details.already_gone], [true, true]);
 
       await seat.skill("evidence/one");
       const done = await seat.done("evidence/one", "run count and last eight times; not who ran it");
@@ -668,6 +692,286 @@ test("the hand-off header lists the skill bodies the seat held before its contex
   assert.match(withSkills, /Skill bodies a compaction took out of your context: pack-a:evidence\/one, pack-b:shared\/dup\./);
 });
 
+/** A seat's skills extension with its hooks called as Pi calls them, and what it appends to its session. */
+async function cardSeat(packDirs: string[], opts: { cards?: string; branch?: unknown[] } = {}) {
+  const { registerSkills } = await import("../extensions/skills.ts");
+  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<unknown>>>();
+  const tools = new Map<string, { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }> }> }>();
+  const appended: Array<{ type: string; customType: string; data: unknown }> = [];
+  const fake = {
+    on: (event: string, h: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(event, [...(handlers.get(event) ?? []), h]),
+    registerTool: (def: { name: string; execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) => tools.set(def.name, def),
+    appendEntry: (customType: string, data: unknown) => void appended.push({ type: "custom", customType, data }),
+  };
+  const sandbox = await mkdtemp(join(tmpdir(), "skills-fake-"));
+  await initSandbox(sandbox, { reset: true });
+  const rows: Array<{ tool: string; args: Record<string, unknown>; result: Record<string, unknown> }> = [];
+  const handle = registerSkills(fake as never, { packDirs, agentId: () => "agent00", trace: async (_c, tool, args, result) => void rows.push({ tool, args, result: result as Record<string, unknown> }), turns: () => 0, fault: async () => undefined, cards: opts.cards });
+  const branch = opts.branch ?? [];
+  const ctx = { cwd: sandbox, sessionManager: { buildContextEntries: () => [], getBranch: () => branch } };
+  for (const h of handlers.get("session_start") ?? []) await h({ type: "session_start" }, ctx);
+  /** The result as the hook leaves it, or null when the hook leaves it as it was. */
+  const result = async (toolName: string, input: Record<string, unknown>, isError = false, text = "Job j000001 done") => {
+    const [h] = handlers.get("tool_result") ?? [];
+    const out = (await h!({ type: "tool_result", toolName, input, isError, content: [{ type: "text", text }] }, ctx)) as { content?: Array<{ text: string }> } | undefined;
+    return out?.content?.map((c) => c.text).join("\n") ?? null;
+  };
+  const compact = async () => {
+    for (const h of handlers.get("session_compact") ?? []) await h({ type: "session_compact" }, ctx);
+  };
+  return { handle, tools, rows, appended, result, compact, sandbox, ctx };
+}
+
+const AD1 = "Use when evidence is an AD1 image. Not for a disk image.\n\nLong prose about the format that the card leaves out.\n\n    job_run tool=ad1_extract args={\"image\": \"inputs/case.ad1\"} inputs=[\"input:case.ad1\"]\n\nDeclare every segment.\n\n**Does not show.** That the source held nothing else.";
+/** A pack whose catalog_search four notes name: two of them write the kind of search they are about. */
+const cardPack = (root: string) =>
+  writePack(root, "computer-forensics-base", "1.0.0", {
+    "evidence/ad1": { title: "An AD1 image is a collection", when: "An AD1 image, its segments and its members.", tools: ["ad1_extract", "catalog_search"], body: AD1 },
+    "evidence/e01": { title: "EWF", when: "An E01.", tools: ["catalog_search", "ewf_verify"], card: "Verify the set first with ewf_verify; a hash mismatch is said before anything rests on the image.", body: "Long E01 body." },
+    "timeline/partition": { title: "A partition's own timeline", when: "A partition timeline from the catalogue, by the hour.", tools: ["catalog_search"], card: 'catalog_search {"which": "timeline"} reads a partition\'s own timeline, not a Plaso output. Does not show: an event the timeline has no row for.', body: "t" },
+    "data/members": { title: "Member lists", when: "Names in member lists.", tools: ["catalog_search"], card: 'catalog_search {"which": "members"} matches names, never content. A partial list makes the search partial.', body: "m" },
+    "rules/yara": { title: "YARA hits", when: "Rule hits over files.", tools: [], programs: ["yara"], card: "yara -s prints matched bytes: run it as a secret_output job and cite rule and offset, not bytes.", body: "y" },
+  });
+
+test("a note's card comes first in the result of the call that matches it, once in the run for a seat that does not hold the note: never with a refused call; a tool many notes name shows the note its arguments name, else the rules its notes give", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    const { skillCard, cardCallOf, commandPrograms } = await import("../extensions/skills.ts");
+    // The card a note's body gives: when to use it, its first example call, what it does not show; the prose between is left out.
+    const auto = skillCard({ title: "An AD1 image is a collection", body: AD1, card: null });
+    assert.equal(auto, 'An AD1 image is a collection.\nUse when evidence is an AD1 image. Not for a disk image.\n    job_run tool=ad1_extract args={"image": "inputs/case.ad1"} inputs=["input:case.ad1"]\n**Does not show.** That the source held nothing else.');
+    assert.equal(skillCard({ title: "t", body: "b", card: "Its own words." }), "Its own words.");
+    assert.ok(skillCard({ title: "", body: "", card: "x. ".repeat(400) }).length <= 702);
+    assert.equal(cardCallOf("skill", { id: "x" }), null);
+    assert.deepEqual(cardCallOf("ewf_verify", { path: "p" }), { tool: "ewf_verify", programs: [], args: { path: "p" }, text: "", lead: null });
+    // The call a result is of: a job's tool and its arguments, or a command and the programs it runs.
+    assert.deepEqual(cardCallOf("job_run", { tool: "ad1_extract", args: { image: "x" }, lead: "L-2" }), { tool: "ad1_extract", programs: [], args: { image: "x" }, text: "", lead: "L-2" });
+    assert.deepEqual(cardCallOf("bash", { command: "ls" })?.programs, ["ls"]);
+    assert.equal(cardCallOf("skill_done", { id: "x" }), null);
+    assert.equal(cardCallOf("job_run", { import: "work/a" }), null);
+    assert.deepEqual(commandPrograms("FOO=1 timeout -s KILL 60 yara -s r.yar x | head -5 && python3 -m capa x; /usr/bin/r2 -q x $(sudo strings y)"), ["yara", "head", "python3", "capa", "r2", "strings"]);
+
+    const seat = await cardSeat([base]);
+    // A refused call gets no card, and does not spend the tool's card.
+    assert.equal(await seat.result("job_run", { tool: "ad1_extract", args: {} }, true), null, "no card with a refusal");
+    const first = await seat.result("job_run", { tool: "ad1_extract", args: {} });
+    assert.ok(first?.startsWith("Before you read this result, the rules of ad1_extract (from the note `evidence/ad1`, computer-forensics-base; the whole note: skill('evidence/ad1')):\nAn AD1 image is a collection."), String(first));
+    assert.ok(first?.endsWith("Job j000001 done"), "the card comes first, the result after it");
+    assert.ok(first?.includes("Declare every segment") === false && first.includes("**Does not show.**"));
+    assert.deepEqual(seat.rows.at(-1)?.args, { tool: "ad1_extract", id: "evidence/ad1" });
+    assert.equal(seat.rows.at(-1)?.result.by, "first");
+    assert.equal(await seat.result("job_run", { tool: "ad1_extract" }), null, "once");
+    assert.match((await seat.result("ewf_verify", {}))!, /^Before you read this result, the rules of ewf_verify \(from the note `evidence\/e01`.*\nVerify the set first with ewf_verify/, "a note's own card: line");
+    // catalog_search: four notes name it. A call that names none of their kinds shows the rules their cards give of it, once; never a list of ids.
+    const generic = await seat.result("catalog_search", { query: "x" });
+    assert.ok(generic?.startsWith("Before you read this result, the rules of catalog_search from the notes that name it ("), String(generic));
+    assert.match(generic!, /catalog_search \{"which": "timeline"\} reads a partition's own timeline/);
+    assert.match(generic!, /catalog_search \{"which": "members"\} matches names, never content\./);
+    assert.doesNotMatch(generic!, /Notes that name|evidence\/e01/);
+    assert.deepEqual(seat.rows.at(-1)?.args, { tool: "catalog_search", id: "rules" });
+    assert.equal(await seat.result("catalog_search", { query: "y" }), null, "the rules once");
+    // A call that gives what one note writes brings that note's card, though the tool's first call is spent; each note once.
+    assert.match((await seat.result("job_run", { tool: "catalog_search", args: { which: "timeline", query: "2026" } }))!, /from the note `timeline\/partition`/);
+    assert.equal(seat.rows.at(-1)?.result.by, "args");
+    assert.match((await seat.result("catalog_search", { which: "members", query: "a.txt" }))!, /from the note `data\/members`/);
+    assert.equal(await seat.result("catalog_search", { which: "timeline", query: "2025" }), null, "a note's card once");
+    assert.equal(await seat.result("catalog_search", { which: "everything" }), null, "a kind no note writes brings none");
+    // A command that runs a program a note names brings that note's card.
+    assert.match((await seat.result("job_run", { command: "FOO=1 timeout 60 yara -s r.yar inputs/x | head" }))!, /^Before you read this result, the rules of yara \(from the note `rules\/yara`/);
+    assert.equal(await seat.result("bash", { command: "ls -la; yara -v" }), null);
+    // A tool no note names: what its own manifest says past its first sentence, once; nothing for one sentence or no manifest.
+    await mkdir(join(seat.sandbox, "tools", "lone_tool"), { recursive: true });
+    await writeFile(join(seat.sandbox, "tools", "lone_tool", "manifest.json"), JSON.stringify({ name: "lone_tool", description: "Read a thing. A match is a name, never content: a file whose name does not hold the string is not found, and a partial list makes the search partial." }));
+    assert.ok((await seat.result("lone_tool", {}))?.startsWith('Before you read this result, what lone_tool says of itself (its manifest; whole with tools(name: "lone_tool")):\nA match is a name'));
+    assert.equal(await seat.result("lone_tool", {}), null);
+    assert.equal(await seat.result("no_such_tool", {}), null);
+    // A compaction does not bring a card again (20 of one run's 39 cards were the same card after each compaction): its rules ride on the hand-off.
+    await seat.compact();
+    assert.equal(await seat.result("job_run", { tool: "ad1_extract" }), null, "not again after a compaction");
+    const line = seat.handle.handoffLine();
+    assert.match(line, /^Rules you worked with \(shown once in the run; whole note: skill\(id\)\):\n- /);
+    assert.match(line, /\n- rules\/yara: yara -s prints matched bytes/);
+    assert.match(line, /\n- data\/members: catalog_search \{"which": "members"\}/);
+    assert.ok(line.length <= 800, `${line.length} characters`);
+    // Bounded, whole cards only: the last first, as many as fit.
+    const tight = seat.handle.handoffLine(260);
+    assert.ok(tight.length <= 260 && tight.split("\n").slice(1).every((l) => line.includes(l)), tight);
+    assert.equal(seat.handle.handoffLine(40), "", "no room: nothing, never a cut card");
+    // A note the seat loaded and a compaction took out is carried as before, and is not listed twice.
+    await seat.tools.get("skill")!.execute("c1", { id: "evidence/ad1" }, undefined, undefined, { cwd: seat.sandbox });
+    await seat.compact();
+    const after = seat.handle.handoffLine(1200);
+    assert.match(after, /\n- computer-forensics-base:evidence\/ad1: An AD1 image is a collection\./);
+    assert.equal(after.split("An AD1 image is a collection.").length - 1, 1, "each card once");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the cards a seat was shown stay shown when its process starts again on its session; a fresh session shows them again", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    const { CARDS_STATE_TYPE } = await import("../extensions/skills.ts");
+    const first = await cardSeat([base]);
+    assert.ok(await first.result("ewf_verify", {}));
+    assert.ok(await first.result("catalog_search", { which: "members" }));
+    const kept = first.appended.filter((e) => e.customType === CARDS_STATE_TYPE);
+    assert.ok(kept.length >= 2, "kept in the session as each card is shown");
+    // The watchdog's relaunch: a new process, the same session.
+    const again = await cardSeat([base], { branch: [{ type: "message" }, ...first.appended] });
+    assert.equal(await again.result("ewf_verify", {}), null, "not shown again after a relaunch");
+    assert.equal(await again.result("catalog_search", { which: "members" }), null);
+    assert.equal(await again.result("catalog_search", { query: "q" }), null, "the tool's first call was spent before the relaunch");
+    assert.match(again.handle.handoffLine(), /- evidence\/e01: Verify the set first/, "its rules still ride on the hand-off");
+    // A fresh session (the old one set aside) has none of them in its context.
+    const fresh = await cardSeat([base], { branch: [] });
+    assert.ok(await fresh.result("ewf_verify", {}));
+    // A state another version wrote, or none, is no state.
+    assert.ok(await (await cardSeat([base], { branch: [{ type: "custom", customType: CARDS_STATE_TYPE, data: { version: 2, ever: ["tool:ewf_verify"] } }] })).result("ewf_verify", {}));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a lead opened or claimed names the notes that fit it after the result, once a lead, never on a refusal; and its words choose the card of a later call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    const seat = await cardSeat([base]);
+    const claimed = '{"lead":"L-4","state":"working","title":"Partition timeline by the hour around the logon"}';
+    assert.equal(await seat.result("lead_claim", { lead: "L-4" }, true, "refused: not yours"), null, "nothing on a refusal");
+    const out = await seat.result("lead_claim", { lead: "L-4" }, false, claimed);
+    assert.ok(out?.startsWith(claimed), "the lead's own answer first");
+    assert.match(out!, /\nNotes of this run's packs that fit this lead \(each is a page of method: load the one you need with skill\(id\) before the work, not after\): timeline\/partition \(A partition's own timeline: A partition timeline from the catalogue, by the hour\.\)/);
+    assert.deepEqual(seat.rows.at(-1)?.args, { lead: "L-4", ids: ["timeline/partition"] });
+    assert.equal(seat.rows.at(-1)?.result.kind, "lead");
+    assert.equal(await seat.result("lead_claim", { lead: "L-4" }, false, claimed), null, "once a lead");
+    // lead_open: its title and reason are the lead's words.
+    const opened = await seat.result("lead_open", { title: "Members of the AD1 image", why: "its segments and its members" }, false, '{"lead":"L-7"}');
+    assert.match(opened!, /fit this lead[^\n]*evidence\/ad1/);
+    // The lead a job names chooses among the notes of its tool: a catalog_search call that gives no kind, made for L-4, is the timeline note's.
+    const made = await seat.result("job_run", { tool: "catalog_search", args: { query: "x" }, lead: "L-4" });
+    assert.match(made!, /from the note `timeline\/partition`/);
+    assert.equal(seat.rows.at(-1)?.result.by, "lead");
+    // A note the lead's words do not tell apart from another brings none.
+    assert.equal(await seat.result("lead_claim", { lead: "L-9" }, false, '{"lead":"L-9","title":"ok"}'), null, "a lead of no fitting note names none");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a note's card a call matched does not spend the first call of a tool many notes name: the general rules come with the first call that matches none (D2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const spec: Record<string, SkillSpec> = {};
+    for (const k of ["alpha", "beta", "gamma", "delta", "epsilon"]) spec[`area/${k}`] = { title: `Note ${k}`, when: `Case ${k}.`, tools: ["many_tool"], card: `many_tool {"kind": "${k}"} reads the ${k} records only. A rule of ${k}: many_tool never says more than it read.`, body: `Body of ${k}.` };
+    const pack = await writePack(root, "p", "1.0.0", spec);
+    const seat = await cardSeat([pack]);
+    assert.match((await seat.result("many_tool", { kind: "beta" }))!, /from the note `area\/beta`/);
+    // The next call names no note's kind: the rules the notes give of the tool, once.
+    assert.match((await seat.result("many_tool", { path: "inputs/x" }))!, /^Before you read this result, the rules of many_tool from the notes that name it/);
+    assert.equal(await seat.result("many_tool", { path: "inputs/y" }), null);
+    // A kind not yet shown still brings its note.
+    assert.match((await seat.result("many_tool", { kind: "delta" }))!, /from the note `area\/delta`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a lead names no note the seat already holds, whatever pack carries it: the ledger is asked by pack:id (D8)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    for (const cards of ["on", "inject"]) {
+      const seat = await cardSeat([base], { cards });
+      // The seat loads the note itself; a lead about its subject then names none (on) and injects none (inject).
+      await seat.tools.get("skill")!.execute("c1", { id: "timeline/partition" }, undefined, undefined, { cwd: seat.sandbox });
+      const out = await seat.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}');
+      assert.equal(out, null, `${cards}: ${out}`);
+      // A seat that does not hold it is told of it.
+      const other = await cardSeat([base], { cards });
+      assert.match((await other.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}'))!, /timeline\/partition/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("--skill-cards inject: a claimed lead comes back with the rules of the notes that fit it, which are then not shown again with their tools", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const base = await cardPack(root);
+    const seat = await cardSeat([base], { cards: "inject" });
+    const out = await seat.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}');
+    assert.match(out!, /\nThe rules of the notes that fit this lead, to work by \(the whole note: skill\(id\)\):\n- timeline\/partition:\n  catalog_search \{"which": "timeline"\} reads a partition's own timeline, not a Plaso output\./);
+    assert.doesNotMatch(out!, /Notes of this run's packs that fit this lead/);
+    assert.equal(seat.rows.at(-1)?.result.kind, "lead_injected");
+    // Given at the claim, so not again with the tool.
+    assert.equal(await seat.result("catalog_search", { which: "timeline" }), null);
+    assert.match(seat.handle.handoffLine(), /- timeline\/partition: catalog_search/);
+    // on names them; off says nothing.
+    const on = await cardSeat([base], { cards: "on" });
+    assert.match((await on.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}'))!, /Notes of this run's packs that fit this lead/);
+    const off = await cardSeat([base], { cards: "off" });
+    assert.equal(await off.result("lead_claim", { lead: "L-4" }, false, '{"lead":"L-4","title":"Partition timeline by the hour around the logon"}'), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the hand-off header is under 2,000 characters beside the note with the skills line a seat that ran many tools carries, the index and its cards included", async () => {
+  const { registerSkills, HANDOFF_SKILLS_MAX } = await import("../extensions/skills.ts");
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const spec: Record<string, SkillSpec> = {};
+    for (let i = 0; i < 12; i++) spec[`area/note-${i}`] = { title: `Note ${i}`, when: `Case ${i}.`, tools: [`tool_${i}`], card: `tool_${i} {"path": "<file ${i}>"}: ${"a rule that a call goes wrong without, ".repeat(8)}Does not show: much.`, body: "b".repeat(4000) };
+    const pack = await writePack(root, "big-pack", "1.0.0", spec);
+    const seat = await cardSeat([pack]);
+    for (let i = 0; i < 12; i++) assert.ok(await seat.result("job_run", { tool: `tool_${i}`, args: {} }));
+    for (let i = 0; i < 5; i++) await seat.tools.get("skill")!.execute(`c${i}`, { id: `area/note-${i}` }, undefined, undefined, { cwd: seat.sandbox });
+    await seat.compact();
+    // A prompt the extension had to give the index to: the hand-off says where it is.
+    await seat.handle.promptSection(root, "BASE PROMPT");
+    const line = seat.handle.handoffLine();
+    assert.ok(line.length <= HANDOFF_SKILLS_MAX, `${line.length}`);
+    // The pointer first: it is short, and a header with less room drops lines from the end.
+    const POINTER = "Your prompt no longer carries this run's skill index: skill() with no id lists it.";
+    assert.ok(line.startsWith(`${POINTER}\n`), line);
+    assert.match(line, /\nSkill bodies a compaction took out of your context: big-pack:area\/note-0, /, "the ids alone when the whole account leaves no room for a card");
+    assert.match(line, /\nRules you worked with \(shown once in the run; whole note: skill\(id\)\):\n- big-pack:area\/note-4: tool_4/, "the card of the last note the compaction took out first");
+    const facts = { name: "n", doing: "d", claims: ["work/a.md"], unread: { main: 3 }, ledgerTotal: 40, ledgerMine: 9, sentinel: false, spentUsd: 1, capUsd: 6, leads: `Leads: 4 open, 2 yours.\nYours: ${"L-1 (working; a lead about something), ".repeat(6)}\nFinish: not ready (3)` };
+    const header = handoffHeader("agent00", 2, facts, true, "threshold", (max) => seat.handle.handoffLine(max));
+    assert.ok(header.length <= 2000, `${header.length} characters beside the note`);
+    assert.ok(header.includes(POINTER) && header.includes("- big-pack:area/note-4: tool_4"), header);
+    // A header with little room left (a cap rule and forged tools) drops the cards and the account, never the pointer (D7).
+    const crowded = handoffHeader("agent00", 2, { ...facts, capHit: "c".repeat(400), forged: "f".repeat(240) }, true, "threshold", (max) => seat.handle.handoffLine(max));
+    assert.ok(crowded.length <= 2000, `${crowded.length}`);
+    assert.ok(crowded.includes(POINTER) && !crowded.includes("- big-pack:area/note-4"), crowded);
+    // The string form is kept by whole lines from its start: the pointer is the last of it dropped.
+    const given = handoffHeader("agent00", 2, { ...facts, capHit: "c".repeat(400), forged: "f".repeat(240), skills: line }, true, "threshold");
+    assert.ok(given.length <= 2000 && given.includes(POINTER) && !given.includes("- big-pack:area/note-4"), given);
+    void registerSkills;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("--skill-cards off: no card with any call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const pack = await writePack(root, "p", "1.0.0", { "evidence/ad1": { title: "AD1", when: "x.", tools: ["ad1_extract"], body: "Use when x." } });
+    const { registerSkills } = await import("../extensions/skills.ts");
+    const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<unknown>>>();
+    registerSkills({ on: (e: string, h: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(e, [...(handlers.get(e) ?? []), h]), registerTool: () => undefined } as never, { packDirs: [pack], agentId: () => "a", trace: async () => undefined, turns: () => 0, fault: async () => undefined, cards: "off" });
+    const [h] = handlers.get("tool_result") ?? [];
+    assert.equal(await h!({ type: "tool_result", toolName: "job_run", input: { tool: "ad1_extract" }, content: [] }, { cwd: root }), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the seat's hand-off line names what a compaction took, until the seat loads it again", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
   try {
@@ -839,6 +1143,24 @@ test("the ids a seat guesses under a pack's name are not answered with a note ab
     });
     await withSeat(t, [lin, lin2], async (seat) => {
       assert.match((await seat.skill("linux/accounts/users")).text, /^No skill "linux\/accounts\/users"/, "two packs the prefix names carry it: none is chosen");
+      assert.match((await seat.skill("linux:accounts/users")).text, /^No skill "linux:accounts\/users"/, "nor with a colon");
+    });
+    // The short names a pack goes by, as the Batman III runs wrote them (24 of 25 failed loads): a whole word of its id, or the namespace its
+    // router sits in (base/router is what an index over budget shows), with a slash or a colon in front of the id.
+    const base = await writePack(root, "computer-forensics-base", "1.0.0", { "base/router": { title: "Router", when: "None listed.", body: "r" }, "evidence/ad1": { title: "AD1", when: "An AD1 image.", body: "a" }, "data/documents-media": { title: "Documents", when: "Office files.", body: "d" } });
+    await withSeat(t, [win, base], async (seat) => {
+      const slash = await seat.skill("base/evidence/ad1");
+      assert.match(slash.text, /^Skill `evidence\/ad1` \(pack computer-forensics-base 1\.0\.0/);
+      assert.match(slash.text, /Asked as `base\/evidence\/ad1`: its id is `evidence\/ad1` \(pack computer-forensics-base\)/);
+      const colon = await seat.skill("base:data/documents-media");
+      assert.match(colon.text, /^Skill `data\/documents-media` \(pack computer-forensics-base/);
+      assert.match(colon.text, /Asked as `base:data\/documents-media`/);
+      assert.match((await seat.skill("windows:execution/prefetch")).text, /^Skill `execution\/prefetch` \(pack windows-forensics/);
+      // A short name that is no pack's, in front of an id one pack carries: that pack's note.
+      assert.match((await seat.skill("win:memory/windows")).text, /^Skill `memory\/windows` \(pack windows-forensics/);
+      // A short name whose pack does not carry the id, nor any other: no note, and the nearest ids.
+      assert.match((await seat.skill("base:evidence/e01")).text, /^No skill "base:evidence\/e01"|^No pack "base"/);
+      assert.match((await seat.skill("nosuch:evidence/e01")).text, /^No pack "nosuch"/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -856,15 +1178,15 @@ test("a prompt the extension had to give the index to loses it with the run a ha
       assert.ok(index.text.includes("- `evidence/one`"), "the call answers with the index, not with a pointer to a prompt that may not carry it");
       assert.equal((await lastRow(seat, "skill")).result.in_prompt, false);
     });
-    // The hand-off header: the index comes back there.
+    // The hand-off header: it says where the index is.
     const { registerSkills } = await import("../extensions/skills.ts");
     const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<void>>>();
     const fake = { on: (e: string, h: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(e, [...(handlers.get(e) ?? []), h]), registerTool: () => undefined };
     const rows: string[] = [];
     const handle = registerSkills(fake as never, { packDirs: [a, b], agentId: () => "agent00", trace: async (_c, tool) => void rows.push(tool), turns: () => 0, fault: async () => undefined });
     await handle.promptSection(root, "BASE PROMPT");
-    assert.match(handle.handoffLine(), /^The index of this run's packs \(your prompt no longer carries it\):\nSkills carried by this run/);
-    assert.ok(handle.handoffLine().includes("- `other/x`"));
+    // Where it is, not the index itself: the hand-off header is 2,000 characters beside the note, and an index runs to thousands.
+    assert.equal(handle.handoffLine(), "Your prompt no longer carries this run's skill index: skill() with no id lists it.");
     const withFile = registerSkills(fake as never, { packDirs: [a, b], agentId: () => "agent00", trace: async () => undefined, turns: () => 0, fault: async () => undefined });
     await withFile.promptSection(root, `x ${renderSkillsSection(await Promise.all([a, b].map((d) => readPackIndex(d)))).text} y`);
     assert.equal(withFile.handoffLine(), "", "a prompt that carries the index keeps it: the header does not repeat it");
@@ -957,4 +1279,34 @@ test("seat_prompt_args: the run's file and then the seat's, as explicit sources;
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the notes that fit a lead are named when it is opened or claimed: by shared words, the best first, never a router, never on few words", async () => {
+  const { notesForText } = await import("../extensions/skills.ts");
+  const packs = [
+    { id: "windows-forensics", dir: "/x", version: "1", router: "windows-forensics/router", tokens: 0, entries: [
+      { id: "windows-forensics/router", line: "- `windows-forensics/router`: start here for a Windows host", tokens: 1 },
+      { id: "browser/credentials", line: "- `browser/credentials`: a saved browser login or password in a Chromium profile", tokens: 1 },
+      { id: "execution/prefetch", line: "- `execution/prefetch`: whether and when a program ran, from Prefetch", tokens: 1 },
+      { id: "registry/overview", line: "- `registry/overview`: a registry hive, its keys and time zone", tokens: 1 },
+    ] },
+    { id: "ransomware-response", dir: "/y", version: "1", router: null, tokens: 0, entries: [
+      { id: "identify/family", line: "- `identify/family`: an encrypted file family, its extension, footer and note", tokens: 1 },
+    ] },
+  ] as never;
+  const browser = notesForText(packs, "Q-8: recover the saved login password from the browser profile (Chromium)");
+  assert.equal(browser[0]!.ref, "browser/credentials");
+  assert.match(browser[0]!.when, /a saved browser login or password/);
+  assert.deepEqual(notesForText(packs, "decrypt the encrypted family: footer and extension of the .azr files").map((x) => x.ref), ["identify/family"]);
+  assert.deepEqual(notesForText(packs, "start Windows host triage").map((x) => x.ref), [], "a router is in the prompt already, and one shared word is not a fit");
+  assert.deepEqual(notesForText(packs, "ok"), []);
+  assert.ok(notesForText(packs, "program ran prefetch registry hive keys password browser login saved", 2).length <= 2);
+});
+
+test("--skill-cards inject: the card mode is read, and off stays off", async () => {
+  const { parseCardsMode } = await import("../extensions/skills.ts");
+  assert.equal(parseCardsMode("inject"), "inject");
+  assert.equal(parseCardsMode(" OFF "), "off");
+  assert.equal(parseCardsMode(undefined), "on");
+  assert.equal(parseCardsMode("anything"), "on");
 });

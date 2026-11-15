@@ -3,6 +3,7 @@ id: accounts/logons
 title: Accounts, SIDs, groups
 when: Account map; read a SID, RID or group.
 needs: []
+card: regkv {"hive": "<SAM>", "key": "SAM\\Domains\\Account\\Users"}: subkey names are RIDs in hex; ProfileList maps full SIDs to profiles. regkv withholds each user's V and decodes no metadata: say it was not read unless regripper or RECmd read it (metadata only). Record the full SID: a RID orders creation and dates nothing. Does not show: who created or used an account, or use of a group's rights.
 tools: [regkv]
 requires_host: [regripper, RECmd]
 ---

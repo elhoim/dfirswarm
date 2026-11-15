@@ -2,7 +2,9 @@
 id: registry/clock
 title: Windows clocks
 when: Convert or compare a Windows time.
+core: 1
 needs: []
+card: regkv {"hive": "<SYSTEM>", "key": "ControlSet00n\\Control\\TimeZoneInformation"}: Bias and ActiveTimeBias are minutes, UTC = local time + bias (480 is UTC-8); ActiveTimeBias is the offset as last written. Take a past date's rule from a named source. FILETIMEs are UTC, FAT and shell-item DOS times local: convert from the raw value (mft_records returns it). Does not show: that the clock was right.
 tools: [mft_records, regkv]
 requires_host: [istat]
 ---

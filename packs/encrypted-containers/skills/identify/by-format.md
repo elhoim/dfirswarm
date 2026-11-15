@@ -3,6 +3,7 @@ id: identify/by-format
 title: Encryption signs by format, and their limits
 when: You name BitLocker, LUKS, Apple, VeraCrypt, archive, Office or PDF protection from a signature.
 needs: []
+card: crypto_id ({"path": "<image>", "offset": <bytes>}) gives a lead, not a format's protection: an APFS signature does not show every volume is encrypted, and high entropy with no signature does not identify VeraCrypt or TrueCrypt. crypto_selftest tests each installed reader on a synthetic sample, not on your volume. Does not show: that a supported archive container is encrypted.
 tools: [crypto_id, crypto_selftest, tcrypt_header]
 requires_host: [cryptsetup]
 ---

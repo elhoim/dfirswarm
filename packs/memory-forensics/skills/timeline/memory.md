@@ -1,8 +1,9 @@
 ---
 id: timeline/memory
 title: Times in a memory capture and what each one dates
-when: A time from a memory image goes on a timeline, or is ordered against disk or logs.
+when: A time from memory goes on a timeline, or is ordered against disk or logs.
 needs: [timeline/clocks]
+card: mem_profile {"path": "<crash dump>"} gives the header time raw (system_time_filetime): when the dump was written, not acquired or last active. Keep each time's kind and raw value; order in one clock, joining guest to host only by a measured offset and its uncertainty. A time after acquisition end or before boot is a fault or smear, not an event. Does not show: that acquisition time is guest time.
 tools: [mem_profile]
 requires_host: []
 ---

@@ -1,4 +1,4 @@
-# Hash lock for Pillow 12.3.0 (the newest release of 2026-10-05, the date OD-10 names; Pillow has no dependencies). The base pack's python.txt names it; this lock is what the image installs.
+# Hash lock for Pillow 12.3.0 (the newest release of 2026-10-05, the date OD-10 names; Pillow has no dependencies) and Brotli 1.2.1 (no dependencies; the version and hashes of requires/locks/ccl_indexeddb_dump.txt: from 1.2 a decoder call's output is bounded, which cache_body needs, and 1.2.1 fixes GHSA-9v8h-qqgm-4m35). The base pack's python.txt names them; this lock is what the image installs.
 # every line is name==version with the sha256 of each file PyPI publishes for it that CPython 3.11 on Linux glibc (x86_64 or aarch64) can use, plus the
 # sdist (an architecture with no wheel builds from it). Resolved from PyPI's JSON metadata for exactly that environment; pip installs it with --require-hashes, so a file whose hash
 # is not here does not install. The set holds every dependency, since hash mode refuses an unlisted one.
@@ -6,3 +6,7 @@ pillow==12.3.0 \
     --hash=sha256:23d27a3e0307ec2244cc51e7287b919aa68d097504ebe19df4e76a98a3eea5bd \
     --hash=sha256:3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce \
     --hash=sha256:bcb46e2f9feff8d06323983bd83ed00c201fdcab3d74973e7072a889b3979fcd
+brotli==1.2.1 \
+    --hash=sha256:02b2f7b5a83485efe448a44ddf7983def05c3bb1dcf917d4f7154070260e13de \
+    --hash=sha256:6b3c3d5794212a54434b4856f808f7bdf7ad48eacadaadb5b2346fc9a639365a \
+    --hash=sha256:b0faa0b9af9367748388345d5b12f6add2a9cf896481e72910e88fbfe14ecd54

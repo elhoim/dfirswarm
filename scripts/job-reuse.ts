@@ -56,8 +56,10 @@ export type Similar = {
 /** An earlier job's output a committed job's file equals, byte for byte. */
 export type SameAs = { path: string; sha256: string; bytes: number; job: string; file: string };
 
-/** How many similar jobs a job_run answer shows; the rest are on the job_similar line, every one, and the answer says so. */
-export const SIMILAR_SHOWN = 8;
+/** How many similar jobs a job_run answer's one line describes; the rest are counted, and every one is on the job_similar line. */
+export const SIMILAR_SHOWN = 3;
+/** The longest the one line of `similar` is, in characters, when the job_similar line holds every similar job. */
+export const SIMILAR_LINE_MAX = 800;
 /** How many same_as files a job's view shows; the rest are on the job_same_as line, every one. */
 export const SAME_AS_SHOWN = 20;
 
@@ -148,20 +150,37 @@ export function rankSimilar(list: Similar[]): Similar[] {
 }
 
 /**
- * What a job_run answer carries: the similar jobs worth reading, at most
- * SIMILAR_SHOWN (the rest counted, and named where every one is), and one
- * sentence on what to do with them. Nothing when there are none. When the
- * job_similar line could not be written (`recorded` false), nothing names
- * the rest, so every one is in the answer.
+ * What a job_run answer carries: one line, `similar`, that names the
+ * similar jobs worth reading (at most SIMILAR_SHOWN described, the rest
+ * counted and named where every one is) and what to do with them. Nothing
+ * when there are none. When the job_similar line could not be written
+ * (`recorded` false), nothing names the rest, so the line names every one
+ * by its id. The hint used to be up to eight objects and a paragraph of
+ * note in every answer that carried it; the whole of each similar job is on
+ * its job_similar line, and job_status reads any one of them.
+ *
+ * A job that is given this hint was not joined to another: the job service
+ * answers an identical whole-object tool call (the same tool and arguments
+ * over the same declared objects, no members named) with the job that
+ * already runs or is committed, unless the call says `independent: true`
+ * (job-service.ts sameWholeCall), and such a call never gets here. What
+ * does is a command, a tool call that names members or differs in its
+ * arguments or objects, or an independent reproduction: it runs, and the
+ * note says so.
  */
 export function similarView(job: string, similar: Similar[], independent: boolean, recorded = true): Record<string, unknown> {
   if (!similar.length) return {};
-  const shown = recorded ? similar.slice(0, SIMILAR_SHOWN) : similar;
-  const rest = similar.length - shown.length;
-  const note = independent
-    ? `Recorded as an independent reproduction: other seats ran the same work over the same objects (${shown.map((s) => s.job).join(", ")}${rest ? ", …" : ""}). Keep your result apart from theirs until yours is in, then compare.`
-    : `Other seats ran the same work over the same objects: read their outputs (job:<id>/<path>) before you rely on a second run. This job runs as asked (job_status cancel=true stops it); when a second run is the point, say independent: true.`;
-  return { similar: shown, ...(rest ? { similar_more: `${rest} more, every one on the job_similar line for ${job} in store/journal.jsonl` } : {}), similar_note: note };
+  const shown = similar.slice(0, SIMILAR_SHOWN);
+  const rest = similar.slice(shown.length);
+  const clean = (t: string) => t.replace(/\s+/g, " ").slice(0, 32);
+  const one = (s: Similar) => `${s.job} by ${clean(s.name ?? s.seat)} (${s.state === "committed" ? `committed ${s.status ?? ""}`.trim() : s.state}; ${s.match}${s.objects === "same" ? "" : `, ${s.shared} object(s) in common`}${s.lead ? `; ${clean(s.lead)}` : ""}${s.independent ? "; independent" : ""})`;
+  const more = !rest.length ? "" : recorded ? `, and ${rest.length} more on the job_similar line for ${job} in store/journal.jsonl` : `, and ${rest.map((s) => s.job).join(", ")}`;
+  const list = `${shown.map(one).join(", ")}${more}`;
+  const line = independent
+    ? `Recorded as an independent reproduction of ${list}: keep your result apart from theirs until yours is in, then compare.`
+    : `Other seats did this work over these objects: ${list}. Read their outputs (job:<id>/<path>) before you rely on a second run; this job was not joined to theirs and runs (job_status cancel=true stops it); say independent: true when a second run is the point.`;
+  // One line, whatever the names: what would make it longer is the job_similar line's to hold (with no such line, every id is said).
+  return { similar: line.length <= SIMILAR_LINE_MAX || !recorded ? line : `${line.slice(0, SIMILAR_LINE_MAX - 1)}…` };
 }
 
 /**
@@ -186,13 +205,24 @@ export function indexOutputs(index: Map<string, { job: string; file: string }>, 
   for (const f of files) if (f.bytes && !index.has(f.sha256)) index.set(f.sha256, { job, file: f.path });
 }
 
-/** A job view's same_as: at most SAME_AS_SHOWN files, the rest counted and named where every one is. */
-export function sameAsView(job: string, same: SameAs[]): Record<string, unknown> {
+/**
+ * A job view's same_as: at most SAME_AS_SHOWN files, the rest counted and
+ * named where every one is. `same` is what the job's record holds (the
+ * first few); `total` is the count and bytes of all of them and the side
+ * file that lists every one (the job_same_as line's `files`, `bytes` and
+ * `list`). The line itself carries a count, the bytes and a few entries: a
+ * list longer than that is in store/jobs/<id>/same_as.jsonl, which the line
+ * names with its sha256 (a journal from before the side file has every
+ * entry on the line).
+ */
+export function sameAsView(job: string, same: SameAs[], total?: { files: number; bytes: number; list?: string }): Record<string, unknown> {
   if (!same.length) return {};
   const shown = same.slice(0, SAME_AS_SHOWN);
-  const rest = same.length - shown.length;
+  const all = Math.max(total?.files ?? same.length, same.length);
+  const rest = all - shown.length;
+  const where = total?.list ?? `store/jobs/${job}/same_as.jsonl`;
   return {
     same_as: shown.map((s) => ({ path: s.path, bytes: s.bytes, same_as: `job:${s.job}/${s.file}` })),
-    ...(rest ? { same_as_more: `${rest} more, every one on the job_same_as line for ${job} in store/journal.jsonl` } : {}),
+    ...(rest > 0 ? { same_as_more: `${rest} more${total ? ` (${total.bytes} bytes in all ${all})` : ""}, every one in ${where}${total?.list ? "" : `, the side file the job_same_as line for ${job} in store/journal.jsonl names with its sha256 (a journal from before the side file has every one on that line)`}` } : {}),
   };
 }

@@ -3,6 +3,7 @@ id: elf/structure
 title: An ELF file and the loader's view
 when: The sample is a Linux or BSD executable, shared object or core file.
 needs: [triage/quarantine]
+card: Read status, problems and coverage in the pe_info answer first. elf_directories ({"path": "<sample>"}) reads the tables; one longer than limit is whole in the file all_results names. section_headers_absent true makes stripped null (not determined), and an empty needed_libraries with dynamic.source null is not static linking; never run ldd on the file. Does not show: behaviour, or a library's use.
 tools: [pe_info, entropy_map, elf_directories]
 requires_host: [readelf]
 ---

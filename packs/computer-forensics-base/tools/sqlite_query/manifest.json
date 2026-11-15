@@ -68,6 +68,23 @@
   },
   "by": "s881002",
   "at": "2026-09-18T13:31:25.586Z",
-  "version": 19,
-  "sha256": "a08bb3f870377d29ac8eff56a7c7224d810611347bfc98b90602f830f9b6acee"
+  "not_for": [
+    {
+      "what": "deleted text in a database's free pages",
+      "use": "sqlite_freespace"
+    }
+  ],
+  "version": 22,
+  "sha256": "0c624b25ddedc086209c9c5f0686b7b9598cee614ab5ec331e7d413aefddd4da",
+  "companions": [
+    {
+      "param": "db_path",
+      "suffixes": [
+        "-wal",
+        "-shm",
+        "-journal"
+      ],
+      "why": "the write-ahead log, its index and the rollback journal beside the database, where its last writes may be"
+    }
+  ]
 }

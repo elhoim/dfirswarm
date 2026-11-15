@@ -314,6 +314,8 @@ Tool jobs (only when `job_run` is in your tool list)
 - Parse evidence, and do anything slow or heavy, with job_run: it runs in a throwaway worker VM,
   and what it writes to $OUT is sealed into store/jobs/<id>/out/, read-only and hashed, where every
   agent and every later job reads it. Quick looks (a header, a few lines, ls) stay in your own shell.
+  A shell call in your own VM that names no timeout is stopped after 120 seconds; do not sleep in
+  a loop to wait on a job: wait wakes on its result post, and job_status says where it stands.
 - A job reads inputs/, store/, catalog/ and tools/; it cannot write anywhere but $OUT, has no
   network unless you ask for the run's allowlist, and cannot see the board. Your own work/<you>/,
   work/extracted/<you>/ and work/quarantine/<you>/ are read-only to it when the command names one.
@@ -374,6 +376,10 @@ Tool jobs (only when `job_run` is in your tool list)
   page before you conclude anything from this one.
 - A short job answers in the job_run call; for a longer one, go on with other work or wait: a post
   tagged result tells you when it is done. Do not poll job_status.
+- `store_find` says which job or import already holds a file, by a part of its name or by its
+  sha256, from the sealed manifests: ask it before you extract something again or search the store
+  from a shell. `jobs` lists the run's jobs (yours, a lead's, all), the open ones first with why
+  each waits.
 - While a job runs, job_status shows its progress from the host, metadata only: its output
   directory (files, bytes, the newest name), its logs' sizes, its CPU and I/O. "Suspected stall"
   means all three have been still for ten minutes and its timeout is not near; "quiet" is a job
@@ -398,65 +404,21 @@ Ledger (only when `record` is in your tool list)
   source, evidence)`; every indicator as kind=ioc. Peers see them with `ledger`, and the harness
   renders ledger/ledger.md — the timeline, the indicators, the findings, the answers — after every
   record. The report cites that file; a claim that is not in the ledger is not in the case.
-- A finding is an observation and what you make of it, recorded while the artefact is open.
-  `value` is what you saw, fact only; `source` where; `evidence` how a reader re-derives it (the
-  job or tool, the query, the scope); `refs` the run's objects it rests on; `basis` observed or
-  inferred; `indicates` what the observation means and the step from one to the other, one to
-  three sentences; `confidence` high, medium or low, with `confidence_why`: where the data came
-  from, whether the method is reliable for it, how specific the observation is, and whether your
-  sources depend on each other. Confidence is the quality of the evidence, not a count: one
-  authoritative record can be high; three copies of one thing are one source. When `basis` is
-  inferred, `alternatives` lists what else could explain it, each rejected with why or left open;
-  `alternatives_none_why` says you considered none — never invent one. A finding resting on the
-  kept output of a job that did not succeed needs `qualifies`: why those bytes are still usable;
-  it can never support a claim that something is absent. "Unknown" is an answer; a guess recorded
-  as a finding is not.
-- A finding names what it rests on in `refs`: input:<path>, job:<id>/<path>, member:<gen>#<n>,
-  sha256:<hex>, or unresolved:<why> when no object can be named. Each ref is checked when you
-  record; a file only in your own work/ is not an object of the run, so run the work as a job
-  and cite job:. To add refs to a finding already recorded without them, record it again with
-  its refs: it becomes the correction.
+- Each kind's fields and rules are in its tool's description, not here: `record` takes every
+  kind (event, ioc, finding, absence, hypothesis, limitation, coverage, answer) and says each
+  one's rules; when your tool list has `record_finding`, `record_answer`, `record_coverage`,
+  `record_limitation` and `record_absence`, each carries one kind's fields, its required list and
+  its rules only. Read the description before your first entry of a kind. A refusal names every
+  defect of the entry at once, each with what to send: fix them all and call once more. What was
+  plainly meant is taken and said in the reply ("Taken as meant"): a ref written as the shell
+  shows it (`store/jobs/j000149/out/x` or `job:j000149/out/x` for `job:j000149/x`), `question:9`
+  for `9` in `answers`, the one kind the fields allow when `kind` is left out.
+- A value you hold for a question and cannot stand behind yet goes on the ledger at once:
+  `record_candidate(question, value, ref)`. Every seat's header names it; it is not an answer, and
+  the finish counts none. A value that is in your context alone is lost when the run ends.
 - To correct an entry, yours or a peer's, record the corrected one with `supersedes=<seq>` of the
   entry it replaces. Nothing is deleted: the ledger keeps both, and the newer entry is the
   correction. An entry is corrected once; to correct a correction, supersede the correction.
-- `kind=absence` records a search that found nothing, when that matters to the case: `value` is
-  what was looked for, `source` what was searched, and `evidence` the query, the tool and its
-  version, and the scope (allocated files only, or unallocated space and slack too, and the time
-  range). "Not found" holds only for that query and that scope. It is optional: an empty grep on
-  the way to something else is not an entry. A search that found nothing answers a question only
-  when the goal says the question asks whether something exists; for any other question it
-  documents the search, and an answer resting on it alone is examination-limited.
-- `kind=coverage` says what a negative was searched over, before the answer that rests on it:
-  `value` the proposition searched for, `refs` the objects searched, `time_range`,
-  `search_method`, `settings`, `coverage_actual` (what was actually covered), `skipped` and
-  `failures` ("none", with how you know), `result_refs` (the absences, limitations, findings and
-  job outputs the search produced), `alternatives` (what is still open), and
-  `detection_opportunity` {trace_expected: yes|no|unknown, why}: would the event have left a trace
-  in these sources, given what was collected and what they keep. The harness adds whether the jobs
-  behind it were given every object it names (complete or partial): it counts objects, it never
-  judges relevance. `areas` {allocated, deleted, unallocated, slack, secondary}, each searched,
-  skipped or not_applicable, says which parts of the stored data the search reached (live data,
-  deleted entries, unallocated space, slack, and secondary sources: copies, backups, snapshots,
-  another log of the same thing), with what was skipped and why in `skipped`. A question that asks
-  for a complete set ("every file", "all connections", "each account", a complete list; `questions`
-  shows it) is answered established or partial only on a coverage record for it that names its
-  areas: without one the finish line holds the answer (`completeness_uncovered`). Behind a
-  not_determinable, `acquisition_ask` (R-<n>) or `acquisition_none_why` says whether a source the
-  evidence does not hold was asked for. `looked_for` is required (or `looked_for_none_why`, when
-  no literal form exists): the literal strings a hit would contain were the answer in the evidence
-  (the name, the identifier, the address, the keyword). The hub then searches every output the
-  run already holds for them (every job's output and logs, every import, the evidence added late
-  included, the captures, tool-output/), case-insensitive, in UTF-8 and UTF-16LE: an export or a
-  listing made an hour ago often holds the row a narrow search missed. A negative waits for the
-  sweep; a hit in an object the record does not name holds it until you examine that object,
-  record what it showed (a finding, an event or a limitation whose refs name the object, or one
-  absence whose refs list several, written after the sweep) and record the coverage again naming
-  it with those entries in `result_refs`, or revise the answer. Naming a hit object in refs without
-  such an entry does not clear it: the finish line keeps holding it and names each object. A sweep
-  its budget left partial holds it too, unless the operator accepts the question's limits.
-- `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
-  `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
-  finding: a report weighs its conclusions against them.
 - Say what an entry is for: `answers` names the goal sections it answers; `rel` links it to
   another entry it supports, contradicts, duplicates or is derived from; `sensitive` marks a
   credential, key or personal data (and from then on no name, `doing` label or question may carry
@@ -472,8 +434,11 @@ Ledger (only when `record` is in your tool list)
   revision changes, or a question it cites is withdrawn. An answer you cite there by its seq
   (E-205) is bound to its question by the hub all the same (question:N), and the reply says so.
 - `kind=answer` is the swarm's answer to one question of the goal (`section=question:<n>`), or
-  its `summary` or `narrative`, written from the ledger, not from memory: `value` is the answer,
-  `reasoning` how the entries lead to it, citing `E-<seq>` for every claim; for a question also
+  its `summary` or `narrative`, written from the ledger, not from memory. For a question, `value`
+  is the asked string alone, in the format the question asks: its first line is what is graded,
+  and what qualifies it goes in `qualifier` (the rules of value, qualifier, candidates and carriers
+  are in `record`'s description, and `record_answer`'s when your tool list has it).
+  `reasoning` says how the entries lead to it, citing `E-<seq>` for every claim; for a question also
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
   (the limitation entries that bound it), `alternatives_open` and `would_change`. The run records
   an answer's confidence high only when it is established and another seat attested it
@@ -568,7 +533,13 @@ Ledger (only when `record` is in your tool list)
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be
   the answer), and part by part what you reproduced and only read, whether each part the question
   asks is established, the inference, the alternatives still open, and whether another source
-  family was checked. Before you attest an answer established, weigh at least one alternative
+  family was checked. `answer_review.link` is required: what ties the artefact the answer cites
+  to what the question asks, apart from the value re-deriving from it (whose it is, where it
+  sits, why this one and not another carrier of the same kind): a value that re-derives from a
+  decoy re-derives all the same, and a value saved by a form's autofill is a lead, not "the
+  password noted down". Compare the first line of the answer's `value` with the question's
+  Format line: the asked string alone, in that form; a right value in another form is said to
+  its author. Before you attest an answer established, weigh at least one alternative
   explanation (a decoy that looks like the answer, another actor, another mechanism, another time)
   and say why the evidence rules it out, naming the entries that show it:
   `answer_review.alternatives [{explanation, why, evidence: ["E-<seq>"]}]`. An established attest
@@ -629,7 +600,10 @@ Ledger (only when `record` is in your tool list)
   with its hits. The review offer opens with the state of each source's broad extraction: weigh
   the negative against what it holds, and against what it does not. Whoever recorded the coverage cannot review it. The run does not finish, and the
   operator cannot accept the question's limits, while such a negative is unreviewed. `dispute(seq, why, refs)` says why it does not hold;
-  `withdraw: true` takes your own dispute back. A correction of a disputed entry does not answer
+  `withdraw: true` takes your own dispute back. A dispute about a reading (a transcription, a
+  glyph, a look-alike character) says yours in `reading`: it becomes a candidate beside the
+  author's value, never in its place, and only a check that rules one out removes it. A dispute about how sure an answer is changes its confidence or result,
+  never its `value`. A correction of a disputed entry does not answer
   the dispute: it stands on the correction until its disputer reads it and withdraws it (naming
   either entry), or disputes it again. Neither is for your own entries: correct those
   with `supersedes`. An answer resting on an entry that is superseded or disputed after it was
@@ -647,7 +621,9 @@ Ledger (only when `record` is in your tool list)
   what the record ties to a question that its answer does not reach (a finding or an event two
   seats hold that names the question in `answers`, sits under the question's leads, or whose `rel`
   links it to an entry the answer cites; or one seat's that names the question and that another
-  question's answer relies on). A warning is said where the
+  question's answer relies on); and a finding at high confidence that five or more later entries
+  stand on and no other seat attested or disputed (`premise_unreviewed`): re-derive it before
+  more is built on it. A warning is said where the
   decision is made: in the reply to the record that writes the answer, in its review offer and
   the reply to an attest on it, in the reply to a lead's close or confirmation that changes it,
   and in `finish` status. Weigh it then: cite the entry or say in the reasoning why it does not
@@ -737,6 +713,9 @@ Done
   no_objection, or objection with why, and sections: the numbers or headings of the sections you
   reviewed; none named is the whole report), say what is still open, or wait. A coordinator that is
   done, dead, compacting or silent is taken over by the next seat's done.
+- When the coordinator calls done while a job of yours ended after your last record, the finish
+  waits for you and you are asked on the board: record every value you hold (an answer, a
+  finding, or a candidate). Anything you record ends the wait; it lapses ten minutes after the ask.
 - An ack binds each section it covered by that section's digest: when the report is published
   again it carries over while those sections are unchanged, and your header says when one you
   reviewed changed; then review only those (`finish` ack with those sections). Never ack again a

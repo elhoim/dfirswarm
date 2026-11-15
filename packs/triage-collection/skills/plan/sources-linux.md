@@ -3,6 +3,7 @@ id: plan/sources-linux
 title: Linux sources to request, by question
 when: You request more evidence from a Linux source.
 needs: []
+card: Check what you hold with collection_index {"root": "<collection dir>"} before requesting a source; choose by the question and how fast it is lost. Find mount points, namespaces, users and retention boundaries first. Ask for key and verifier stores only where question and authority justify it; never write a value or hash. Does not show: that a source exists, was retained or would hold a trace.
 tools: [collection_index]
 requires_host: []
 ---

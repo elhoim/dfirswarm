@@ -70,8 +70,10 @@ test("a job_similar line that cannot be written holds nothing up: the job is reg
   // With no line to name the rest, the answer carries every one.
   const many: Similar[] = Array.from({ length: SIMILAR_SHOWN + 4 }, (_, i) => ({ job: `j${String(i + 1).padStart(6, "0")}`, seat: "a2", state: "committed", status: "ok", lead: null, objects: "same", shared: 1, match: "same command", op: "command:strings" }));
   const view = similarView("j000099", many, false, false);
-  assert.equal((view.similar as Similar[]).length, SIMILAR_SHOWN + 4);
-  assert.equal(view.similar_more, undefined);
+  const line = String(view.similar);
+  assert.doesNotMatch(line, /job_similar line/, "no line to name the rest");
+  for (const s of many) assert.ok(line.includes(s.job), `${s.job} is named on the one line`);
+  assert.doesNotMatch(line, /\n/);
   svc.journal.append = append;
   await until(svc, first.job.id);
   await svc.stop("over");

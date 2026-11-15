@@ -43,6 +43,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { LeadEvent } from "../extensions/leads.ts";
 
+/** The session entry a seat writes for the summary it begins on a copy (extensions/self-compact.ts PRESUMMARY_USAGE_TYPE; tests/question-cost.test.ts holds the two equal). */
+export const PRESUMMARY_USAGE_TYPE = "self-compact-presummary-usage";
+
 /** What a call did, when the record says: the tools it called, with their arguments (a Pi session's reply), or the trace rows it made. */
 export type CallTool = { name: string; args?: Record<string, unknown> };
 
@@ -340,14 +343,17 @@ export async function sessionCalls(sandbox: string): Promise<TokenCall[]> {
       const text = await readFile(f, "utf8").catch(() => "");
       for (const line of text.split("\n")) {
         if (!line.trim()) continue;
-        let e: { type?: string; timestamp?: string; message?: { role?: string; usage?: Record<string, unknown>; content?: unknown }; usage?: Record<string, unknown> };
+        let e: { type?: string; timestamp?: string; customType?: string; data?: { usage?: Record<string, unknown> }; message?: { role?: string; usage?: Record<string, unknown>; content?: unknown }; usage?: Record<string, unknown> };
         try {
           e = JSON.parse(line) as typeof e;
         } catch {
           continue;
         }
         const m = e.message;
-        const usage = e.type === "message" && m && (m.role === "assistant" || m.role === "toolResult") ? m.usage : e.type === "compaction" || e.type === "branch_summary" ? e.usage : undefined;
+        // The summary a seat begins on a copy at the notice line is recorded as its own entry when its call ends
+        // (extensions/self-compact.ts PRESUMMARY_USAGE_TYPE): compaction cost, though no compaction entry carries it.
+        const presummary = e.type === "custom" && e.customType === PRESUMMARY_USAGE_TYPE;
+        const usage = e.type === "message" && m && (m.role === "assistant" || m.role === "toolResult") ? m.usage : e.type === "compaction" || e.type === "branch_summary" ? e.usage : presummary ? e.data?.usage : undefined;
         if (!usage) continue;
         const n = (k: string) => Number(usage[k]) || 0;
         const tokens = n("input") + n("output") + n("cacheRead") + n("cacheWrite");
@@ -359,7 +365,7 @@ export async function sessionCalls(sandbox: string): Promise<TokenCall[]> {
             if (x?.type === "toolCall" && typeof x.name === "string") tools.push({ name: x.name, ...(x.arguments && typeof x.arguments === "object" ? { args: x.arguments as Record<string, unknown> } : {}) });
           }
         }
-        const compaction = e.type === "compaction" || e.type === "branch_summary";
+        const compaction = e.type === "compaction" || e.type === "branch_summary" || presummary;
         if (tokens > 0 || cost > 0) out.push({ seat, at: Date.parse(String(e.timestamp ?? "")), tokens, usd: cost, ...(tools.length ? { tools } : {}), ...(compaction ? { compaction } : {}) });
       }
     }

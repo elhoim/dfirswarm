@@ -3,6 +3,7 @@ id: files/aescrypt
 title: AES Crypt files
 when: A file starts with the AES Crypt signature, or carries the .aes extension.
 needs: []
+card: materialise_decrypted {"operation": "aescrypt_decrypt", "source": "<container>", "key_ref": "<sealed 0600 file, case-supplied password>"} runs only in a secret_output job. Its output is a result only after the HMAC passed; a run cut short leaves an unverified .partial. A wrong password and a damaged file fail alike: say the attempt failed, not which. Does not show: who encrypted the file or when.
 tools: [materialise_decrypted]
 requires_host: []
 ---

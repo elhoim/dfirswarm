@@ -3,6 +3,7 @@ id: volumes/veracrypt-truecrypt
 title: VeraCrypt and TrueCrypt containers
 when: A file or partition may be a VeraCrypt or TrueCrypt volume, which has no signature.
 needs: []
+card: High entropy (crypto_id) and a sector-aligned size are leads, never an identification. With a supplied password, tcrypt_header {"source": "<volume>", "password_file": "<sealed 0600 file>", "header": "normal", "offset": <512-aligned bytes>} runs in a secret_output job; try "hidden" and "backup" separately; a PIM is refused. Does not show: that a failed header rules out VeraCrypt or TrueCrypt.
 tools: [crypto_id, tcrypt_header]
 requires_host: [cryptsetup, mmls]
 ---

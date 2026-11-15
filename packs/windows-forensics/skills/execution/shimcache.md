@@ -3,6 +3,7 @@ id: execution/shimcache
 title: ShimCache, AppCompatCache
 when: Records of files seen.
 needs: []
+card: userassist_bam_shimcache {"hive": "<SYSTEM>", "source": "shimcache"} decodes AppCompatCache (cross_check not_run): say the tool, its parser and the layout. A cached time is the file's metadata and the order no sequence of runs; a live system's hive can lag memory. Read the control set the question concerns, not ControlSet001. Does not show: that the program ran, by whom, how often or when.
 tools: [userassist_bam_shimcache, regkv]
 requires_host: []
 ---

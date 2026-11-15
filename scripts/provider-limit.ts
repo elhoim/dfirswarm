@@ -128,6 +128,10 @@ export const SEAT_HARNESS_ROWS: ReadonlySet<string> = new Set([
   "harness_record",
   // The model a provider said answered a message (a resolved alias, or a substitution): bookkeeping beside the thinking row.
   "model_reported",
+  // The images a model call left out and the cap a provider's refusal set (extensions/agent-swarm.ts capImages), and a shell call ended at its limit.
+  "image_cap", "image_scaled", "images_left_out", "shell_timeout",
+  // The record tools a seat's model is offered (B2), and an answer format sighted in a call's output and added to it (B5).
+  "record_tools", "format_sighted",
 ]);
 
 /**

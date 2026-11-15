@@ -3,6 +3,7 @@ id: apps/messaging
 title: Messaging stores, and what a message row proves
 when: A question rests on Messages, SMS, MMS, RCS, WhatsApp, Signal or Telegram records.
 needs: []
+card: Run sqlite_query {"db_path": "<copy>", "sql": "SELECT sql FROM sqlite_master"} first; cite app version and schema. A handle is an address, not a person; sent and read are app flags; a deleted state, a tombstone and a missing row differ. plist_read and protobuf_peek show structure, not meaning; run message jobs with secret_output: true. Does not show: who held the phone, or that a message was seen.
 tools: [sqlite_query, plist_read, protobuf_peek]
 requires_host: []
 ---

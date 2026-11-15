@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
 import { agentDeadPath, agentDonePath, appendEvent, claimName, createContext, diffWatchedPaths, finishLineVerdict, postMessage, runFinishLine, teamView, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
-import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
+import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, stampLines, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 after(async () => {
@@ -1004,7 +1004,7 @@ test("a seat that is done while the swarm goes on has its VM put away a grace pe
   await probe.hub.stop();
   const { hub } = await setup({ extra: { run: "t1", vmCli: fake.cli, seatLeaveMs: 50 } });
   await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "agent_cap", outputFile: "work/a0.md", createSentinel: false }]);
-  await until(() => existsSync(fake.log), "the seat's VM is put away", 5000);
+  await until(() => existsSync(fake.log) && readFileSync(fake.log, "utf8").endsWith("\n"), "the seat's VM is put away", 5000);
   const calls = (await readFile(fake.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as string[]);
   assert.ok(calls.some((c) => c.includes("--agent") && c[c.indexOf("--agent") + 1] === "a0"), JSON.stringify(calls));
   assert.ok(!calls.some((c) => c.includes("--agent") && c[c.indexOf("--agent") + 1] === "a1"), "and no other seat's");
@@ -1664,6 +1664,9 @@ test("a seat past its file-history quota still has every revision recorded, by i
   await writeFile(f, "another\n");
   const r3 = (await vm(() => board.recordFileVersion(sandbox, "work/a0/notes.md", "a0"))) as { stored?: false };
   assert.equal(r3.stored, false);
+  // Told the quota is spent, the seat sends a revision's hash, not its bytes (the run s082123 sent a hundred 11 MB files whole after it).
+  const told0 = await board.ownFileWire(sandbox, "work/a0/notes.md", "a0", 0);
+  assert.deepEqual(Object.keys(told0 ?? {}), ["hash_only"]);
   await until(() => lines.some((l) => l.tool === "history_quota"), "the quota on the trace");
   assert.equal(lines.filter((l) => l.tool === "history_quota").length, 1, "said once");
   const told = (await readdir(join(sandbox, "threads", "main"))).filter((n) => n.endsWith("-system.md"));
@@ -1691,7 +1694,8 @@ test("a seat that said done before a hub restart still has its VM put away when 
   const again = new Hub({ sandbox, dir, agents, tokens: hub.cfg.tokens, collector: hub.cfg.collector, backstop: false, quiet: true, settleMs: 0, herdrBin: "/usr/bin/false", run: "t1", vmCli: fake.cli, seatLeaveMs: 60_000 });
   await again.start();
   cleanups.push(async () => again.stop());
-  await until(() => existsSync(fake.log), "the seat's VM is put away after the restart", 5000);
+  // A whole line, not only the file: the fake CLI creates it and then writes it.
+  await until(() => existsSync(fake.log) && readFileSync(fake.log, "utf8").endsWith("\n"), "the seat's VM is put away after the restart", 5000);
   const calls = (await readFile(fake.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as string[]);
   assert.ok(calls.some((c) => c.includes("--agent") && c[c.indexOf("--agent") + 1] === "a0"), "at the time it was due, not a grace period after the restart");
   await until(() => {
@@ -2008,9 +2012,9 @@ test("the measure of a seat's link counts the lines on that link only: a big wri
 
 test("an answer past a part's size is kept by the hub and fetched in parts, whole", async () => {
   const { hub, sandbox } = await setup();
-  // The diff shows its first 400 rows: long rows make it larger than a part.
-  const lines1 = Array.from({ length: 200 }, (_, i) => `first ${i} ${randomBytes(800).toString("hex")}`).join("\n");
-  const lines2 = Array.from({ length: 200 }, (_, i) => `second ${i} ${randomBytes(800).toString("hex")}`).join("\n");
+  // The diff shows its first 400 rows: long rows make it larger than a part, and within the answer's wall (reply-bound.ts).
+  const lines1 = Array.from({ length: 200 }, (_, i) => `first ${i} ${randomBytes(200).toString("hex")}`).join("\n");
+  const lines2 = Array.from({ length: 200 }, (_, i) => `second ${i} ${randomBytes(200).toString("hex")}`).join("\n");
   await writeFile(join(sandbox, "work", "shared.txt"), lines1);
   await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
   await writeFile(join(sandbox, "work", "shared.txt"), lines2);
@@ -2419,4 +2423,84 @@ test("a seat's harness that sees the provider answer with another model is heard
   assert.equal(told().length, 1, "once per seat and model");
   assert.deepEqual(JSON.parse(told()[0].split("\t")[1]), { agent: "a0" });
   assert.equal(lines.filter((l) => l.tool === "model_reported").length, 3, "every line reaches the trace");
+});
+
+test("every line of the hub's log says when (Plan 2, 0.13): its own, an error's, a chunk that ends mid-line goes on unstamped", async () => {
+  const got: string[] = [];
+  const stream = { write: (chunk: string) => (got.push(chunk), true) };
+  let n = 0;
+  const put = stampLines(stream as never, () => `2026-11-14T10:00:0${n++}.000Z`);
+  stream.write("vm-hub: up, 2 agent socket(s)\n" as never);
+  stream.write("first half, " as never);
+  stream.write("second half\nError: boom\n    at x\n" as never);
+  stream.write(Buffer.from("bytes\n") as never);
+  put();
+  stream.write("after\n" as never);
+  assert.equal(got.join(""), "2026-11-14T10:00:00.000Z vm-hub: up, 2 agent socket(s)\n2026-11-14T10:00:01.000Z first half, second half\n2026-11-14T10:00:02.000Z Error: boom\n2026-11-14T10:00:03.000Z     at x\n2026-11-14T10:00:04.000Z bytes\nafter\n");
+  // The hub itself: what it says on its way out is stamped, and SWARM_LOG_TS=0 leaves it as it was.
+  const { spawnSync } = await import("node:child_process");
+  const script = join(import.meta.dirname, "..", "scripts", "vm-hub.ts");
+  const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", script], { encoding: "utf8", input: "" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z vm-hub: usage: /);
+  assert.ok(r.stderr.split("\n").filter(Boolean).every((l) => /^\d{4}-\d{2}-\d{2}T[\d:.]+Z /.test(l)), r.stderr);
+  const plain = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", script], { encoding: "utf8", input: "", env: { ...process.env, SWARM_LOG_TS: "0" } });
+  assert.match(plain.stderr, /^vm-hub: usage: /);
+});
+
+test("a crash's report in the hub's log has its time: a stamped copy is written before Node's own report, and the exit is Node's as before; the keeper's lines are stamped", async () => {
+  const { openSync, closeSync, readFileSync: read, mkdtempSync } = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "hub-crash-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const hub = join(import.meta.dirname, "..", "scripts", "vm-hub.ts");
+  // As the keeper starts the hub: its stderr appended to a file.
+  const crash = (how: string, stamp: boolean) => {
+    const file = join(dir, `${how}-${stamp}.log`);
+    const fd = openSync(file, "a");
+    const code = `const { stampLines, stampCrashes } = await import(${JSON.stringify(hub)}); ${stamp ? "stampLines(process.stderr); stampCrashes();" : ""} console.error("vm-hub: up"); setTimeout(() => { ${how === "throw" ? 'throw new Error("boom in a timer")' : 'Promise.reject(new Error("a rejection nobody took"))'}; }, 10);`;
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", code], { stdio: ["ignore", "ignore", fd] });
+    closeSync(fd);
+    return { status: r.status, log: read(file, "utf8") };
+  };
+  const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+  for (const how of ["throw", "reject"]) {
+    const plain = crash(how, false);
+    const stamped = crash(how, true);
+    assert.equal(stamped.status, plain.status, `${how}: the exit is Node's own, as before (${plain.status})`);
+    assert.equal(stamped.status, 1);
+    const lines = stamped.log.split("\n");
+    const at = lines.findIndex((l) => TS.test(l) && l.includes(how === "throw" ? "an uncaught exception ends the hub" : "a rejection nothing handled ends the hub"));
+    assert.ok(at > 0, stamped.log);
+    assert.match(lines[at]!, how === "throw" ? /Error: boom in a timer$/ : /Error: a rejection nobody took$/);
+    assert.ok(TS.test(lines[at + 1]!) && /^\S+ +at /.test(lines[at + 1]!), `the stack's lines are stamped too: ${lines[at + 1]}`);
+    assert.ok(stamped.log.slice(stamped.log.indexOf(lines[at]!)).includes(how === "throw" ? "boom in a timer" : "a rejection nobody took"), "and Node's own report follows");
+    assert.ok(!TS.test(plain.log.split("\n").find((l) => l.includes("Error:")) ?? ""), "without it, the crash's report had no time");
+  }
+  // The keeper writes into the hub's log only lines that carry their time (say), besides the hub's own output.
+  const keeper = await readFile(join(import.meta.dirname, "..", "scripts", "hub-supervise.sh"), "utf8");
+  const appends = keeper.split("\n").filter((l) => l.includes('traces/vm-hub.log"'));
+  assert.ok(appends.length >= 4);
+  for (const l of appends) assert.ok(/\bsay "/.test(l) || /"\$HUB_SCRIPT" --resume "\$HUB_DIR" >>"\$SANDBOX\/traces\/vm-hub.log" 2>&1/.test(l), `an unstamped line into the hub's log: ${l.trim()}`);
+  assert.match(keeper, /^say\(\) \{ printf '%s hub-supervise: %s\\n' "\$\(date -u \+%Y-%m-%dT%H:%M:%SZ\)" "\$\*"; \}$/m);
+});
+
+test("an answer past the wall reaches the seat cut to it, the whole kept among the seat's own outputs, which its VM reads, and named (Plan 2, A4)", async () => {
+  const { hub, sandbox } = await setup();
+  for (let i = 0; i < 60; i++) await postMessage({ sandboxRoot: sandbox, agentId: "a1" }, { tag: "result", body: `post ${i}: ${"q".repeat(3000)}` });
+  const was = process.env.SWARM_RPC_ANSWER_MAX_BYTES;
+  process.env.SWARM_RPC_ANSWER_MAX_BYTES = String(64 * 1024);
+  try {
+    const box = (await asVm(hub.socketFor("a0"), () => board.readInbox({ sandboxRoot: sandbox, agentId: "a0" }, { pageChars: 0 }))) as Awaited<ReturnType<typeof board.readInbox>> & { answer_cut?: { kept?: string; bytes: number; cut: string[]; note: string } };
+    assert.ok(Buffer.byteLength(JSON.stringify(box)) <= 64 * 1024, "the answer is within the wall");
+    assert.ok(box.posts.length > 0 && box.posts.length < 60, `${box.posts.length} posts answered`);
+    assert.ok(box.posts.every((p, i) => p.body === `post ${i}: ${"q".repeat(3000)}`), "the first posts, in order, each whole");
+    assert.match(box.answer_cut!.kept!, /^tool-output\/a0\/\d+-answer-readInbox-\w+\.text\.log$/, "kept among the seat's own outputs");
+    assert.match(box.answer_cut!.note, /what did not fit is cut, kept whole at tool-output\/a0\//);
+    const whole = JSON.parse(await readFile(join(sandbox, box.answer_cut!.kept!), "utf8")) as { ok: boolean; result: { posts: unknown[] } };
+    assert.equal(whole.result.posts.length, 60, "the file holds the whole answer");
+  } finally {
+    if (was === undefined) delete process.env.SWARM_RPC_ANSWER_MAX_BYTES;
+    else process.env.SWARM_RPC_ANSWER_MAX_BYTES = was;
+  }
 });

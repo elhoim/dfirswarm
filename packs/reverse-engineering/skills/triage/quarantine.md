@@ -3,6 +3,7 @@ id: triage/quarantine
 title: Handling a recovered sample for static examination
 when: Before you parse anything an examined system produced: a binary, script, document or archive.
 needs: []
+card: Treat every sample as hostile data: never run it, never load a recovered script, macro or project as code, and never upload it. Record SHA-256 and size before any transformation. Identify from bytes with file_type ({"path": "<file>"}): extension disagreement is an observation, not renaming; with entropy_map no threshold proves packing or malice. Does not show: what it does or whether it ran.
 tools: [file_type, entropy_map, pe_info]
 requires_host: []
 ---

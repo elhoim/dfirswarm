@@ -3,6 +3,7 @@ id: rules/yara
 title: YARA matches and what they mean
 when: You search evidence with rules or must interpret a rule hit.
 needs: [triage/quarantine]
+card: yara -s prints matched bytes: run it as a secret_output job writing under $OUT, and cite rule, identifier and offset, not bytes. Record the YARA version, rule hashes and completion: a completed no-hit holds only for these rules and target. Confirm with pe_info ({"path": "<sample>"}) the format facts a structural condition leans on. Does not show: family, intent, or that unmatched files are clean.
 tools: [pe_info]
 requires_host: [yara]
 ---

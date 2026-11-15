@@ -6,6 +6,7 @@ needs: []
 tools: [backup_destruction_correlate]
 requires_host: []
 mentions: [mft_records, usn_journal, prefetch_mam, amcache_apps, regkv, evtx_query]
+card: backup_destruction_correlate ({"events": [{"host": "<h>", "file": "<answer.json>", "result_file": "<rows.jsonl>"}]}) reads evtx_query answers, citing destructive commands by reference. 7045 is a service installed, not run; an MFT time is no deletion time; a missing 1102 is no proof against cleanup. Without windows-forensics, say they were not examined. Does not show: that a command removed copies.
 ---
 
 Use only if the chain rests on NTFS records or Windows events. Not for the chain as a whole (`encryptor/traces`).

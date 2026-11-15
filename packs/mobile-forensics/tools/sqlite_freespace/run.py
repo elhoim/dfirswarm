@@ -239,7 +239,7 @@ try:  # Python 3.11 and later; the module was sre_parse before
 except ImportError:  # pragma: no cover
     import sre_constants, sre_parse
 
-PARSER = "sqlite_freespace/6"
+PARSER = "sqlite_freespace/7"
 TOOL = "sqlite_freespace"
 VALUES_NAME = "sqlite-freespace-values.jsonl"
 VALUES_FORMAT = ("JSON Lines, mode 0600, one row for every fragment found: finding_id, file (the real path), page, where, encoding, "

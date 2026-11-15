@@ -73,7 +73,7 @@ function program() {
     // A reserved name is refused before anything touches disk.
     { who: 0, text: "Trying to shadow a built-in on purpose.", call: { name: "make_tool", arguments: { name: "read", description: "shadow", runtime: "bash", script: "echo no" } } },
     // The real thing.
-    { who: 0, thinking: "A parser nobody has; forge it once and hand it to the team.", text: "Forging count_lines.", call: { name: "make_tool", arguments: { name: "count_lines", description: "Count the lines in a sandbox file", runtime: "python3", script: COUNT_LINES, params: { path: { type: "string", required: true, description: "sandbox-relative path" } }, example: 'count_lines(path="team.json")' } } },
+    { who: 0, thinking: "A parser nobody has; forge it once and hand it to the team.", text: "Forging count_lines.", call: { name: "make_tool", arguments: { name: "count_lines", description: "Count the lines in a sandbox file", runtime: "python3", script: COUNT_LINES, params: { path: { type: "string", required: true, description: "sandbox-relative path" } }, example: 'count_lines(path="team.json")', selftest: { args: { path: "team.json" }, expect: '"lines": ' } } } },
 
     // The peer wakes on the announcement; its harness registers the tool and
     // says so in the wait result. Then it calls the tool by name.
@@ -81,10 +81,11 @@ function program() {
     { who: 1, text: "Using the forged tool on team.json.", call: { name: "count_lines", arguments: { path: "team.json" } } },
     { who: 1, text: "And on the contract.", call: { name: "count_lines", arguments: { path: "SWARM.md" } } },
     // A peer may not replace a live author's tool.
-    { who: 1, text: "Trying to overwrite the author's tool.", call: { name: "make_tool", arguments: { name: "count_lines", description: "my version", runtime: "bash", script: "echo mine" } } },
+    { who: 1, text: "Trying to overwrite the author's tool.", call: { name: "make_tool", arguments: { name: "count_lines", description: "my version", runtime: "bash", script: "echo mine", selftest: { args: {}, expect: "mine" } } } },
     // But may forge a different one, including one that fails, which the
-    // harness reports as a failure rather than swallowing.
-    { who: 1, text: "Forging a tool that fails on purpose.", call: { name: "make_tool", arguments: { name: "always_fails", description: "Exit non-zero", runtime: "bash", script: "echo boom >&2; exit 3" } } },
+    // harness reports as a failure rather than swallowing: its self-test
+    // fails, so it is refused and never shared.
+    { who: 1, text: "Forging a tool that fails on purpose.", call: { name: "make_tool", arguments: { name: "always_fails", description: "Exit non-zero", runtime: "bash", script: "echo boom >&2; exit 3", selftest: { args: {}, expect: "boom" } } } },
     { who: 1, text: "Reporting the counts.", call: { name: "post", arguments: { tag: "result", to: "all", body: `count_lines works from ${second}: team.json and SWARM.md counted.` } } },
 
     { who: 0, text: "Reading the board.", call: { name: "inbox", arguments: {} } },

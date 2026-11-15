@@ -166,3 +166,59 @@ names="$(jq -r '[.present[], .missing[]] | map(.name) | join(" ")' "$TMP/sb/tool
 [[ " $names " == *" xfs_db "* && " $names " == *" vslvminfo "* && " $names " == *" pyvslvm "* ]] || fail "the linux set should check xfsprogs and libvslvm: $names"
 [[ " $names " == *" vshadowinfo "* ]] && fail "libvshadow belongs to the crypto set: $names"
 pass "libvshadow is in the crypto set; xfsprogs and libvslvm are in the linux set"
+
+# What the case requires (--requires): a capability is met by a program that
+# is there and does the work; a zbarimg that cannot read a PNG does not meet
+# qr-decode, and an unknown capability is refused.
+rm -rf "$TMP/sb2" && mkdir -p "$TMP/sb2"
+cat > "$TMP/bin/ffmpeg" <<'EOF2'
+#!/usr/bin/env bash
+echo "ffmpeg version 7"
+EOF2
+cat > "$TMP/bin/zbarimg" <<'EOF2'
+#!/usr/bin/env bash
+# Built without ImageMagick's PNG coder: it cannot read the probe.
+echo "zbarimg: no decode delegate for this image format" >&2
+exit 2
+EOF2
+chmod +x "$TMP/bin/ffmpeg" "$TMP/bin/zbarimg"
+err="$(bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires video-decode,qr-decode,ocr 2>&1 >/dev/null || true)"
+jq -e '.requires[] | select(.capability == "video-decode" and .met == true and .by == ["ffmpeg"])' "$TMP/sb2/toolbox.json" >/dev/null \
+  || fail "video-decode is met by ffmpeg: $(jq -c .requires "$TMP/sb2/toolbox.json")"
+jq -e '.requires[] | select(.capability == "qr-decode" and .met == false and .present_but_failed_probe == ["zbarimg"])' "$TMP/sb2/toolbox.json" >/dev/null \
+  || fail "a zbarimg that cannot read a PNG does not meet qr-decode: $(jq -c .requires "$TMP/sb2/toolbox.json")"
+jq -e '.requires[] | select(.capability == "ocr" and .met == false and .by == [])' "$TMP/sb2/toolbox.json" >/dev/null \
+  || fail "ocr is not met with no tesseract: $(jq -c .requires "$TMP/sb2/toolbox.json")"
+[[ "$err" == *"WARN: the case requires qr-decode and this host cannot do it (zbarimg is there and could not do it on a test input)"* ]] \
+  || fail "the unmet qr-decode is a WARN that names the failed probe: $err"
+[[ "$err" == *"WARN: the case requires ocr and this host cannot do it (none of: tesseract)"* ]] || fail "the unmet ocr is a WARN: $err"
+set +e
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires qr-decode --required >/dev/null 2>"$TMP/req.err"; rc=$?
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires teleport >/dev/null 2>"$TMP/unk.err"; rc2=$?
+set -e
+[[ "$rc" -eq 3 ]] || fail "--required with an unmet capability exits 3, got $rc: $(cat "$TMP/req.err")"
+[[ "$rc2" -eq 2 ]] && grep -q "unknown capability teleport" "$TMP/unk.err" || fail "an unknown capability is refused (exit 2): $rc2 $(cat "$TMP/unk.err")"
+pass "required capabilities: met by a program that does the work; a failed probe and an absent program are said; --required blocks"
+
+# The way out the message names is printed as written: the command in
+# backticks once ran as a command substitution inside the double quotes,
+# printed a syntax error and left "supply a program right after the start
+# with , which tests it".
+want='supply a program right after the start with `swarm.sh tool-supply <id> add PATH --provides <capability>`, which tests it against a known answer'
+# On the host there is no job service to test a supplied program in: tool-supply says untested and exits 4, and the
+# WARN says so rather than promise a test.
+host_want='a host run has no job service, so `swarm.sh tool-supply <id> add PATH --provides <capability>` seals a program and records it untested (exit 4)'
+[[ "$err" == *"$host_want"* && "$err" == *"install a program that does it on this host and start again"* ]] || fail "the host WARN does not say what tool-supply does in a host run: $err"
+[[ "$err" == *"$want"* || "$err" == *"in a worker job"* ]] && fail "the host WARN promises a test in a worker job that a host run has not: $err"
+printf '{"image": "x", "programs": []}' > "$TMP/image-none.json"
+set +e
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb2" dfir --requires qr-decode --required --image "$TMP/image-none.json" >/dev/null 2>"$TMP/cap.err"; rc=$?
+set -e
+[[ "$rc" -eq 3 ]] || fail "an unmet capability with --required in an image exits 3, got $rc: $(cat "$TMP/cap.err")"
+grep -qF "BLOCKER: --toolbox-required and the case requires what the image cannot do" "$TMP/cap.err" || fail "no capability BLOCKER: $(cat "$TMP/cap.err")"
+grep -qF "$want" "$TMP/cap.err" || fail "the BLOCKER does not name the tool-supply command whole: $(cat "$TMP/cap.err")"
+grep -qF 'a run without a job service seals it and records it untested, exit 4' "$TMP/cap.err" || fail "the image BLOCKER does not say what happens with no job service: $(cat "$TMP/cap.err")"
+for f in "$err" "$(cat "$TMP/cap.err")"; do
+  [[ "$f" == *"with , which"* || "$f" == *"syntax error"* || "$f" == *"command not found"* || "$f" == *"No such file"* ]] && fail "the message ran its own example: $f"
+done
+pass "the unmet-capability WARN and BLOCKER print the tool-supply command as written, and say a host run cannot test it"

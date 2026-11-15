@@ -3,6 +3,7 @@ id: identify/collector-clues
 title: Layout clues for the collector families
 when: You describe a family's layout, or collection_id names none.
 needs: []
+card: When collection_id {"root": "<collection dir>"} names no collector, layout_clues are a clue, never a signature: list the families still compatible and what would settle it. A mirrored tree fits CyLR and a hand copy alike; parsed CSV or JSON is derived, not a sign its sources were delivered. Do not infer that no manifest exists. Does not show: which tool, version or profile, or what it omitted.
 tools: [collection_id]
 requires_host: []
 mentions: [CyLR, KAPE]

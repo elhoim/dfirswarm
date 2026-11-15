@@ -64,3 +64,42 @@ grep -q 'the harness writes this line itself when done verifies the inputs' <<<"
 [[ "$(grep -o '`' <<<"$line" | wc -l | tr -d ' ')" == 2 ]] || fail "the note added a code span await-done would run: $line"
 grep -q '^- `test -f work/report.md`$' "$TMP/sb/SWARM.md" || fail "another check was changed"
 pass "the check on the harness's inputs_check line says the harness writes it, and adds no code span"
+
+# What each job image can do reaches the contract before a seat reads it: the
+# kickoff seeds job-capabilities.json (an earlier run's result for the same
+# image, said pending) and the contract has a "Job image capabilities" section;
+# the probes start as soon as the hub is up, before the seats' VMs are made.
+eval "$(sed -n '/^image_capabilities_cache()/p; /^seed_job_capabilities()/,/^}/p' "$ROOT/scripts/swarm.sh")"
+export DFIRSWARM_HOME="$TMP/home"
+mkdir -p "$DFIRSWARM_HOME/image-capabilities"
+# The cache is kept by the image's digest, as the kickoff read it on this host (plan_job_images): a tag names whatever
+# was last built under it.
+DISK_DIGEST="sha256:$(printf 'd%.0s' $(seq 1 64))"
+printf '%s\n' '{"image": "dfirswarm-disk:dev-arm64", "digest": "'"$DISK_DIGEST"'", "profile": "disk", "at": "2026-11-01T10:00:00Z", "capabilities": [{"id": "disasm-x86-64", "what": "disassemble x86-64 code", "ok": false, "said": "objdump here disassembles only elf64-littleaarch64; no r2, no capstone"}]}' \
+  > "$DFIRSWARM_HOME/image-capabilities/sha256_$(printf 'd%.0s' $(seq 1 64)).json"
+rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
+job_image_digests_json='{"disk": "sha256:'"$(printf 'e%.0s' $(seq 1 64))"'"}' isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64", "re": "dfirswarm-re:dev-arm64"}'
+jq -e '.pending == true and (.images | keys) == []' "$TMP/sb/job-capabilities.json" >/dev/null || fail "an image rebuilt under the same tag was seeded with an earlier image's result: $(cat "$TMP/sb/job-capabilities.json")"
+rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
+job_image_digests_json='{"disk": "'"$DISK_DIGEST"'"}' isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64", "re": "dfirswarm-re:dev-arm64"}'
+jq -e '.pending == true and (.images | keys) == ["disk"] and .cached.disk.image == "dfirswarm-disk:dev-arm64"' "$TMP/sb/job-capabilities.json" >/dev/null || fail "the seed: $(cat "$TMP/sb/job-capabilities.json")"
+ISOLATION_FOR_CONTRACT=microvm render_contract "$TMP/sb" s1 1 1 10 "$TMP/goal.md" s100
+out="$(cat "$TMP/sb/SWARM.md")"
+grep -q '^## Job image capabilities$' <<<"$out" || fail "no capabilities section: $out"
+grep -q -- '- disk: WORKS: none of the tested. DOES NOT: disassemble x86-64 code: objdump here disassembles only elf64-littleaarch64' <<<"$out" || fail "the cached line is not in the contract: $out"
+grep -q 'As an earlier run of the same image found it (disk 2026-11-01T10:00:00Z); this run tests each image again now' <<<"$out" || fail "the cached line is not said to be an earlier run's: $out"
+rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
+isolation=host jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64"}'
+[[ ! -e "$TMP/sb/job-capabilities.json" ]] || fail "a host run was seeded"
+SWARM_IMAGE_CAPABILITIES=off isolation=microvm jobs=1 resume_of="" seed_job_capabilities "$TMP/sb" '{"disk": "dfirswarm-disk:dev-arm64"}'
+[[ ! -e "$TMP/sb/job-capabilities.json" ]] || fail "SWARM_IMAGE_CAPABILITIES=off was seeded"
+ISOLATION_FOR_CONTRACT=microvm render_contract "$TMP/sb" s1 1 1 10 "$TMP/goal.md" s100
+grep -q 'Job image capabilities' "$TMP/sb/SWARM.md" && fail "a run with no seed has a capabilities section"
+# In the order a seat needs it: the probe right after the hub, before the seats' VMs.
+body="$(sed -n '/^launch_vm_agents()/,/^}/p' "$ROOT/scripts/swarm.sh")"
+hub_at="$(grep -n 'start_vm_hub "\$sandbox"' <<<"$body" | head -1 | cut -d: -f1)"
+probe_at="$(grep -n 'start_image_capabilities "\$sandbox"' <<<"$body" | head -1 | cut -d: -f1)"
+create_at="$(grep -n 'vm_cli create --spec' <<<"$body" | head -1 | cut -d: -f1)"
+[[ -n "$hub_at" && -n "$probe_at" && -n "$create_at" && "$hub_at" -lt "$probe_at" && "$probe_at" -lt "$create_at" ]] || fail "the probes do not start between the hub and the seats' VMs ($hub_at, $probe_at, $create_at)"
+grep -q 'run_script "\$hub_dir" scripts/image-capabilities.ts' "$ROOT/scripts/swarm.sh" || fail "the probe does not run from the run's frozen copy"
+pass "the job images' capabilities are seeded into the contract (an earlier run's, said so), and probed as soon as the hub is up"

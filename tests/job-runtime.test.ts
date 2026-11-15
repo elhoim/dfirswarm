@@ -18,7 +18,7 @@ import * as L from "../extensions/leads.ts";
 import * as T from "../scripts/job-telemetry.ts";
 import { JobService, programMissing } from "../scripts/job-service.ts";
 import { storePaths } from "../scripts/evidence-store.ts";
-import { regroup } from "../scripts/leads-cli.ts";
+import { HUB_SLOW_P99_MS, platformCheck, platformFacts, platformStall, platformStallWords, regroup, type PlatformFacts } from "../scripts/leads-cli.ts";
 import { renewSeatSecrets, validityMs, type ResolvedSecret, type VmSpec } from "../scripts/vm.ts";
 import { localWorker } from "./job-service-worker.ts";
 
@@ -187,6 +187,111 @@ test("B12: nothing moving while a job runs under a lead: its holder is nudged fi
   await P.writeBudget(S2, { ...b2, until_solved: true, stall_minutes: 15 });
   const direct = await regroup(S2, Date.parse(b2.started_at) + 16 * 60_000);
   assert.equal(direct.posted && direct.kind, "all_hands");
+});
+
+test("D7: the platform is the stall only past its thresholds: a store with finished jobs late for their seal and nothing sealed for 15 minutes, or a hub slow in every sample; one fresh job is never the store's", () => {
+  const min = 60_000;
+  const facts = (o: Partial<PlatformFacts> & { waits?: number[] }): PlatformFacts => ({
+    sealing: (o.waits ?? []).map((w, i) => ({ id: `j00000${i + 1}`, waited_ms: w * min })),
+    queued: o.queued ?? 0,
+    commit_gap_ms: o.commit_gap_ms ?? 0,
+    hub: o.hub ?? { samples: 0, slow: 0, p99_max_ms: null },
+  });
+  // One job that finished a minute ago, nothing sealed for 16 minutes: the seats' stall, not the store's.
+  assert.equal(platformStall(facts({ waits: [1], commit_gap_ms: 16 * min })), null);
+  // Six finished jobs, twelve minutes late, nothing sealed for fifteen: the store.
+  const six = platformStall(facts({ waits: [12, 12, 12, 12, 12, 12], commit_gap_ms: 15 * min, queued: 2 }));
+  assert.deepEqual([six?.cause, six?.late.length], ["store", 6]);
+  assert.match(platformStallWords(six!), /^PLATFORM STALL: nothing has been sealed for 15 minutes while 6 job\(s\) that finished 12 to 12 minutes ago wait for their seal \(j000001, .*j000006\), and 2 more wait for a worker behind them: the harness's store is behind\. The cause is the harness, not your work, and nothing is asked of you over it: do not cancel or run a job again/);
+  // The same six, but a job was sealed two minutes ago: the store moves.
+  assert.equal(platformStall(facts({ waits: [12, 12, 12, 12, 12, 12], commit_gap_ms: 2 * min })), null);
+  // Two late jobs are not enough; one waiting half an hour is.
+  assert.equal(platformStall(facts({ waits: [12, 11, 3], commit_gap_ms: 20 * min })), null);
+  assert.equal(platformStall(facts({ waits: [31], commit_gap_ms: 31 * min }))?.cause, "store");
+  // The hub: every sample of the window slow, at least three of them.
+  const hub = (samples: number, slow: number) => facts({ hub: { samples, slow, p99_max_ms: 2400 } });
+  assert.equal(platformStall(hub(4, 4))?.cause, "hub");
+  assert.equal(platformStall(hub(4, 3)), null);
+  assert.equal(platformStall(hub(2, 2)), null);
+  assert.match(platformStallWords(platformStall(hub(4, 4))!), /the harness's hub is slow \(its event loop was late by 2400 ms at worst, and by 1000 ms or more in each of its last 4 samples\)/);
+  assert.equal(platformStall(facts({ waits: [31], commit_gap_ms: 31 * min, hub: { samples: 3, slow: 3, p99_max_ms: 1500 } }))?.cause, "store_and_hub");
+  const words = platformStallWords(platformStall(facts({ waits: Array.from({ length: 12 }, () => 14), commit_gap_ms: 20 * min }))!);
+  assert.match(words, /12 job\(s\).*j000008 and 4 more/);
+});
+
+test("D7: read from the run in any run, not only until solved: the jobs, the journal's last seal and the hub's health rows; said once per stall, the regroup asks nothing meanwhile, and a stall that clears is said again next time", async () => {
+  const base = await mkdtemp(join(tmpdir(), "platform-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "p1", agentIds: ["a0", "a1"], capUsd: 5, wallClockMinutes: 600 });
+  const now = Date.now();
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const journal = storePaths(S).journal;
+  await mkdir(join(S, "store"), { recursive: true });
+  await writeFile(journal, `${JSON.stringify({ v: 1, seq: 0, at: iso(40 * 60_000), type: "job_committed", job: "j000001" })}\n${JSON.stringify({ v: 1, seq: 1, at: iso(16 * 60_000), type: "job_committed", job: "j000002" })}\n${JSON.stringify({ v: 1, seq: 2, at: iso(5 * 60_000), type: "job_started", job: "j000009" })}\n`);
+  const jobAt = async (id: string, state: string, finishedAgo: number) => {
+    await mkdir(join(storePaths(S).jobs, id), { recursive: true });
+    await writeFile(join(storePaths(S).jobs, id, "job.json"), JSON.stringify({ id, attempt: 1, state, exit: 0, finished_at: iso(finishedAgo), requester: { agent: "a0" }, spec: { kind: "command", timeout_seconds: 1800, command: "x", inputs: [] } }));
+  };
+  // One job that finished a minute ago: not the platform.
+  await jobAt("j000003", "finished", 60_000);
+  assert.deepEqual(await platformCheck(S, now), { stall: false });
+  // Six late for their seal, nothing sealed for sixteen minutes: the store, said once to every seat.
+  for (const id of ["j000004", "j000005", "j000006", "j000007", "j000008", "j000010"]) await jobAt(id, "finished", 12 * 60_000);
+  const said = await platformCheck(S, now);
+  assert.deepEqual(said.stall && [said.said, said.cause, said.late, said.sealing, said.commit_gap_minutes], [true, "store", 6, 7, 16]);
+  const posts = (await P.readInbox({ sandboxRoot: S, agentId: "a1" }, { markSeen: false })).posts;
+  assert.ok(posts.some((p) => /^PLATFORM STALL: nothing has been sealed for 16 minutes while 6 job\(s\) that finished 12 to 12 minutes ago wait for their seal .*the harness's store is behind\. The cause is the harness, not your work/.test(p.body) && p.tag === "hold"), JSON.stringify(posts.map((p) => p.body.slice(0, 160))));
+  const again = await platformCheck(S, now + 60_000);
+  assert.deepEqual(again.stall && [again.said, again.cause], [false, "store"]);
+  // An until-solved run's regroup reads it first: nobody is asked to regroup while it stands.
+  const b = await P.readBudget(S);
+  await P.writeBudget(S, { ...b, until_solved: true, stall_minutes: 15 });
+  const rg = await regroup(S, now + 20 * 60_000);
+  assert.deepEqual([rg.posted, !rg.posted && rg.why], [false, `the platform is the stall (store), said since ${new Date(now).toISOString()}: no seat is asked to regroup over it`]);
+  assert.ok(!(await P.readInbox({ sandboxRoot: S, agentId: "a1" }, { markSeen: false })).posts.some((p) => /^REGROUP/.test(p.body)));
+  // A seal: the store moves, the stall clears, and is said cleared once.
+  await appendFile(journal, `${JSON.stringify({ v: 1, seq: 3, at: new Date(now + 21 * 60_000).toISOString(), type: "job_committed", job: "j000004" })}\n`);
+  const cleared = await platformCheck(S, now + 22 * 60_000);
+  assert.deepEqual(cleared, { stall: false, cleared: { since: new Date(now).toISOString(), cause: "store" } });
+  assert.deepEqual(await platformCheck(S, now + 23 * 60_000), { stall: false });
+  // The hub: its health rows on the trace, every one in the last ten minutes slow.
+  const S2 = join(base, "run2");
+  await P.initSandbox(S2, { swarmId: "p2", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 600 });
+  for (const ago of [9, 6, 3, 1]) await appendFile(join(S2, P.EVENTS_REL), `${JSON.stringify({ ts: iso(ago * 60_000), recv_ts: iso(ago * 60_000), agent: "system", tool: "hub_health", args: {}, result: { ok: true, loop_p99_ms: HUB_SLOW_P99_MS + 1500 } })}\n`);
+  const hub = await platformCheck(S2, now);
+  assert.deepEqual(hub.stall && [hub.said, hub.cause, hub.hub_samples, hub.hub_p99_max_ms], [true, "hub", 4, HUB_SLOW_P99_MS + 1500]);
+  // An old slow sample, outside the window, and a quick one inside: not slow.
+  const S3 = join(base, "run3");
+  await P.initSandbox(S3, { swarmId: "p3", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 600 });
+  for (const [ago, p99] of [[30, 4000], [8, 4000], [5, 4000], [2, 40]] as const) await appendFile(join(S3, P.EVENTS_REL), `${JSON.stringify({ ts: iso(ago * 60_000), recv_ts: iso(ago * 60_000), agent: "system", tool: "hub_health", args: {}, result: { ok: true, loop_p99_ms: p99 } })}\n`);
+  assert.deepEqual(await platformCheck(S3, now), { stall: false });
+  // The journal's last seal is found behind lines that fill several chunks, whatever characters they carry.
+  const S4 = join(base, "run4");
+  await P.initSandbox(S4, { swarmId: "p4", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 600 });
+  await mkdir(join(S4, "store"), { recursive: true });
+  const filler = Array.from({ length: 3000 }, (_, i) => JSON.stringify({ v: 1, seq: i + 1, at: iso(5 * 60_000), type: "job_started", job: "j000099", note: `çözümleme ${"é".repeat(60)} ${i}` })).join("\n");
+  await writeFile(storePaths(S4).journal, `${JSON.stringify({ v: 1, seq: 0, at: iso(20 * 60_000), type: "job_committed", job: "j000098" })}\n${filler}\n`);
+  assert.equal(Math.round((await platformFacts(S4, now)).commit_gap_ms / 60_000), 20);
+});
+
+test("D7: a regroup over a stall the seats made is a regroup, not a platform post: one job of theirs finished a minute ago does not make the store the cause", async () => {
+  const base = await mkdtemp(join(tmpdir(), "regroup5-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "r5", agentIds: ["a0", "a1"], capUsd: 5, wallClockMinutes: 30 });
+  const b = await P.readBudget(S);
+  await P.writeBudget(S, { ...b, until_solved: true, stall_minutes: 15 });
+  assert.ok((await L.openLead({ sandboxRoot: S, agentId: "a0" }, { title: "Extract the image", why: "part 1", take: true })).ok);
+  const openAt = Date.parse((await L.leadsSnapshot(S)).state.events[0].at);
+  const at = openAt + 16 * 60_000;
+  await mkdir(join(storePaths(S).jobs, "j000048"), { recursive: true });
+  await writeFile(join(storePaths(S).jobs, "j000048", "job.json"), JSON.stringify({ id: "j000048", attempt: 1, state: "finished", exit: 0, finished_at: new Date(at - 60_000).toISOString(), requester: { agent: "a0" }, spec: { kind: "command", timeout_seconds: 1800, command: "x", inputs: [] } }));
+  assert.ok((await L.attachJob(S, "a0", "j000048", "L-1")).ok);
+  const r = await regroup(S, at);
+  assert.equal(r.posted && r.kind, "nudge", JSON.stringify(r));
+  const said = (await P.readInbox({ sandboxRoot: S, agentId: "a0" }, { markSeen: false })).posts;
+  assert.ok(!said.some((p) => /PLATFORM STALL/.test(p.body)), "no false claim that the store is the cause");
 });
 
 test("B10: the seats' tokens are renewed at half their validity, in place, only where msb says the rotation is live; never a value in what it returns", async () => {

@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobService, describe, jobView, type JobRecord } from "../scripts/job-service.ts";
-import { objectsMatch, opMatch, opOf, rankSimilar, sameAsOf, sameAsView, SAME_AS_SHOWN, similarView, SIMILAR_SHOWN, type Similar } from "../scripts/job-reuse.ts";
+import { objectsMatch, opMatch, opOf, rankSimilar, sameAsOf, sameAsView, SAME_AS_SHOWN, SIMILAR_LINE_MAX, similarView, SIMILAR_SHOWN, type Similar } from "../scripts/job-reuse.ts";
 import { storePaths } from "../scripts/evidence-store.ts";
 import { listInputs, localWorker } from "./job-service-worker.ts";
 
@@ -94,10 +94,23 @@ test("similar jobs are ranked and bounded without loss: the closest first, the r
   assert.deepEqual(ranked.map((x) => x.job), ["j000005", "j000004", "j000002", "j000003", "j000001"]);
   const many = Array.from({ length: SIMILAR_SHOWN + 3 }, (_, i) => s(`j${String(i + 1).padStart(6, "0")}`, "same command", "same"));
   const view = similarView("j000100", many, false);
-  assert.equal((view.similar as Similar[]).length, SIMILAR_SHOWN);
-  assert.equal(view.similar_more, `3 more, every one on the job_similar line for j000100 in store/journal.jsonl`);
-  assert.match(String(view.similar_note), /independent: true/);
-  assert.match(String(similarView("j000100", many.slice(0, 1), true).similar_note), /independent reproduction/);
+  // One line: a single string with no line break, the first few described, the rest counted and named where every one is.
+  assert.deepEqual(Object.keys(view), ["similar"], "no list of objects and no note beside it");
+  const line = String(view.similar);
+  assert.equal(typeof view.similar, "string");
+  assert.doesNotMatch(line, /\n/);
+  assert.ok(line.length <= SIMILAR_LINE_MAX, `${line.length} characters`);
+  assert.equal(SIMILAR_SHOWN, 3);
+  assert.match(line, /^Other seats did this work over these objects: j000001 by a2 \(committed ok; same command\), j000002 by a2 \(committed ok; same command\), j000003 by a2 \(committed ok; same command\), and 3 more on the job_similar line for j000100 in store\/journal\.jsonl\. Read their outputs \(job:<id>\/<path>\)/);
+  // What happens now: this job runs, and a second run on purpose says so.
+  assert.match(line, /this job was not joined to theirs and runs \(job_status cancel=true stops it\); say independent: true when a second run is the point\.$/);
+  const overlap = String(similarView("j000100", [{ ...s("j000007", "same leading command", "overlap", "running", ""), lead: "L-4" }], false).similar);
+  assert.match(overlap, /j000007 by a2 \(running; same leading command, 1 object\(s\) in common; L-4\)/, "its lead is named");
+  assert.match(String(similarView("j000100", many.slice(0, 1), true).similar), /^Recorded as an independent reproduction of j000001 by a2/);
+  // A seat's name that is long or holds line breaks does not make the line longer or break it.
+  const named = String(similarView("j000100", many.map((x) => ({ ...x, name: `a name\nwith a break ${"x".repeat(500)}` })), false).similar);
+  assert.doesNotMatch(named, /\n/);
+  assert.ok(named.length <= SIMILAR_LINE_MAX);
   assert.deepEqual(similarView("j000100", [], false), {}, "nothing similar, nothing said");
   const index = new Map([["c".repeat(64), { job: "j000001", file: "a.txt" }]]);
   const files = [
@@ -110,7 +123,10 @@ test("similar jobs are ranked and bounded without loss: the closest first, the r
   const long = Array.from({ length: SAME_AS_SHOWN + 2 }, (_, i) => ({ path: `f${i}`, sha256: "c".repeat(64), bytes: 1, job: "j000001", file: "a.txt" }));
   const sv = sameAsView("j000002", long);
   assert.equal((sv.same_as as unknown[]).length, SAME_AS_SHOWN);
-  assert.equal(sv.same_as_more, "2 more, every one on the job_same_as line for j000002 in store/journal.jsonl");
+  assert.equal(sv.same_as_more, "2 more, every one in store/jobs/j000002/same_as.jsonl, the side file the job_same_as line for j000002 in store/journal.jsonl names with its sha256 (a journal from before the side file has every one on that line)");
+  // With the line's own count, bytes and side file: the count is the line's, not the length of what the record holds.
+  assert.equal(sameAsView("j000002", long.slice(0, SAME_AS_SHOWN), { files: 5000, bytes: 65000, list: "store/jobs/j000002/same_as.jsonl" }).same_as_more, `${5000 - SAME_AS_SHOWN} more (65000 bytes in all 5000), every one in store/jobs/j000002/same_as.jsonl`);
+  assert.equal(sameAsView("j000002", long.slice(0, 3), { files: 3, bytes: 30 }).same_as_more, undefined, "a short list is all on the line, and nothing more is said");
 });
 
 test("at acceptance, another seat's job over the same objects with the same command word is named with its lead, state and outputs; nothing is merged", async () => {
@@ -158,8 +174,9 @@ test("tools match by name, with the same arguments ranked first; independent: tr
   const line = journal(S).find((l) => l.type === "job_similar" && l.job === c.job.id)!;
   assert.equal(line.independent, true, "the reproduction is said on the journal");
   assert.equal((journal(S).find((l) => l.type === "job_accepted" && l.job === c.job.id)!.spec as { independent?: boolean }).independent, true);
-  assert.match(String(similarView(c.job.id, c.similar!, true).similar_note), /independent reproduction/);
-  const d = ok(await svc.submit("a4", { kind: "tool", tool: "writer", args: { output: "{OUT}/w.txt", text: "one" }, inputs: ["input:notes.txt"] }));
+  assert.match(String(similarView(c.job.id, c.similar!, true).similar), /independent reproduction/);
+  // Other arguments: the identical call would be answered with the job under way (tests/job-stages.test.ts), and say nothing of the others.
+  const d = ok(await svc.submit("a4", { kind: "tool", tool: "writer", args: { output: "{OUT}/w.txt", text: "three" }, inputs: ["input:notes.txt"] }));
   assert.equal(d.similar?.find((x) => x.job === c.job.id)?.independent, true, "a reproduction is named as one to the next seat");
   assert.equal((await jobView(S, c.job)).independent, true);
   // Only a command or a tool is a reproduction: an import says nothing of it.

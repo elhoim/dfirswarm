@@ -41,7 +41,7 @@ import * as PM from "./premises.ts";
 import * as PR from "./preparation.ts";
 import { importHitExamined, importHitsFor, importHitWords, unexaminedHits, type ImportSweepRecord, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 import type { AbandonGate, DoneRefused, DoneResult, SwarmContext } from "./protocol-core.ts";
-import { ABANDON_PREFIX, ALL_DEAD_REL, LEDGER_ENTRIES, REGISTER_LOCK, SHARED_WORK_DIRS, STOPPED_REL, SYSTEM_AGENT, abandonVotePath, agentDeadPath, agentDonePath, claimKey, createSentinel, harnessStop, listPostFiles, listThreadNames, readBudget, readPost, readTeam, releaseAllOwned, sentinelPath, sha256Hex, swarmDoneExists, withNamedLock, withTableLock, yamlOneLine } from "./protocol-core.ts";
+import { ABANDON_PREFIX, ALL_DEAD_REL, LEDGER_ENTRIES, REGISTER_LOCK, SHARED_WORK_DIRS, STOPPED_REL, SYSTEM_AGENT, abandonVotePath, agentDeadPath, agentDonePath, claimKey, createSentinel, harnessStop, listPostFiles, listThreadNames, readBudget, readPost, readTeam, releaseAllOwned, sentinelPath, sha256Hex, swarmDoneExists, withBudgetLock, withNamedLock, yamlOneLine } from "./protocol-core.ts";
 
 export async function markDone(
   ctx: SwarmContext,
@@ -250,11 +250,13 @@ export function normalizeProviderError(reason: string): string {
  * the seat itself, or the hub (a lead reclaimed from a stale holder), says
  * otherwise.
  */
-export function providerErrorPost(agentId: string, model: string, reason: string): string {
+export function providerErrorPost(agentId: string, model: string, reason: string, harness?: string): string {
+  // A refusal of the request's shape (too many images) is not the provider's weather: it comes again on every turn until the request changes,
+  // so "only this turn failed" would be false; the harness says what it changed instead.
   return (
     `PROVIDER ERROR: ${agentId}'s turn on ${model} ended with: ${reason}. ` +
-    `Nothing this agent or a peer does will change that: it is the provider answering, not the harness. ` +
-    `Only this turn failed. ${agentId}'s work, its leads and its claims stand as its own until ${agentId} or the hub says otherwise; ` +
+    (harness ? `${harness} ` : `Nothing this agent or a peer does will change that: it is the provider answering, not the harness. Only this turn failed. `) +
+    `${agentId}'s work, its leads and its claims stand as its own until ${agentId} or the hub says otherwise; ` +
     `do not take them over on the strength of this post. If ${agentId} stays silent, its leads show as stale in \`leads\` and can be reclaimed from there.`
   );
 }
@@ -528,7 +530,7 @@ export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOut
 export async function markStopped(sandboxRoot: string, by: string, why: string): Promise<{ written: boolean }> {
   // Under the lock an extension takes, so the two are ordered: one that
   // came first is in the caps the stop leaves, one that comes after is refused.
-  return withTableLock(sandboxRoot, async () => {
+  return withBudgetLock(sandboxRoot, async () => {
     if (await swarmDoneExists(sandboxRoot)) return { written: false };
     const file = join(sandboxRoot, STOPPED_REL);
     if (await lstat(file).then(() => true).catch(() => false)) return { written: false };

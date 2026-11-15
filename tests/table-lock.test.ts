@@ -373,3 +373,138 @@ test("a heartbeat tick that was in flight when the lock was taken over leaves on
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("calls of one process take the lock in the order they asked and do not time out behind each other", async () => {
+  // In a VM run the hub is the only writer. With the lock polled on disk, a call lost the poll to its own process's
+  // other calls for ten seconds and failed (216 such failures in one run). The wait for another process's lock is
+  // shortened here to less than one holder's time: no call of this process may fail on it.
+  const { root } = await sandbox();
+  const saved = { ...tableLockTiming };
+  try {
+    tableLockTiming.waitMs = 150;
+    const order: number[] = [];
+    const calls = Array.from({ length: 12 }, (_, i) =>
+      withTableLock(root, async () => {
+        order.push(i);
+        await sleep(60);
+        return i;
+      }),
+    );
+    assert.deepEqual(await Promise.all(calls), Array.from({ length: 12 }, (_, i) => i));
+    assert.deepEqual(order, Array.from({ length: 12 }, (_, i) => i), "in the order they asked");
+    // A call that throws passes the lock on.
+    await assert.rejects(withTableLock(root, async () => { throw new Error("boom"); }), /boom/);
+    assert.equal(await withTableLock(root, async () => "after"), "after");
+    // A call that gives up its place in the line does not stop the line.
+    tableLockTiming.queueMs = 80;
+    const slow = withTableLock(root, async () => { await sleep(300); return "slow"; });
+    const quitter = withTableLock(root, async () => "never");
+    const patient = (async () => { tableLockTiming.queueMs = 5000; return withTableLock(root, async () => "patient"); })();
+    await assert.rejects(quitter, /Timed out waiting for locks\/\.table\.lock \(1 call\(s\) of this process were ahead/);
+    assert.equal(await slow, "slow");
+    assert.equal(await patient, "patient");
+  } finally {
+    Object.assign(tableLockTiming, saved);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("each register has its own line: with a record held five seconds, a fold of usage and a post each finish in 100 ms, and 1,000 calls at once see no timeout", async () => {
+  // Plan 2, A10. The ledger, the budget and the board shared one lock: a record that took seconds held every post and
+  // every fold of usage behind it (P-10: 216 "Timed out waiting for locks/.table.lock" in one run). Each now has its own.
+  const P = await import("../extensions/protocol.ts");
+  const { F, ok, rec, run } = await import("./negative-bar-fixture.ts");
+  const { S, a0, a1 } = await run();
+  const slice = (n: number) => ({ spent_usd: n / 1000, tokens: n, calls: n, input: n, output: 0, cache_read: 0, cache_write: 0 }) as import("../extensions/protocol.ts").SessionUsageSlice;
+  const finding = (i: number) => ({ kind: "finding", ...F, value: `the export's row ${i} is a header`, source: "the disk", evidence: `row ${i}`, refs: ["job:j000001/hits.txt"] });
+  // Warm: the first call of each kind loads what it imports.
+  await P.applySessionUsage(S, "a1", slice(1));
+  await P.postMessage(a1, { tag: "result", body: "warm" });
+  ok(await rec(a0, finding(0)));
+  let entered!: () => void;
+  const inside = new Promise<void>((r) => (entered = r));
+  let slow = true;
+  P.lockTestHooks.held = async (name) => {
+    if (name === P.LEDGER_LOCK && slow) {
+      slow = false;
+      entered();
+      await sleep(5000);
+    }
+  };
+  try {
+    const t0 = performance.now();
+    const record = rec(a0, finding(1));
+    await inside;
+    const timed = async <T>(p: () => Promise<T>): Promise<number> => {
+      const at = performance.now();
+      await p();
+      return performance.now() - at;
+    };
+    const [usage, post] = await Promise.all([timed(() => P.applySessionUsage(S, "a1", slice(2))), timed(() => P.postMessage(a1, { tag: "result", body: "while the ledger is held" }))]);
+    assert.ok(usage < 100, `a fold of usage took ${usage.toFixed(1)} ms while a record held the ledger's lock`);
+    assert.ok(post < 100, `a post took ${post.toFixed(1)} ms while a record held the ledger's lock`);
+    ok(await record);
+    assert.ok(performance.now() - t0 >= 5000, "the record did hold its lock for five seconds");
+    process.stdout.write(`# with a record held 5 s: a fold of usage ${usage.toFixed(1)} ms, a post ${post.toFixed(1)} ms\n`);
+  } finally {
+    delete P.lockTestHooks.held;
+  }
+  // A thousand calls at once, of three registers, each on the run's own timings: none times out.
+  const t1 = performance.now();
+  const whole = P.appendOnlyReadStats.whole;
+  const calls: Array<Promise<unknown>> = [];
+  for (let i = 0; i < 1000; i++) {
+    if (i % 20 === 0) calls.push(rec(a0, finding(100 + i)).then(ok));
+    else if (i % 2) calls.push(P.applySessionUsage(S, i % 4 === 1 ? "a1" : "a2", slice(10 + i)));
+    else calls.push(P.postMessage(a1, { tag: "result", body: `post ${i}` }));
+  }
+  const settled = await Promise.allSettled(calls);
+  const failed = settled.filter((s): s is PromiseRejectedResult => s.status === "rejected");
+  assert.deepEqual(failed.map((f) => String(f.reason?.message ?? f.reason)).slice(0, 3), [], `${failed.length} of 1,000 calls failed`);
+  const posts = (await readdir(join(S, "threads", "main"))).filter((n) => /^\d{6}-a1\.md$/.test(n));
+  assert.equal(posts.length, 2 + 450, "every post has its own id");
+  assert.equal((await P.readLedger(S)).length, 2 + 50, "every record is in the ledger");
+  assert.equal(P.appendOnlyReadStats.whole - whole, 0, "and none read the ledger whole: each read what was appended since");
+  const budget = await P.readBudget(S);
+  assert.equal(budget.agents.a2!.calls, 1009, "the last fold of each seat is the budget's");
+  process.stdout.write(`# 1,000 calls (450 posts, 500 folds of usage, 50 records) in ${(performance.now() - t1).toFixed(0)} ms, none timed out\n`);
+});
+
+test("an append-only register is read from disk past what this process holds: an append is read alone, a rewrite whole", async () => {
+  const P = await import("../extensions/protocol.ts");
+  const { root } = await sandbox();
+  try {
+    const file = join(root, "entries.jsonl");
+    const lines = Array.from({ length: 2000 }, (_, i) => `${JSON.stringify({ seq: i + 1, value: `entry ${i} ${"x".repeat(200)}` })}\n`);
+    await writeFile(file, lines.join(""));
+    const s0 = { ...P.appendOnlyReadStats };
+    assert.equal(await P.readAppendOnlyText(file), lines.join(""));
+    assert.equal(P.appendOnlyReadStats.whole - s0.whole, 1);
+    assert.equal(await P.readAppendOnlyText(file), lines.join(""), "again, nothing read");
+    assert.equal(P.appendOnlyReadStats.unchanged - s0.unchanged, 1);
+    // An append, and a line still being written: read alone; the torn line is given as it stands and read again next time.
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(file, `{"seq":2001,"value":"çağrı"}\n{"seq":2002,"val`);
+    assert.equal(await P.readAppendOnlyText(file), `${lines.join("")}{"seq":2001,"value":"çağrı"}\n{"seq":2002,"val`);
+    await appendFile(file, `ue":"done"}\n`);
+    const all = `${lines.join("")}{"seq":2001,"value":"çağrı"}\n{"seq":2002,"value":"done"}\n`;
+    assert.equal(await P.readAppendOnlyText(file), all);
+    assert.equal(P.appendOnlyReadStats.whole - s0.whole, 1, "the appends were read alone");
+    assert.equal(P.appendOnlyReadStats.appended - s0.appended, 2);
+    // Many readers at once read it once between them, and each sees all of it.
+    const many = await Promise.all(Array.from({ length: 20 }, () => P.readAppendOnlyText(file)));
+    assert.ok(many.every((t) => t === all));
+    // Rewritten under the process: shorter, or longer with another end, or another file at the name. Each is read whole.
+    await writeFile(file, lines.slice(0, 10).join(""));
+    assert.equal(await P.readAppendOnlyText(file), lines.slice(0, 10).join(""));
+    await writeFile(file, lines.slice(0, 9).join("") + lines[1999] + lines[0]);
+    assert.equal(await P.readAppendOnlyText(file), lines.slice(0, 9).join("") + lines[1999] + lines[0]);
+    await rm(file);
+    assert.equal(await P.readAppendOnlyText(file), "", "a file that is not there reads as nothing");
+    await writeFile(file, "a\n");
+    assert.equal(await P.readAppendOnlyText(file), "a\n");
+    assert.ok(P.appendOnlyHeldSize().files >= 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

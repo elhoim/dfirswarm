@@ -757,16 +757,21 @@ leave()
         const env = { PATH: `${bin}:${process.env.PATH ?? ""}`, LEAVE_PIDS: pids, LEAVE_VARIANT: "flood" };
         const out = JSON.parse((await exec(join(WIN, "lnk_jumplist", "run.py"), [], cwd, env, JSON.stringify({ path: "work/report.lnk" }), host)).stdout) as Answer;
         assert.equal(out.status, "partial", `${host}: ${out.status_basis}`);
-        assert.match(out.status_basis, /1 lnkinfo call\(s\) were cut at 1048576 bytes because a process that held lnkinfo's pipe after it ended went on writing/);
+        // the flooder starts before lnkinfo has ended: the block's running output cap ends lnkinfo there with it (OUTPUT_CUT), or, where lnkinfo ended first, the cut at
+        // POST_EXIT_BYTES ends the flooder (PIPE_CUT). Either way lnkinfo's output is not compared and the answer is partial.
+        const running = /printed past the shared block's output cap/.test(out.status_basis);
+        if (running) assert.match(out.status_basis, /1 call\(s\) of lnkinfo or JLECmd printed past the shared block's output cap and were ended there \(the program printed more than \d+ bytes/);
+        else assert.match(out.status_basis, /1 lnkinfo call\(s\) were cut at 1048576 bytes because a process that held lnkinfo's pipe after it ended went on writing/);
         assert.match(out.status_basis, /the rows are lnk_parse's own reading/);
         assert.equal(out.lnkinfo.checked, 0, "what a flooder mixed into lnkinfo's output was not compared");
         assert.equal(out.lnkinfo.not_run, 1);
         const row = out.rows.find((r: Answer) => r.row === "link");
         assert.equal(row.integrity.lnkinfo.ran, false);
-        assert.match(row.integrity.lnkinfo.why, /lnkinfo's pipe was cut at 1048576 bytes/);
+        assert.match(row.integrity.lnkinfo.why, running ? /lnkinfo printed past its cap and was ended/ : /lnkinfo's pipe was cut at 1048576 bytes/);
         assert.equal(row.integrity.status, "ok", "lnk_parse's own reading of the link stands");
-        if (host === "linux") assert.ok(out.program_group.left_behind >= 1);
-        else assert.equal(out.program_group.left_behind, 0, "nothing was found: the cut alone makes it partial");
+        if (host === "linux" && !running) assert.ok(out.program_group.left_behind >= 1);
+        // (where nothing adopts it, the processes the tool saw below lnkinfo may still hold the flooder: then it is ended and counted, and nothing it counted is left)
+        else if (out.program_group.left_behind > 0) assert.deepEqual(await allGone(pids), [], "a flooder that was counted is gone");
       } finally {
         await reap(pids);
       }
@@ -791,13 +796,14 @@ print("lnkinfo 20240101")
 
 for (const host of ["linux", "darwin", "refused"] as const) {
   test(`vss_materialise: vshadowinfo's pipe cut at the byte cap (${host}) is partial and says so; the copies are intact`, { skip: !LINUX, timeout: 120000 }, async () => {
-    const { answer, run } = await vssRun("vshadowinfo", "flood", host);
+    const { answer, run, pids } = await vssRun("vshadowinfo", "flood", host);
     assert.ok(run.ms < 30_000, `answered in ${run.ms} ms`);
     assert.equal(answer.status, "partial", `${host}: ${answer.status_basis}`);
     assert.match(answer.status_basis, /call\(s\) of vshadowinfo or fusermount were cut at 1048576 bytes because a process that held the program's pipe after it ended went on writing/);
     assert.equal(answer.copies, 2);
     if (host === "linux") assert.ok(answer.program_group.left_behind >= 1);
-    else assert.equal(answer.program_group.left_behind, 0, "nothing was found: the cut alone makes it partial");
+    // (where nothing adopts it, the processes the tool saw below vshadowinfo may still hold the flooder: then it is ended and counted, and nothing it counted is left)
+    else if (answer.program_group.left_behind > 0) assert.deepEqual(await allGone(pids), [], "a flooder that was counted is gone");
   });
 }
 

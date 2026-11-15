@@ -3,6 +3,7 @@ id: verify/time-layers
 title: Four timestamp layers in a delivery
 when: File times matter, or many files share one date.
 needs: []
+card: Four clocks: source, content, archive member and delivered times. collection_index gives the delivered UTC mtime; collection_timestamps {"root": "<collection dir>", "archive": "<zip or tar>"} gives member times (a zip's has no zone without local_zone). mtime_distribution_anomaly and apparent_flattening are leads: a reset copy and a real burst look alike. Does not show: that a time is original.
 tools: [collection_index, collection_timestamps]
 requires_host: []
 mentions: [KAPE]

@@ -3,6 +3,7 @@ id: artifacts/reconstruction
 title: From a signature hit to a record you can cite
 when: A carved hit must be readied for a parser, or its integrity judged.
 needs: []
+card: carve_handoff {"path": "<image>", "kind": "<kind as mem_carve names it>", "signature_offset": <offset>} readies one hit and calls no parser. Unequal hive sequence numbers mean the hive changed while copied, a misplaced bin is fragmentation, "not checkable" is not intact. Slices need {"write_values": true} in a secret_output job. Does not show: that a hit or slice is a whole, validated record.
 tools: [mem_carve, carve_handoff]
 mentions: [regkv, evtx_carve, mam_scan, prefetch_mam]
 requires_host: []

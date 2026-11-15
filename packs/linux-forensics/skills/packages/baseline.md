@@ -3,6 +3,7 @@ id: packages/baseline
 title: Package comparison coverage and independent baseline
 when: Stating what a package check covered and obtaining a baseline the machine did not write.
 needs: []
+card: package_verify {"root": "<extracted root>"} compares with the acquired database only: a file and its recorded hash can have changed together, and unowned files and Debian packages with no md5sums were never compared. Without an independent baseline (the exact package, offline, scripts not run), report only differences from the acquired database and say so. Does not show: a clean machine.
 tools: [package_verify]
 requires_host: []
 ---

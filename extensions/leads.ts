@@ -40,6 +40,7 @@ import { dirname, join, resolve } from "node:path";
 import * as NB from "./negative-bar.ts";
 import * as O from "./offers.ts";
 import * as PR from "./preparation.ts";
+import { modelClass } from "./model-class.ts";
 import * as P from "./protocol.ts";
 import * as SW from "./store-sweep.ts";
 
@@ -91,6 +92,31 @@ export const LEAD_REF_MAX = 2000;
 export const LEAD_NOTE_MAX = 4000;
 export const LEAD_MAX_NEEDS = 20;
 export const LEAD_MAX_ANSWERS = 8;
+/** The most questions a lead opened by a seat of the weak model class may name, unless the run sets its own. */
+export const LEAD_WEAK_MAX_ANSWERS = 3;
+/** A model's class from its name (provider/model, any routing prefix); the one definition is in model-class.ts. */
+export { modelClass };
+/** A seat's model class, from team.json; null for the operator, the harness, or a seat whose model is not recorded. */
+export async function seatModelClass(sandboxRoot: string, agent: string): Promise<"weak" | "strong" | null> {
+  if (!agent || agent === P.SYSTEM_AGENT || agent === "operator") return null;
+  const team = await P.readTeam(sandboxRoot).catch(() => null);
+  return modelClass(team?.agents.find((a) => a.id === agent)?.model);
+}
+/** Whether any seat of the team is of the weak model class. */
+export async function teamHasWeakSeat(sandboxRoot: string): Promise<boolean> {
+  const team = await P.readTeam(sandboxRoot).catch(() => null);
+  return Boolean(team?.agents.some((a) => modelClass(a.model) === "weak"));
+}
+/**
+ * The most questions one lead may name: SWARM_LEAD_MAX_QUESTIONS when the
+ * run sets it (1 to 8; swarm.sh --lead-max-questions), for every seat; else
+ * LEAD_WEAK_MAX_ANSWERS for a seat of the weak model class, and 8 for the rest.
+ */
+export function leadMaxAnswers(env: NodeJS.ProcessEnv = process.env, cls: "weak" | "strong" | null = null): number {
+  const n = Number(env.SWARM_LEAD_MAX_QUESTIONS);
+  if (env.SWARM_LEAD_MAX_QUESTIONS !== undefined && Number.isInteger(n) && n >= 1 && n <= LEAD_MAX_ANSWERS) return n;
+  return cls === "weak" ? LEAD_WEAK_MAX_ANSWERS : LEAD_MAX_ANSWERS;
+}
 export const LEAD_MAX_OPENS = 10;
 /** Whole seconds from the environment, in milliseconds, or the default when unset or not a number. */
 function envMs(name: string, dfltSec: number): number {
@@ -284,7 +310,7 @@ export type Lead = {
   closed: { disposition: LeadDisposition; ref: string; by: string; at: string; why?: string; seq?: number } | null;
   reopened: Array<{ at: string; by: string; why: string; cause: string; import?: string }>;
   /** The newest stale mark on the current holder, until the holder acts on the lead or loses it. */
-  stale: { at: string; holder: string; generation: number; idle_seconds: number; last_activity: string | null } | null;
+  stale: { at: string; holder: string; generation: number; idle_seconds: number; last_activity: string | null; by?: string; cause?: string } | null;
   jobs: string[];
   notes: Array<{ at: string; by: string; text: string; allow_host?: string }>;
   /** How many times it went back to open (released or reopened): one wake per open spell. */
@@ -515,7 +541,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "stale":
         if (!l) break;
-        l.stale = { at: e.at, holder: e.holder ?? "", generation: e.generation ?? l.generation, idle_seconds: e.idle_seconds ?? 0, last_activity: e.last_activity ?? null };
+        l.stale = { at: e.at, holder: e.holder ?? "", generation: e.generation ?? l.generation, idle_seconds: e.idle_seconds ?? 0, last_activity: e.last_activity ?? null, by: e.by, ...(e.cause ? { cause: e.cause } : {}) };
         l.last_seq = e.seq;
         break;
       case "job":
@@ -917,7 +943,8 @@ export function goalQuestionsIn(text: string, readBrief: (path: string) => strin
 
 // --- jobs ---------------------------------------------------------------------------------------
 
-export type JobFacts = { id: string; agent: string; kind: string; state: string; status?: string; command?: string; tool?: string; finished_at?: string };
+/** A job as the registers read it; `joined`, on a job still to finish, the seats that asked for the same call and were joined to it (job_deduplicated): each waits on it as on its own. */
+export type JobFacts = { id: string; agent: string; kind: string; state: string; status?: string; command?: string; tool?: string; finished_at?: string; joined?: string[] };
 
 const terminalJobs = new Map<string, JobFacts>();
 
@@ -926,6 +953,7 @@ export async function readJobs(sandboxRoot: string): Promise<JobFacts[]> {
   const dir = join(sandboxRoot, "store", "jobs");
   const names = await readdir(dir).catch(() => [] as string[]);
   const out: JobFacts[] = [];
+  let joiners: Map<string, Set<string>> | null = null;
   for (const id of names.sort()) {
     if (!/^j\d{6,}$/.test(id)) continue;
     const key = `${resolve(sandboxRoot)}\u0000${id}`;
@@ -949,6 +977,11 @@ export async function readJobs(sandboxRoot: string): Promise<JobFacts[]> {
         ...(j.finished_at ? { finished_at: j.finished_at } : {}),
       };
       if (facts.state === "committed" || facts.state === "failed" || facts.state === "cancelled") terminalJobs.set(key, facts);
+      else {
+        joiners ??= await jobJoiners(sandboxRoot).catch(() => new Map<string, Set<string>>());
+        const joined = joiners.get(id);
+        if (joined?.size) facts.joined = [...joined].filter((a) => a !== facts.agent).sort();
+      }
       out.push(facts);
     } catch {
       // Not a record: skipped.
@@ -967,20 +1000,39 @@ export function jobOpen(j: JobFacts): boolean {
   return ["accepted", "running", "finished", "fenced"].includes(j.state);
 }
 
-type Reads = { offset: number; returned: Map<string, Map<string, Array<[number, number]>>> };
+/**
+ * Whether a job still to finish is a seat's to wait on: one it asked for, or one it was joined to when it asked for
+ * the same call (job_deduplicated). A seat waiting on a job it joined had no job of its own, and could lose its leads
+ * after its silence while it waited.
+ */
+export function seatJobOpen(j: JobFacts, agent: string): boolean {
+  return jobOpen(j) && (j.agent === agent || (j.joined ?? []).includes(agent));
+}
+
+type Reads = { offset: number; returned: Map<string, Map<string, Array<[number, number]>>>; joined: Map<string, Set<string>> };
 const readsCache = new Map<string, Reads>();
+
+/** The seats joined to each job (the store journal's job_deduplicated lines), read incrementally with stdoutReads. */
+export async function jobJoiners(sandboxRoot: string): Promise<Map<string, Set<string>>> {
+  return (await journalReads(sandboxRoot)).joined;
+}
 
 /**
  * Which bytes of each job's stdout each agent was handed (the store journal's
  * job_returned lines), read incrementally.
  */
 export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<string, Array<[number, number]>>>> {
+  return (await journalReads(sandboxRoot)).returned;
+}
+
+/** The store journal's lines the registers read (job_returned, job_deduplicated), from where the last read ended. */
+async function journalReads(sandboxRoot: string): Promise<Reads> {
   const path = join(sandboxRoot, "store", "journal.jsonl");
   const key = resolve(sandboxRoot);
   let c = readsCache.get(key);
   const size = await stat(path).then((s) => s.size).catch(() => 0);
   if (!c || size < c.offset) {
-    c = { offset: 0, returned: new Map() };
+    c = { offset: 0, returned: new Map(), joined: new Map() };
     readsCache.set(key, c);
   }
   if (size > c.offset) {
@@ -993,6 +1045,16 @@ export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<
         const end = text.lastIndexOf("\n");
         if (end >= 0) {
           for (const line of text.slice(0, end).split("\n")) {
+            if (line.includes('"job_deduplicated"')) {
+              try {
+                const l = JSON.parse(line) as { type?: string; job?: string; by?: { agent?: string } | string };
+                const by = typeof l.by === "string" ? l.by : l.by?.agent;
+                if (l.type === "job_deduplicated" && l.job && by) c.joined.set(l.job, (c.joined.get(l.job) ?? new Set<string>()).add(by));
+              } catch {
+                // A torn line: the journal's own check names it.
+              }
+              continue;
+            }
             if (!line.includes('"job_returned"')) continue;
             try {
               const l = JSON.parse(line) as { type?: string; job?: string; to?: string; stdout_offset?: number; stdout_bytes?: number };
@@ -1013,7 +1075,7 @@ export async function stdoutReads(sandboxRoot: string): Promise<Map<string, Map<
       }
     }
   }
-  return c.returned;
+  return c;
 }
 
 /** How many bytes of a job's stdout an agent was not handed, of `total`. */
@@ -1174,7 +1236,7 @@ export async function holderLiveness(sandboxRoot: string, holder: string, jobs: 
   const last = Math.max(row?.last ?? 0, floor);
   const idle = last ? Math.round((now - last) / 1000) : Math.round(leadStaleMs() / 1000);
   const lastIso = last ? new Date(last).toISOString() : null;
-  if (jobs.some((j) => j.agent === holder && jobOpen(j))) return { stale: false, why: `${holder} has a job still running`, last_activity: lastIso, idle_seconds: idle };
+  if (jobs.some((j) => seatJobOpen(j, holder))) return { stale: false, why: `${holder} has a job still running`, last_activity: lastIso, idle_seconds: idle };
   if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) return { stale: false, why: `${holder} is compacting its context`, last_activity: lastIso, idle_seconds: idle };
   if (last && now - last < leadStaleMs()) return { stale: false, why: `${holder} worked ${idle} s ago`, last_activity: lastIso, idle_seconds: idle };
   return { stale: true, why: last ? `${holder} has done nothing for ${Math.round(idle / 60)} min, with no job running and no compaction under way` : `${holder} has done nothing in the last ${Math.round(leadStaleMs() / 60_000)} min`, last_activity: lastIso, idle_seconds: idle };
@@ -1216,7 +1278,7 @@ export async function idleSeats(sandboxRoot: string, s: LeadsState, v: LedgerVie
     // it keeps them, and takes other work meanwhile.
     const holds = [...s.leads.values()].some((l) => l.holder === agent && !l.closed && leadStatus(l, s, v) !== "blocked");
     if (holds) continue;
-    if (jobs.some((j) => j.agent === agent && jobOpen(j))) continue;
+    if (jobs.some((j) => seatJobOpen(j, agent))) continue;
     // One offer at a time, across both registers: a seat something is offered to now is not offered more.
     if (offered.has(agent)) continue;
     out.push({ agent, since });
@@ -1242,6 +1304,31 @@ export async function seatAvailable(sandboxRoot: string, agent: string, activity
   const row = act.get(agent);
   if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) return { available: false, why: `${agent} is compacting its context` };
   return { available: true, why: `${agent} can take it` };
+}
+
+/**
+ * "Seats working: n of N" for the header: a seat works when it wrote a
+ * working row within the stale limit or a job of its runs; the others are
+ * named with what they are (done, marked dead, compacting, silent). One
+ * line, the names cut past six.
+ */
+export async function seatsWorkingLine(sandboxRoot: string, snap: LeadsSnapshot, now = Date.now()): Promise<string | null> {
+  const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
+  if (ids.length < 2) return null;
+  const act = await recentActivity(sandboxRoot, Math.max(leadStaleMs(), LEAD_COMPACTION_BOUND_MS), now);
+  let working = 0;
+  const not: string[] = [];
+  for (const id of ids) {
+    const mark = (["done", "dead"] as const).find((m) => existsSync(join(sandboxRoot, "done", "agents", `${id}.${m}`)));
+    const row = act.get(id);
+    const job = snap.jobs.some((j) => seatJobOpen(j, id));
+    if (mark) not.push(`${id} ${mark === "done" ? "done" : "marked dead"}`);
+    else if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) not.push(`${id} compacting`);
+    else if ((row?.last && now - row.last < leadStaleMs()) || job) working += 1;
+    else not.push(`${id} silent ${row?.last ? `${Math.round((now - row.last) / 60_000)} min` : `${Math.round(leadStaleMs() / 60_000)}+ min`}`);
+  }
+  const rest = not.length > 6 ? `${not.slice(0, 6).join(", ")} and ${not.length - 6} more` : not.join(", ");
+  return `Seats working: ${working} of ${ids.length}${not.length ? ` (${rest})` : ""}.`;
 }
 
 /** How long a held lead may go with no job and no act on it while its holder works elsewhere before it shows as parked (SWARM_LEAD_PARK_SEC, 600). */
@@ -1310,6 +1397,89 @@ export async function parkedLeads(sandboxRoot: string, snap: LeadsSnapshot, now 
     out.push({ lead: l.id, holder: l.holder!, idle_ms: now - last, since: new Date(last).toISOString(), elsewhere });
   }
   return out;
+}
+
+/** How long a holder may sit in one call, or be silent, before its leads are offered or freed (SWARM_LEAD_SEAT_STALL_SEC, 900). */
+export function seatStallMs(): number {
+  return envMs("SWARM_LEAD_SEAT_STALL_SEC", 900);
+}
+
+export type SeatStallKind = "call" | "silent" | "dead";
+export type SeatStall = { held: number; offered: Array<{ lead: string; to: string }>; marked: string[]; released: string[]; waiting: string[]; why: string };
+
+/**
+ * A holder stuck in one call, or silent, keeps no question waiting past
+ * seatStallMs() (D5). The watchdog (idle-nudge.sh) says which from the
+ * seat's pane, and how long nothing reached its session or the trace:
+ *
+ * - "call": the pane says it works (a model call, or a tool that does not
+ *   end: a seat once sat 178 minutes in one shell call). Each lead it holds
+ *   is marked stale (cause stuck_call) and offered to the seat that has
+ *   waited longest, as a parked lead is: that seat's lead_claim takes it
+ *   over, unless the holder acts on it first. With no idle seat the mark
+ *   stands, and the next pass offers it.
+ * - "silent": not working (its turn ended, or its link is down). Every lead
+ *   it holds is released by the harness, open again for any seat: three
+ *   seats of one run were gone 74 to 178 minutes holding theirs.
+ *
+ * - "dead": the watchdog recorded it dead (its link stayed down through its
+ *   relaunches). Its leads are released at once, its jobs or not.
+ *
+ * Neither "call" nor "silent" while the holder has a job of its own still to
+ * finish: its waiting is what the job asked of it.
+ */
+export async function seatStallLeads(sandboxRoot: string, agent: string, kind: SeatStallKind, silentMs: number, now = Date.now()): Promise<LeadResult<SeatStall>> {
+  if (kind !== "call" && kind !== "silent" && kind !== "dead") return { ok: false, reason: "kind is call, silent or dead" };
+  if (kind !== "dead" && !(silentMs >= seatStallMs())) return { ok: false, reason: `${agent} has been silent ${Math.round(silentMs / 1000)} s, under the ${Math.round(seatStallMs() / 1000)} s that frees or offers a seat's leads` };
+  const minutes = Math.round(silentMs / 60_000);
+  try {
+    const r = await transact<{ ok: true } & SeatStall>(sandboxRoot, async (snap) => {
+      const held = [...snap.state.leads.values()].filter((l) => l.holder === agent && !l.closed);
+      const none = { ok: true as const, held: held.length, offered: [], marked: [], released: [], waiting: [] };
+      if (!held.length) return { append: [], result: { ...none, why: `${agent} holds no open lead` } };
+      if (kind !== "dead" && snap.jobs.some((j) => seatJobOpen(j, agent))) return { append: [], result: { ...none, why: `${agent} has a job of its own, or one it joined, still to finish` } };
+      const append: LeadDraft[] = [];
+      if (kind === "silent" || kind === "dead") {
+        const why = kind === "dead" ? `${agent} was recorded dead (its link to the hub stayed down through its relaunches): the harness freed its leads` : `${agent} was silent ${minutes} min (its turn ended or its link is down, no job of its own running): the harness freed its leads`;
+        for (const l of held) append.push({ by: P.SYSTEM_AGENT, ev: "release", lead: l.id, generation: l.generation, why, cause: "silent_seat" });
+        return { append, result: { ...none, released: held.map((l) => l.id), why } };
+      }
+      const why = `${agent} has been in one call for ${minutes} min with nothing on its session or the trace`;
+      const idle = (await idleSeats(sandboxRoot, snap.state, snap.ledger, snap.jobs, now, snap.questions)).map((x) => x.agent).filter((a) => a !== agent);
+      const taken = new Set<string>();
+      const out: SeatStall = { held: held.length, offered: [], marked: [], released: [], waiting: [], why };
+      for (const l of held) {
+        if (O.reservingOffer(l.offers, now, l.rev)) {
+          out.waiting.push(l.id);
+          continue;
+        }
+        if (!(l.stale && l.stale.holder === agent && l.stale.generation === l.generation && l.stale.cause === "stuck_call")) {
+          append.push({ by: P.SYSTEM_AGENT, ev: "stale", lead: l.id, holder: agent, generation: l.generation, idle_seconds: Math.round(silentMs / 1000), last_activity: new Date(now - silentMs).toISOString(), cause: "stuck_call", why });
+          out.marked.push(l.id);
+        }
+        const to = idle.find((a) => !taken.has(a) && !l.offers.some((o) => o.to === a && o.rev === l.rev));
+        if (!to) {
+          out.waiting.push(l.id);
+          continue;
+        }
+        taken.add(to);
+        append.push(offerDraft(l.id, to, "parked", l.rev, l.cycle, now, { from: agent, why }));
+        out.offered.push({ lead: l.id, to });
+      }
+      return { append, result: { ok: true as const, ...out } };
+    });
+    const { events: _events, ...rest } = r;
+    return rest;
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** A parked offer made because its holder sat in one call (seatStallLeads), in words; null for a lead parked while its holder worked elsewhere. */
+function stuckWords(l: Lead, o: O.Offer): string | null {
+  const st = l.stale;
+  if (!st || st.cause !== "stuck_call" || st.holder !== (o.from ?? l.holder) || st.generation !== l.generation) return null;
+  return `in one call for ${Math.round(st.idle_seconds / 60)}+ min with nothing on its session or the trace (a model call, or a tool that does not end)`;
 }
 
 /** The leads a seat holds, open, for its label. */
@@ -1492,6 +1662,73 @@ export type LeadsSnapshot = {
   /** The question register (extensions/questions.ts), read beside the leads; null when it could not be read. */
   questions: import("./questions.ts").QuestionsSnapshot | null;
 };
+
+/**
+ * One open, unheld lead for each question of the goal that no lead answers, opened by the harness (swarm.sh
+ * --seed-leads, at kickoff): every question has a lead from the first minute, and a seat takes one with lead_claim
+ * instead of opening a broad one. The open-weight teams opened 11 to 20 leads a run, several questions to a lead, and
+ * a question's only holder could hang for an hour with nobody else on it. Returns the leads opened.
+ */
+export async function seedQuestionLeads(sandboxRoot: string): Promise<{ opened: string[]; had: number }> {
+  const snap = await leadsSnapshot(sandboxRoot);
+  const covered = new Set<string>();
+  for (const l of snap.state.leads.values()) if (!l.closed) for (const a of l.answers) covered.add(P.sectionKey(String(a).replace(/^question:/, "")));
+  const opened: string[] = [];
+  for (const q of snap.goal.questions) {
+    const key = P.sectionKey(q);
+    if (covered.has(key) || snap.answered.has(key)) continue;
+    const text = String((snap.questions?.bySection.get(key) as { text?: string } | undefined)?.text ?? "").replace(/\s+/g, " ").trim();
+    const title = `Answer question ${key}${text ? `: ${text.length > 90 ? `${text.slice(0, 89)}\u2026` : text}` : ""}`;
+    const r = await openLead({ sandboxRoot, agentId: P.SYSTEM_AGENT }, { title, why: "The goal asks it. Seeded at kickoff so that the question has a lead from the first minute: claim it (lead_claim) to work on it, and close it with the answer.", answers: [key] });
+    if (r.ok) opened.push(r.lead.id);
+  }
+  return { opened, had: covered.size };
+}
+
+/** How long a standing finding that answers a question may stand with no answer entry before it is said, and before anyone may write it. */
+export const FOUND_NOT_ANSWERED_MS = 10 * 60_000;
+export const FOUND_ANYONE_ANSWERS_MS = 20 * 60_000;
+
+export type FoundNotAnswered = { question: string; finding: number; by: string; minutes: number; lead: string | null; holder: string | null; anyone: boolean };
+
+/**
+ * The questions a standing finding answers that have no answer entry yet, with the oldest such finding of each. A
+ * value known is not an answer: on the run s5d814f a finding for question 5 stood 58 minutes while two seats waited
+ * for the lead's holder to write the answer, and on s01a4f4 a value was found a minute before the stop and never
+ * recorded. After FOUND_NOT_ANSWERED_MS the holder is told; after FOUND_ANYONE_ANSWERS_MS whoever can cite the
+ * finding is told to write the answer.
+ */
+export function foundNotAnswered(snap: Pick<LeadsSnapshot, "ledger" | "answered" | "state">, now: number): FoundNotAnswered[] {
+  const oldest = new Map<string, P.LedgerEntry>();
+  for (const e of snap.ledger.entries) {
+    if (e.kind !== "finding" || snap.ledger.replaced.has(e.seq)) continue;
+    const raw = (e as { answers?: string[] | string }).answers;
+    for (const a of Array.isArray(raw) ? raw : raw ? [raw] : []) {
+      const q = P.sectionKey(String(a).replace(/^question:/, ""));
+      if (!q || snap.answered.has(q)) continue;
+      const had = oldest.get(q);
+      if (!had || Date.parse(e.at) < Date.parse(had.at)) oldest.set(q, e);
+    }
+  }
+  const out: FoundNotAnswered[] = [];
+  for (const [q, e] of oldest) {
+    const age = now - Date.parse(e.at);
+    if (!(age >= FOUND_NOT_ANSWERED_MS)) continue;
+    const lead = [...snap.state.leads.values()].find((l) => !l.closed && l.holder && l.answers.some((x) => P.sectionKey(String(x).replace(/^question:/, "")) === q)) ?? null;
+    out.push({ question: q, finding: e.seq, by: e.by, minutes: Math.round(age / 60_000), lead: lead?.id ?? null, holder: lead?.holder ?? null, anyone: age >= FOUND_ANYONE_ANSWERS_MS });
+  }
+  return out.sort((a, b) => b.minutes - a.minutes);
+}
+
+/** The digest's line for them, for one seat. */
+export function foundNotAnsweredLine(items: readonly FoundNotAnswered[], me: string): string | null {
+  if (!items.length) return null;
+  const each = items.slice(0, 6).map((x) => {
+    const who = x.holder === me ? "you hold its lead: record the answer now" : x.anyone ? `${x.holder ? `${x.holder} holds its lead and has not answered` : "nobody holds a lead for it"}: whoever can cite E-${x.finding} records the answer now, the holder included` : x.holder ? `${x.holder} holds its lead and is asked to record the answer` : "nobody holds a lead for it: record the answer, citing the finding";
+    return `question:${x.question} (finding E-${x.finding} by ${x.by}, ${x.minutes} min ago; ${who})`;
+  });
+  return `Found but not answered (a finding says it, no answer entry does; an answer is what is graded): ${each.join("; ")}${items.length > 6 ? `; and ${items.length - 6} more` : ""}.`;
+}
 
 export async function leadsSnapshot(sandboxRoot: string): Promise<LeadsSnapshot> {
   const { events, text } = await readLeadEvents(sandboxRoot);
@@ -1809,7 +2046,7 @@ function checkNeeds(raw: unknown, s: LeadsState, v: LedgerView, self?: string): 
   return { ok: true, needs };
 }
 
-function checkAnswers(raw: unknown): { ok: true; answers: string[]; registered: string[] } | { ok: false; reason: string } {
+function checkAnswers(raw: unknown, cls: "weak" | "strong" | null = null): { ok: true; answers: string[]; registered: string[] } | { ok: false; reason: string } {
   const answers: string[] = [];
   // A register id (Q-19) is resolved against the question register inside the
   // lock (resolveAnswers); the goal's own forms (3, Q3, question:3) are the
@@ -1825,7 +2062,9 @@ function checkAnswers(raw: unknown): { ok: true; answers: string[]; registered: 
     const key = P.sectionKey(a.replace(/^question:/i, ""));
     if (!answers.includes(key)) answers.push(key);
   }
-  if (answers.length + registered.length > LEAD_MAX_ANSWERS) return { ok: false, reason: `a lead names at most ${LEAD_MAX_ANSWERS} questions` };
+  const most = leadMaxAnswers(process.env, cls);
+  const byClass = process.env.SWARM_LEAD_MAX_QUESTIONS === undefined && cls === "weak" ? " for a seat of your model's class" : "";
+  if (answers.length + registered.length > most) return { ok: false, reason: `a lead names at most ${most} questions${byClass}${most < LEAD_MAX_ANSWERS ? ": open one lead for each part of the work, so that each question has a holder who can close it (a lead that named three to five questions lived 50 to 96 minutes in four runs and left its questions without a second hand)" : ""}` };
   const bad = answers.find((a) => !P.LEDGER_ANSWER_ID.test(a));
   if (bad) return { ok: false, reason: `answers takes question ids: Q-19 from the question register, or the goal's own ("3", "Q3", "question:3"; got ${JSON.stringify(bad)})` };
   return { ok: true, answers, registered };
@@ -1897,7 +2136,7 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
   if (!origin.ok) return origin;
   if (input.material !== undefined && typeof input.material !== "boolean") return { ok: false, reason: "material is true or false" };
   if (input.take !== undefined && typeof input.take !== "boolean") return { ok: false, reason: "take is true or false" };
-  const checked = checkAnswers(input.answers);
+  const checked = checkAnswers(input.answers, await seatModelClass(ctx.sandboxRoot, ctx.agentId));
   if (!checked.ok) return checked;
   const proposition = bounded("proposition", input.proposition, LEAD_WHY_MAX, false);
   if (!proposition.ok) return proposition;
@@ -2194,7 +2433,7 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: Lead
       }
       // An offer holds it for its seat (A3): nobody else claims it meanwhile.
       if (offer && offer.to !== ctx.agentId) {
-        return { append: [], result: { ok: false as const, reason: `${l.id} is offered to ${offer.to} (${offer.reason === "parked" ? `parked in ${offer.from ?? l.holder}'s hands` : offer.reason === "handoff" ? `handed over by ${offer.from ?? "its holder"}` : offer.reason === "reopen" ? "reopened after the operator's note, to its previous holder first" : offer.reason === "confirm" ? "its closure to confirm" : "woken for it"}), who has first claim ${O.untilWords(offer, now, l.rev)}: claim it after that, or post to ${offer.to}` } };
+        return { append: [], result: { ok: false as const, reason: `${l.id} is offered to ${offer.to} (${offer.reason === "parked" ? (stuckWords(l, offer) ? `its holder ${offer.from ?? l.holder} has been ${stuckWords(l, offer)}` : `parked in ${offer.from ?? l.holder}'s hands`) : offer.reason === "handoff" ? `handed over by ${offer.from ?? "its holder"}` : offer.reason === "reopen" ? "reopened after the operator's note, to its previous holder first" : offer.reason === "confirm" ? "its closure to confirm" : "woken for it"}), who has first claim ${O.untilWords(offer, now, l.rev)}: claim it after that, or post to ${offer.to}` } };
       }
       const byOffer = offer && offer.to === ctx.agentId ? { offer: offer.seq } : {};
       // A person's question this lead serves, offered to another seat: its first claim holds here too (A3).
@@ -2228,7 +2467,7 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: Lead
       if (!l.holder) return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, ...frame, ...byOffer, ...overlapFields }], result: { ok: true as const, ...(coverage ? { coverage } : {}) } };
       // A parked lead offered to this seat: taken over without the stale grace, the holder having had its chance to act.
       if (offer && offer.to === ctx.agentId && offer.reason === "parked") {
-        return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, from: l.holder, cause: "parked", ...frame, ...byOffer }], result: { ok: true as const, from: l.holder } };
+        return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, from: l.holder, cause: stuckWords(l, offer) ? "stuck_call" : "parked", ...frame, ...byOffer }], result: { ok: true as const, from: l.holder } };
       }
       // Held by a peer: only a stale holder gives it up, and only after being marked.
       const lastAct = Math.max(0, ...snap.state.events.filter((e) => e.by === l.holder && e.ev !== "stale").map((e) => Date.parse(e.at)).filter(Number.isFinite));
@@ -3667,10 +3906,13 @@ export function offersFor(agent: string, snap: LeadsSnapshot): Array<{ lead: Lea
 /** What an offer says to the seat it concerns. */
 export function offerText(l: Lead, o: O.Offer, agent: string, snap: LeadsSnapshot): string {
   const until = O.untilWords(o, snap.at, l.rev);
+  const stuck = o.reason === "parked" ? stuckWords(l, o) : null;
+  if (stuck && o.from === agent && o.to !== agent) return `${l.id} ("${l.title}") was offered to ${o.to}, who has first claim ${until}, while you sat ${stuck.replace("its session", "your session")}: if you are still on it, act on it (lead_claim ${l.id} keeps it); otherwise lead_handoff it, or let it go`;
   if (o.reason === "parked" && o.from === agent && o.to !== agent) return `${l.id} ("${l.title}") is parked in your hands (no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while you work elsewhere) and is offered to ${o.to}, who has first claim ${until}: act on it (lead_claim ${l.id} keeps it, or run its job), lead_handoff it, or let it go`;
   const decline = `offer decline ${l.id} with why if you cannot take it`;
   switch (o.reason) {
     case "parked":
+      if (stuck) return `${l.id} ("${l.title}") is held by ${o.from ?? l.holder}, who has been ${stuck}, and it is offered to you, first claim ${until}: lead_claim ${l.id} takes it over unless ${o.from ?? l.holder} acts on it first; ${decline}`;
       return `${l.id} ("${l.title}") is parked in ${o.from ?? l.holder}'s hands (no job and no act on it while they work elsewhere) and is offered to you, first claim ${until}: lead_claim ${l.id} takes it over unless ${o.from ?? l.holder} acts on it first; ${decline}`;
     case "handoff":
       return `${o.from ?? "its holder"} hands ${l.id} ("${l.title}") to you, first claim ${until}: ${l.why}${l.next_action ? ` Next action: ${l.next_action}.` : ""} lead_claim ${l.id} (or offer accept ${l.id}) to take it; ${decline}`;
@@ -3684,7 +3926,7 @@ export function offerText(l: Lead, o: O.Offer, agent: string, snap: LeadsSnapsho
 }
 
 export type LeadNotice = {
-  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | "offer" | "confirm" | "parked" | "review_offer" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
+  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "freed" | "reopened" | "operator_note" | "wake" | "offer" | "confirm" | "parked" | "review_offer" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
   /** The lead the notice is about, or the question (Q-<n>) for the register's. */
   lead: string;
   /** An offer notice: the offer it delivers (its first claim counts from this delivery). */
@@ -3709,6 +3951,14 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, rev
     const l = s.leads.get(id);
     if (!l) continue;
     const cur = now.held[id];
+    if (!l.holder && !l.closed) {
+      // Freed by the harness while this seat was silent (seatStallLeads): said once, when it is back.
+      const freed = [...s.events].reverse().find((e) => e.ev === "release" && e.lead === id && e.seq > before.seq && e.by === P.SYSTEM_AGENT && e.cause === "silent_seat");
+      if (freed) {
+        out.push({ kind: "freed", lead: id, text: `${id} ("${l.title}") was freed while you were away: ${freed.why ?? "you were silent"}. It is open again for any seat; if you are still on it and nobody holds it, lead_claim ${id} takes it back; otherwise post what you have to whoever takes it`, wakes: true });
+        continue;
+      }
+    }
     if (l.holder && l.holder !== agent && !l.closed) {
       const took = [...s.events].reverse().find((e) => e.ev === "claim" && e.lead === id && e.seq > before.seq);
       if (took) out.push({ kind: "reclaimed", lead: id, text: `${id} was taken over by ${l.holder} (generation ${l.generation}) after it showed as stale in your hands: post to ${l.holder} with what you have`, wakes: true });
@@ -3721,7 +3971,7 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, rev
       if ((was.dead ?? []).includes(n)) continue;
       out.push({ kind: "need_dead", lead: id, text: `${id}'s need ${n} will not be met as it stands: ${needState(n, s, v).why}. Revise it with lead_link, or find another route`, wakes: true });
     }
-    if (cur.stale && !was.stale) out.push({ kind: "stale_marked", lead: id, text: `${id} is marked stale in your hands: a peer found you silent with no job running. Act on it (a post, a job, lead_release) or it will be taken over`, wakes: true });
+    if (cur.stale && !was.stale) out.push({ kind: "stale_marked", lead: id, text: l.stale?.cause === "stuck_call" ? `${id} is marked stale in your hands: the harness found you in one call for ${Math.round((l.stale.idle_seconds ?? 0) / 60)}+ min with nothing on your session or the trace, and offers it to an idle seat. Act on it (lead_claim ${id} keeps it, a post, a job) or it will be taken over` : `${id} is marked stale in your hands: a peer found you silent with no job running. Act on it (a post, a job, lead_release) or it will be taken over`, wakes: true });
     if (was.closed && !cur.closed) {
       const r = l.reopened.at(-1);
       // Offered to it first, the offer says so (below).
@@ -3987,6 +4237,9 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   lines.push(`Blocked on you: ${blockedOnMe.length ? blockedOnMe.map((x) => `${x.id} (${x.holder ?? "unheld"}) needs ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}`).join("; ") : "none"}.`);
   lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.reinterpret ? `: its interpretation no longer stands, interpret it again (${a.why})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
   lines.push(`Questions nobody holds a lead for, with no answer yet: ${cov.uncovered.length ? cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ") : "none"}.`);
+  // A value known is not an answer: findings that answer a question no answer entry answers yet.
+  const unanswered = foundNotAnsweredLine(foundNotAnswered(snap, Date.now()), me);
+  if (unanswered) lines.push(unanswered);
   // This seat's running jobs that look stuck (B11): all three signals still, not near their timeout. A hint, never a cancel.
   const T = await import("../scripts/job-telemetry.ts");
   const stuck: string[] = [];
@@ -3996,6 +4249,9 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     if (p?.state === "suspected_stall") stuck.push(T.progressWords(j.id, p));
   }
   if (stuck.length) lines.push(`Your running jobs that look stuck: ${stuck.join("; ")}.`);
+  // How many seats work now: with three of eight seats working and the rest waiting, each seat saw only its own state.
+  const working = await seatsWorkingLine(ctx.sandboxRoot, snap).catch(() => null);
+  if (working) lines.push(working);
   // Parked leads (A2) and closures waiting for confirmation (A3): everyone sees them.
   const parked = await parkedLeads(ctx.sandboxRoot, snap).catch(() => [] as ParkedLead[]);
   if (parked.length) lines.push(`Parked (held, no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while the holder works elsewhere; offered to an idle seat unless the holder acts): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min; ${p.elsewhere})`).join("; ")}.`);
@@ -4011,6 +4267,12 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     // What was delivered now: each offer's first claim counts from here.
     await markOffersSeen(ctx.sandboxRoot, me, notices.filter((n) => n.offer !== undefined && n.kind !== "parked").flatMap((n) => n.batch ?? [{ lead: n.lead, offer: n.offer! }]));
     if (qd) await Q.markQuestionOffersSeen(ctx.sandboxRoot, me, qd.notices.filter((n) => n.kind === "offer" && n.offer !== undefined).map((n) => ({ q: n.q, offer: n.offer! }))).catch(() => undefined);
+  }
+  // No line of the digest is unbounded: it rides on every wait and inbox answer and on every hand-off. A line past the
+  // bound is cut and says so; the registers (leads, finish status, job_status) hold what was cut.
+  const DIGEST_LINE_MAX = 6000;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i]!.length > DIGEST_LINE_MAX) lines[i] = `${lines[i]!.slice(0, DIGEST_LINE_MAX - 120)}\u2026 (cut here: this line was ${lines[i]!.length} characters; leads, finish status and job_status give it whole)`;
   }
   return { text: lines.join("\n"), notices: [...notices, ...(qd?.notices ?? []).map((n) => ({ kind: `question_${n.kind}` as LeadNotice["kind"], lead: n.q, text: n.text, wakes: n.wakes }))], counts: { ...counts, ...(qd ? { questions: qd.counts } : {}) } };
 }
@@ -4121,6 +4383,17 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
 }
 
 /**
+ * A lead the harness seeded for a question (seedQuestionLeads) whose every
+ * question a seat's held lead covers already: left open for whoever wants it,
+ * and not offered, so that no question ends up with two holders by an offer.
+ */
+function seededAndHeldElsewhere(l: Lead, snap: LeadsSnapshot): boolean {
+  if (l.opened_by !== P.SYSTEM_AGENT || !l.answers.length) return false;
+  const held = new Set(overlappingLeads(snap, l.answers, "", l.id).flatMap((o) => o.answers.map((a) => P.sectionKey(a))));
+  return l.answers.every((a) => held.has(P.sectionKey(a)));
+}
+
+/**
  * The offers a waiting seat makes to itself (A3): a ready lead nobody holds
  * and nothing is offered, or a parked lead (A2), goes to the idle seat that
  * waited longest among those not yet offered it at this revision; that seat
@@ -4133,7 +4406,7 @@ async function electOffer(ctx: P.SwarmContext, outer: LeadsSnapshot, now = Date.
   const eligible = (snap: LeadsSnapshot, parked: Set<string>) =>
     [...snap.state.leads.values()]
       .filter((l) => !l.closed && !O.reservingOffer(l.offers, now, l.rev))
-      .filter((l) => (!l.holder && leadStatus(l, snap.state, snap.ledger) === "open" && !(l.covered_by?.length && overlappingLeads(snap, l.answers, "", l.id).length)) || parked.has(l.id));
+      .filter((l) => (!l.holder && leadStatus(l, snap.state, snap.ledger) === "open" && !(l.covered_by?.length && overlappingLeads(snap, l.answers, "", l.id).length) && !seededAndHeldElsewhere(l, snap)) || parked.has(l.id));
   const parkedOuter = new Set((await parkedLeads(ctx.sandboxRoot, outer, now).catch(() => [] as ParkedLead[])).map((p) => p.lead));
   const candidates = eligible(outer, parkedOuter);
   if (!candidates.length) return null;
@@ -4343,6 +4616,60 @@ export async function writeLeadsMd(sandboxRoot: string): Promise<void> {
   const snap = await leadsSnapshot(sandboxRoot);
   await mkdir(join(sandboxRoot, LEADS_DIR), { recursive: true });
   await P.writeFileAtomic(join(sandboxRoot, LEADS_MD), renderLeadsMd(snap));
+}
+
+// --- a seat started again: its hand-off from the records ---------------------------------------
+
+/** The bound of a relaunched seat's prompt: the 2,000 characters a compaction's hand-off header is held to (self-compact.ts HANDOFF_HEADER_MAX). */
+export const RELAUNCH_HANDOFF_MAX = 2000;
+
+const cutAt = (text: string, max: number, where: string): string => (text.length > max ? `${text.slice(0, Math.max(0, max - where.length - 9))}… (cut: ${where})` : text);
+const listCut = (items: string[], most: number): string => (items.length > most ? `${items.slice(0, most).join(", ")} and ${items.length - most} more` : items.join(", "));
+
+/**
+ * What a seat started again after its process ended is told (A5): not "call
+ * inbox and leads", but what the run's records say is its own, read from
+ * the records because its session may be gone (set aside when it held a
+ * line too large to load): the leads it holds, its newest standing ledger
+ * entries, and its jobs (running, waiting for their seal, awaiting its
+ * reading, failed). Each part is cut before the whole, and the whole is held
+ * to RELAUNCH_HANDOFF_MAX characters. A sensitive entry is named, its value
+ * left to the ledger.
+ */
+export async function relaunchHandoff(sandboxRoot: string, agent: string, o: { fresh?: boolean; max?: number } = {}): Promise<string> {
+  const max = o.max ?? RELAUNCH_HANDOFF_MAX;
+  const snap = await leadsSnapshot(sandboxRoot);
+  const head = `The harness started you again: your process had ended.${o.fresh ? " Your earlier conversation was set aside because it held a message too large to load, so you start with none of it." : ""} Nothing of the run was lost. What the run's records hold of yours:`;
+  const tail = `Your own files are in work/${agent}/. Call inbox, then go on with what you hold. This message is the harness, not a person: do not answer it with a status.`;
+  const lines: string[] = [];
+  const held = [...snap.state.leads.values()].filter((l) => l.holder === agent && !l.closed);
+  lines.push(
+    held.length
+      ? cutAt(`Leads you hold: ${listCut(held.map((l) => `${l.id} "${l.title.length > 70 ? `${l.title.slice(0, 69)}…` : l.title}" (${leadStatus(l, snap.state, snap.ledger)}${l.answers.length ? `, question ${l.answers.join(", ")}` : ""})`), 6)}.`, 600, "leads mine gives them whole")
+      : "Leads you hold: none (leads shows what is open).",
+  );
+  const mine = snap.ledger.entries.filter((e) => (e.by === agent || (e.authors ?? []).includes(agent)) && !snap.ledger.replaced.has(e.seq));
+  if (mine.length) {
+    const shown = mine.slice(-5).reverse().map((e) => {
+      const value = e.sensitive ? "(sensitive: the ledger has it)" : `"${String(e.value ?? "").replace(/\s+/g, " ").slice(0, 80)}${String(e.value ?? "").length > 80 ? "…" : ""}"`;
+      return `E-${e.seq} ${e.kind}${e.answers?.length ? ` (answers ${e.answers.join(", ")})` : e.section ? ` (${e.section})` : ""}: ${value}`;
+    });
+    lines.push(cutAt(`Your newest standing entries (${shown.length} of ${mine.length}): ${shown.join("; ")}.`, 700, "the ledger has them whole"));
+  } else lines.push("Your standing entries: none yet.");
+  const jobs = snap.jobs.filter((j) => j.agent === agent);
+  const parts: string[] = [];
+  const running = jobs.filter((j) => j.state === "accepted" || j.state === "running").map((j) => `${j.id} ${j.state === "accepted" ? "queued" : "running"}${j.tool ? ` (${j.tool})` : ""}`);
+  if (running.length) parts.push(`running: ${listCut(running, 5)}`);
+  const sealing = jobs.filter((j) => j.state === "finished" || j.state === "fenced").map((j) => j.id);
+  if (sealing.length) parts.push(`finished and waiting for their seal: ${listCut(sealing, 5)}`);
+  const awaiting = (await awaitingInterpretation(sandboxRoot, snap.state, snap.jobs, snap.ledger).catch(() => [] as AwaitingJob[])).filter((a) => a.agent === agent).map((a) => a.job);
+  if (awaiting.length) parts.push(`awaiting your interpretation (record what each shows with interprets): ${listCut(awaiting, 5)}`);
+  const failed = jobs.filter((j) => j.state === "failed").map((j) => j.id);
+  if (failed.length) parts.push(`failed: ${listCut(failed.slice(-5), 5)}`);
+  lines.push(parts.length ? cutAt(`Your jobs: ${parts.join("; ")}.`, 500, "job_status gives each") : "Your jobs: none open, none awaiting your reading.");
+  const body = lines.join("\n");
+  const room = max - head.length - tail.length - 2;
+  return `${head}\n${cutAt(body, Math.max(0, room), "leads, the ledger and job_status give the rest")}\n${tail}`;
 }
 
 // --- until solved: the regroup ------------------------------------------------------------------

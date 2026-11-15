@@ -14,7 +14,7 @@ import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as L from "../extensions/leads.ts";
-import { compareRuns, compareText, measureRun, metricsText } from "../scripts/metrics.ts";
+import { armsText, compareArms, compareRuns, compareText, measureRun, metricsText, plainValue, SECTION8_MEASURES, wholeExtraction } from "../scripts/metrics.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const T = (hms: string) => `2026-09-28T${hms}.000Z`;
@@ -354,4 +354,312 @@ test("the command: a table or JSON for one run, --compare for two, and a usage e
   assert.equal(run().status, 2);
   assert.equal(run("--compare", S).status, 2);
   assert.equal(run(join(S, "nothing")).status, 2);
+});
+
+// --- section 8 ----------------------------------------------------------------------------------------
+
+/** A question register of four goal questions; the first names its answer's format. */
+function questionsWithFormat(S: string): void {
+  const texts = ["Which host and port did it reach? Format: *ip:port*", "Which account ran it?", "Which file dropped it?", "Which host held the copy?"];
+  const open = (n: number) => ({ at: T("09:59:00"), by: "system", ev: "open", q: `Q-${n}`, rev: 1, act: { text: texts[n - 1], why: "goal", materiality: "material", priority: "normal" }, origin: { kind: "goal", via: "goal" }, decided: { scope: "in_scope", scope_why: "goal", section: String(n), leading_forms: [] } });
+  write(S, "questions/questions.jsonl", chained([open(1), open(2), open(3), open(4), { at: T("09:59:00"), by: "system", ev: "seed", source: null, questions: ["Q-1", "Q-2", "Q-3", "Q-4"], objectives: [] }]));
+}
+
+/** A run whose registers give every one of section 8's fourteen measures a figure (each line says what it adds). */
+function section8Run(): string {
+  const S = join(mkdtempSync(join(tmpdir(), "metrics-s8-")), "s8full");
+  write(S, "budget.json", JSON.stringify({ started_at: "2026-09-28T10:00:00Z" }));
+  questionsWithFormat(S);
+  const a = (seq: number, at: string, by: string, section: string, result: string, value: string, extra: Record<string, unknown> = {}) => entry(seq, at, by, "answer", { section: `question:${section}`, result, reasoning: "r", value, ...extra });
+  const prose = "The account that ran the dropper was bob and it ran twice.";
+  write(S, "ledger/entries.jsonl", lines([
+    a(1, "10:09:00", "a1", "1", "established", "192.0.2.7:8080", { confidence: "high" }),
+    a(2, "10:09:30", "a2", "2", "established", prose, { confidence: "high" }),
+    a(3, "10:10:00", "a1", "3", "established", "evil-dropper.exe", { confidence: "high" }),
+    // Q-1 changed its value: E-1 counts.
+    a(4, "10:15:00", "a1", "1", "established", "192.0.2.9:8080", { confidence: "high", supersedes: 1 }),
+    // Q-2 lowered to medium: E-2 counts; the value stays prose.
+    a(5, "10:16:00", "a2", "2", "established", prose, { confidence: "medium", supersedes: 2 }),
+    // Q-3 restated with the same value, result and high: E-3 does not count.
+    a(6, "10:17:00", "a1", "3", "established", "evil-dropper.exe", { confidence: "high", supersedes: 3, reasoning: "restated" }),
+    // Q-4 a high negative, then established with another value: E-7 counts.
+    a(7, "10:18:00", "a2", "4", "bounded_negative", "no copy found on any host", { confidence: "high" }),
+    a(8, "10:25:00", "a2", "4", "established", "found-it-host", { confidence: "high", supersedes: 7 }),
+  ]));
+  write(S, "traces/events.jsonl", lines([
+    { ts: T("10:00:30"), agent: "a1", tool: "skills_index", args: {}, result: { ok: true, source: "prompt", packs: [{ id: "computer-forensics-base", version: "1", skills: 3 }] } },
+    // 90 s in a shell; its output shows Q-3's value nine minutes before its first record.
+    { ts: T("10:01:00"), agent: "a1", tool: "bash", args: { command: "strings x" }, result: { ok: true, output: "evil-dropper.exe was here\n", duration_ms: 90000 } },
+    { ts: T("10:03:00"), agent: "a1", tool: "record", args: {}, result: { ok: false, reason: "Timed out waiting for locks/ledger.lock" } },
+    { ts: T("10:04:00"), agent: "a1", tool: "record", args: {}, result: { ok: true } },
+    { ts: T("10:05:00"), agent: "a2", tool: "record", args: {}, result: { ok: false, reason: "Timed out waiting for locks/ledger.lock" } },
+    { ts: T("10:07:00"), agent: "a1", tool: "job_run", args: { tool: "ad1_extract" }, result: { ok: true, job: "j000003", answer_chars: 1000, hint_chars: 500, library_chars: 400 } },
+    { ts: T("10:08:00"), agent: "system", tool: "hub_call", args: { agent: "a1", fn: "answer_too_large" }, result: { ok: false, error: "inbox: 300000 bytes over 262144, kept at tool-output/harness/answer-inbox.txt" } },
+    { ts: T("10:20:00"), agent: "a1", tool: "compact_done", args: {}, result: { ok: true, summary_chars: 100 } },
+    { ts: T("10:30:00"), agent: "a1", tool: "bash", args: { command: "ls" }, result: { ok: true, output: "x\n", duration_ms: 30000 } },
+    { ts: T("10:30:00"), agent: "a2", tool: "compact_done", args: {}, result: { ok: true, summary_chars: 100 } },
+    // A shell row with no duration: said, not counted.
+    { ts: T("10:40:00"), agent: "a1", tool: "bash", args: { command: "ls" }, result: { ok: true, output: "y\n" } },
+    { ts: T("11:00:00"), agent: "a1", tool: "record", args: {}, result: { ok: true } },
+    { ts: T("11:00:00"), agent: "a2", tool: "record", args: {}, result: { ok: true } },
+  ]));
+  // a1's second request starts 60 s after its shell result, a2's 60 s after its refused record: 2 seat-minutes.
+  write(S, "traces/model-gateway.jsonl", lines([
+    { at: T("10:00:20"), seat: "a1", provider: "p", model: "p/m", status: 200, input: 10, output: 5, cost_usd: 0, ms: 20000 },
+    { at: T("10:02:30"), seat: "a1", provider: "p", model: "p/m", status: 200, input: 10, output: 5, cost_usd: 0, ms: 30000 },
+    { at: T("10:06:10"), seat: "a2", provider: "p", model: "p/m", status: 200, input: 10, output: 5, cost_usd: 0, ms: 10000 },
+  ]));
+  const job = (at: string, type: string, id: string, extra: Record<string, unknown> = {}) => ({ at: T(at), type, job: id, ...extra });
+  write(S, "store/journal.jsonl", lines([
+    { at: T("10:00:30"), type: "store_opened" },
+    { at: T("10:00:40"), type: "kickoff_queued", jobs: ["j000001", "j000002"] },
+    // The kickoff's listing, small: committed 5 s after its end, its generation at 10:01:30 (1.5 minutes from the start).
+    job("10:00:40", "job_accepted", "j000001", { spec: { kind: "recipe", recipe: "ad1_catalog", phase: "listing", inputs: ["input:img"] }, requester: { agent: "system" } }),
+    job("10:01:20", "job_finished", "j000001"),
+    job("10:01:25", "job_committed", "j000001", { outputs: { files: 3 } }),
+    { at: T("10:01:30"), type: "generation_committed", generation: "g0001", job: "j000001", recipe: "ad1_catalog", trigger: "kickoff" },
+    job("10:00:40", "job_accepted", "j000002", { spec: { kind: "recipe", recipe: "ad1_catalog", inputs: ["input:img"] }, requester: { agent: "system" } }),
+    // A whole extraction by size: no members, 20,000 files sealed in 10 s.
+    job("10:07:00", "job_accepted", "j000003", { spec: { kind: "tool", tool: "ad1_extract", args: { image: "input:img" }, inputs: ["input:img"] } }),
+    job("10:19:50", "job_finished", "j000003"),
+    job("10:20:00", "job_fenced", "j000003", { fenced: true }),
+    job("10:20:10", "job_committed", "j000003", { outputs: { files: 20000 } }),
+    // The same call by another seat, joined to it: no job of its own.
+    { at: T("10:07:30"), type: "job_deduplicated", job: "j000003", kind: "tool", tool: "ad1_extract" },
+    // A whole extraction asked for: 12,000 files sealed in 20 s.
+    job("10:25:00", "job_accepted", "j000004", { spec: { kind: "tool", tool: "ad1_extract", args: { whole: true } } }),
+    job("10:29:55", "job_finished", "j000004"),
+    job("10:30:00", "job_fenced", "j000004", { fenced: true }),
+    job("10:30:20", "job_committed", "j000004", { outputs: { files: 12000 } }),
+    // Members named: small, 20 s to its commit.
+    job("10:09:00", "job_accepted", "j000005", { spec: { kind: "tool", tool: "ad1_extract", args: { members: [1, 2] } } }),
+    job("10:10:00", "job_finished", "j000005"),
+    job("10:10:20", "job_committed", "j000005", { outputs: { files: 2 } }),
+    // A command: small, 45 s.
+    job("10:10:30", "job_accepted", "j000006", { spec: { kind: "command", command: "strings x" } }),
+    job("10:11:00", "job_finished", "j000006"),
+    job("10:11:45", "job_committed", "j000006", { outputs: { files: 1 } }),
+    // A listing: small, 5 s, not an extraction.
+    job("10:12:00", "job_accepted", "j000007", { spec: { kind: "tool", tool: "ad1_extract", args: { list: true } } }),
+    job("10:12:30", "job_finished", "j000007"),
+    job("10:12:35", "job_committed", "j000007", { outputs: { files: 1 } }),
+  ]));
+  return S;
+}
+
+test("section 8: every one of the fourteen measures gives its figure, read from the run's registers", async () => {
+  const m = await measureRun(section8Run());
+  assert.deepEqual(m.section8.map((x) => x.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(m.section8.map((x) => x.measure), [...SECTION8_MEASURES]);
+  assert.ok(m.section8.every((x) => x.measured), JSON.stringify(m.section8.filter((x) => !x.measured)));
+  const row = (n: number) => m.section8.find((x) => x.n === n)!;
+  assert.deepEqual([row(1).figure, row(1).unit], [75, "job-seconds"], "5 + 20 + 45 + 5 s over the four small jobs; the large ones not counted");
+  assert.match(row(1).value, /75 job-seconds over 4 small job\(s\).*the longest 45 s \(j000006\)/);
+  assert.equal(row(2).figure, 1067, "32,000 files in 30 s");
+  assert.deepEqual(row(2).items, ["j000003", "j000004"]);
+  assert.match(row(2).value, /the slowest 600 files\/s \(j000004\)/);
+  assert.deepEqual([row(3).figure, row(3).unit], [300000, "bytes"]);
+  assert.match(row(3).value, /300000 bytes \(inbox, over the 262144-byte bound: kept whole, not sent\)/);
+  assert.equal(row(4).figure, 2);
+  assert.equal(row(5).figure, 2, "60 s before a1's second request and 60 s before a2's");
+  assert.match(row(5).value, /over 2 request\(s\)/);
+  assert.equal(row(5).figure! * 60, 2 * (m.harness!.model_gap.median_s ?? 0), "the sum agrees with the harness's own reading of each gap");
+  assert.equal(row(6).figure, 0.67, "2 refused for 3 accepted");
+  assert.equal(row(7).figure, 0.4);
+  assert.equal(row(8).figure, m.harness!.compactions.per_seat_hour);
+  assert.match(row(8).value, /with packs \(computer-forensics-base\); the ratio with packs to without needs a run of the other kind/);
+  assert.equal(row(9).figure, 2, "90 s and 30 s of shell");
+  assert.match(row(9).value, /over 2 shell call\(s\); 1 more give no duration, not counted/);
+  assert.deepEqual([row(10).figure, row(10).parts, row(10).items], [0.75, { n: 3, of: 4 }, ["Q-2 E-5"]], "the ip:port value is in its format; Q-2's is a sentence");
+  assert.equal(row(11).figure, 3);
+  assert.deepEqual(row(11).items, ["E-1", "E-2", "E-7"]);
+  assert.match(row(11).value, /E-1 \(Q-1\) by E-4: another value; E-2 \(Q-2\) by E-5: confidence medium; E-7 \(Q-4\) by E-8: another value, result bounded_negative to established/);
+  assert.equal(row(12).figure, 9, "Q-3's value was in a shell output at 10:01, its first record at 10:10");
+  assert.deepEqual([row(13).figure, row(13).items], [1.5, ["j000001"]]);
+  assert.match(row(13).value, /minute 1\.5 from the run's start \(budget\.json started_at\): g0001, the listing phase, job j000001/);
+  assert.deepEqual([row(14).figure, row(14).items], [2, ["j000003", "j000004"]]);
+  assert.match(row(14).value, /j000003 \(tool ad1_extract, 20000 files\), j000004 \(tool ad1_extract, 12000 files\)/);
+  const text = metricsText(m);
+  assert.match(text, /Section 8 \(the improvement plan's measures for the verification runs\):/);
+  for (const [n, name] of SECTION8_MEASURES.entries()) assert.match(text, new RegExp(`^${n + 1}\\.\\s+${name.replace(/[()]/g, "\\$&")}\\s+\\S`, "m"), name);
+  for (const v of ["192.0.2.9", "evil-dropper", "found-it-host", "bob"]) assert.ok(!text.includes(v) && !JSON.stringify(m.section8).includes(v), `no value is printed (${v})`);
+});
+
+test("section 8: the largest answer is in bytes when the hub cut one, in characters when only a seat's row sizes it", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "metrics-s8-chars-")), "s8chars");
+  write(S, "traces/events.jsonl", lines([
+    { ts: T("10:00:00"), agent: "a1", tool: "job_run", args: { tool: "x" }, result: { ok: true, job: "j000001", answer_chars: 1200 } },
+    { ts: T("10:01:00"), agent: "a1", tool: "job_status", args: { job_id: "j000001" }, result: { ok: true, answer_chars: 5400 } },
+  ]));
+  const m = await measureRun(S);
+  const r3 = m.section8.find((x) => x.n === 3)!;
+  assert.deepEqual([r3.measured, r3.figure, r3.unit], [true, 5400, "characters"]);
+  assert.match(r3.value, /the largest answer a seat's row sizes: 5400 characters \(job_status\)/);
+  const none = await measureRun(join(mkdtempSync(join(tmpdir(), "metrics-s8-none3-")), "x"));
+  assert.equal(none.section8.find((x) => x.n === 3)!.unit, "bytes or characters");
+});
+
+test("section 8: a run with none of the registers says why for every row, never a zero", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "metrics-s8-none-")), "s8none");
+  mkdirSync(S, { recursive: true });
+  const m = await measureRun(S);
+  assert.equal(m.section8.length, 14);
+  for (const x of m.section8) {
+    assert.equal(x.measured, false, `${x.n} ${x.value}`);
+    assert.equal(x.figure, null);
+    assert.match(x.value, /^not measured: no (store\/journal\.jsonl|readable traces\/events\.jsonl|ledger\/entries\.jsonl)$/, `${x.n} ${x.value}`);
+  }
+});
+
+test("section 8: a run from before the newer fields says which of them it lacks", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "metrics-s8-old-")), "s8old");
+  write(S, "traces/events.jsonl", lines([
+    { ts: T("10:00:00"), agent: "a1", tool: "job_run", args: { tool: "x" }, result: { ok: true, job: "j000001" } },
+    { ts: T("10:01:00"), agent: "a1", tool: "bash", args: { command: "ls" }, result: { ok: true, output: "x\n" } },
+    { ts: T("10:30:00"), agent: "a1", tool: "record", args: {}, result: { ok: true } },
+  ]));
+  write(S, "store/journal.jsonl", lines([
+    { at: T("10:00:00"), type: "job_accepted", job: "j000001", spec: { kind: "tool", tool: "x", args: {} } },
+    { at: T("10:05:00"), type: "job_committed", job: "j000001", outputs: { files: 5 } },
+  ]));
+  const m = await measureRun(S);
+  const row = (n: number) => m.section8.find((x) => x.n === n)!;
+  const why: Array<[number, RegExp]> = [
+    [1, /none of the 1 committed job\(s\) has a job_finished line/],
+    [2, /no job sealed 10000 files or more/],
+    [3, /no answer_too_large row and no row that gives an answer's size/],
+    [5, /no model gateway log/],
+    [7, /no job_run row gives library_chars/],
+    [9, /none of the 1 shell call\(s\) on the trace gives its duration/],
+    [10, /no ledger\/entries\.jsonl/],
+    [11, /no ledger\/entries\.jsonl/],
+    [12, /no ledger\/entries\.jsonl/],
+    [13, /no kickoff_queued line on the journal/],
+  ];
+  for (const [n, re] of why) {
+    assert.equal(row(n).measured, false, `${n}: ${row(n).value}`);
+    assert.match(row(n).value, re, `${n}`);
+  }
+  // What the registers it has do give: no lock timeout, no refusal, a seat's hour without packs said, no whole extraction.
+  assert.deepEqual([row(4).figure, row(6).figure, row(14).figure], [0, 0, 0]);
+  assert.match(row(8).value, /whether it ran with packs is not recorded in the run/);
+  // A kickoff that queued its recipes and never committed a generation: it never arrived.
+  write(S, "store/journal.jsonl", lines([{ at: T("10:00:00"), type: "store_opened" }, { at: T("10:00:01"), type: "kickoff_queued", jobs: ["j000001"] }]));
+  const k = (await measureRun(S)).section8.find((x) => x.n === 13)!;
+  assert.deepEqual([k.measured, k.figure], [true, null]);
+  assert.match(k.value, /never arrived: the kickoff queued 1 job\(s\) and none committed a generation/);
+  // A trace with no job run: the library's share of job_run's text has nothing to be a share of.
+  write(S, "traces/events.jsonl", lines([{ ts: T("10:00:00"), agent: "a1", tool: "record", args: {}, result: { ok: true } }]));
+  const lib = (await measureRun(S)).section8.find((x) => x.n === 7)!;
+  assert.deepEqual([lib.measured, lib.value], [false, "not measured: no job_run answer on the trace (no job was run)"]);
+});
+
+test("the plain value: the question's format where it names one, else a first line that is not a sentence", () => {
+  const ipPort = "Which host and port did it reach? Format: *ip:port*";
+  assert.equal(plainValue("192.0.2.9:8080\nseen in the proxy log", ipPort), true);
+  assert.equal(plainValue("It reached 192.0.2.9 on port 8080", ipPort), false);
+  assert.equal(plainValue("bob", null), true);
+  assert.equal(plainValue("The account was bob, as the logs show.", null), false);
+  assert.equal(plainValue("", null), false);
+});
+
+test("a whole-image extraction: no members named, and whole asked for or a large output", () => {
+  const tool = (args: Record<string, unknown>) => ({ spec: { kind: "tool", tool: "ad1_extract", args }, files: 20000 });
+  assert.equal(wholeExtraction(tool({})), true);
+  assert.equal(wholeExtraction(tool({ members: [3] })), false);
+  assert.equal(wholeExtraction(tool({ paths: ["*/Users/*"] })), false);
+  assert.equal(wholeExtraction(tool({ list: true })), false);
+  assert.equal(wholeExtraction({ spec: { kind: "tool", tool: "ad1_extract", args: { whole: true } }, files: null }), true, "asked for whole, whatever came of it");
+  assert.equal(wholeExtraction({ spec: { kind: "tool", tool: "ad1_extract", args: {} }, files: 9999 }), false);
+  assert.equal(wholeExtraction({ spec: { kind: "command", command: "tsk_recover -e img out" }, files: 400000 }), true);
+  assert.equal(wholeExtraction({ spec: { kind: "recipe", recipe: "r", phase: "listing" }, files: 400000 }), false);
+  assert.equal(wholeExtraction({ spec: { kind: "import", source: "work/a1/x" }, files: 400000 }), false);
+});
+
+// --- the arms of the notes experiment ---------------------------------------------------------------
+
+/** One run of the notes experiment: a1's calls around the cards it was given (`calls`), its compactions, an hour on the trace. */
+function armRun(dir: string, o: { packs: string[]; calls: Array<Record<string, unknown>>; compactions: number }): string {
+  const S = join(dir, `s${Math.random().toString(16).slice(2, 8)}`);
+  const rows: Array<Record<string, unknown>> = [{ ts: T("10:00:00"), agent: "a1", tool: "skills_index", args: {}, result: { ok: true, source: "prompt", packs: o.packs.map((id) => ({ id })) } }];
+  o.calls.forEach((c, i) => rows.push({ ts: T(`10:0${Math.floor(i / 6) + 1}:${String((i % 6) * 10).padStart(2, "0")}`), agent: "a1", args: {}, ...c }));
+  for (let i = 0; i < o.compactions; i += 1) rows.push({ ts: T(`10:${20 + i * 10}:00`), agent: "a1", tool: "compact_done", args: {}, result: { ok: true, summary_chars: 10 } });
+  rows.push({ ts: T("11:00:00"), agent: "a1", tool: "record", args: {}, result: { ok: true } });
+  write(S, "traces/events.jsonl", lines(rows));
+  return S;
+}
+
+const leadCard = (kind: "lead" | "lead_injected") => ({ tool: "skill_card", args: { lead: "L-1", ids: ["ad1-extraction"] }, result: { ok: true, kind, tokens: 200 } });
+const toolCard = { tool: "skill_card", args: { tool: "ad1_extract", id: "ad1-extraction" }, result: { ok: true, pack: "computer-forensics-base", tokens: 150 } };
+const jobRun = (tool: string, ok: boolean) => ({ tool: "job_run", args: { tool }, result: ok ? { ok: true, job: "j000001" } : { ok: false, reason: `tool ${tool} needs image` } });
+const direct = (tool: string, exit: number) => ({ tool, result: { ok: exit === 0, forged: true, exit_code: exit } });
+
+/** Two inject runs whose first calls after a card were right, two on runs whose were wrong in part; one on run without packs. */
+function armRuns(): { dir: string; inject: string[]; on: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), "metrics-arms-"));
+  const inject = [0, 1].map(() => armRun(dir, { packs: ["computer-forensics-base"], compactions: 2, calls: [{ tool: "lead_claim", result: { ok: true } }, leadCard("lead_injected"), jobRun("ad1_extract", true), toolCard, jobRun("ad1_extract", true), jobRun("ad1_extract", false), jobRun("sqlite_query", true)] }));
+  const on = [
+    armRun(dir, { packs: ["computer-forensics-base"], compactions: 2, calls: [leadCard("lead"), jobRun("ad1_extract", false), jobRun("ad1_extract", true), toolCard, direct("ad1_extract", 2)] }),
+    armRun(dir, { packs: [], compactions: 1, calls: [leadCard("lead"), jobRun("ad1_extract", true), toolCard, jobRun("ad1_extract", false), jobRun("sqlite_query", true)] }),
+  ];
+  const rec = (S: string, arm: string, packs: boolean) => ({ id: S.split("/").pop(), sandbox: S, skill_cards: arm, pack_skills: "on", packs: packs ? [{ id: "computer-forensics-base", version: "1", manifest_sha256: "0".repeat(64) }] : [] });
+  writeFileSync(join(dir, "registry.json"), `${JSON.stringify({ runs: [...inject.map((S) => rec(S, "inject", true)), rec(on[0]!, "on", true), rec(on[1]!, "on", false)] })}\n`);
+  return { dir, inject, on };
+}
+
+test("the arms: the first call after a card set inject against on, with what bears on the notes", async () => {
+  const { inject, on } = armRuns();
+  const a = await compareArms([...inject, ...on]);
+  assert.equal(a.format, "dfirswarm-metrics-arms/1");
+  assert.deepEqual(a.runs.map((r) => [r.arm, r.arm_from]), [["inject", "registry"], ["inject", "registry"], ["on", "registry"], ["on", "registry"]]);
+  assert.deepEqual(a.runs[0]!.cards, { cards: 2, lead_cards: 1, injected: 1, after_card: { calls: 2, wrong: 0 }, other: { calls: 2, wrong: 1 } });
+  assert.deepEqual(a.runs[2]!.cards, { cards: 2, lead_cards: 1, injected: 0, after_card: { calls: 2, wrong: 2 }, other: { calls: 1, wrong: 0 } }, "a refused job_run after the lead's card, and the tool called as itself exiting 2 after its card");
+  const i = a.arms.inject!;
+  const o = a.arms.on!;
+  assert.deepEqual([i.cards, i.injected, i.after_card, i.other], [4, 2, { calls: 4, wrong: 0, share: 0 }, { calls: 4, wrong: 2, share: 0.5 }]);
+  assert.deepEqual([o.cards, o.injected, o.after_card, o.other], [4, 0, { calls: 4, wrong: 3, share: 0.75 }, { calls: 2, wrong: 0, share: 0 }]);
+  assert.deepEqual(i.record, { accepted: 2, refused: 0, per_accepted: 0 });
+  assert.equal(i.rows[a.runs[0]!.run]!["8"], 2, "two compactions in the seat's hour");
+  assert.deepEqual(a.verdict, { judged: true, words: "inject lower in every run (0% against 50%-100% wrong formats in the first call after a card): a difference these runs show", inject: [0, 0], on: [1, 0.5] });
+  assert.deepEqual([a.packs.with.length, a.packs.without, a.packs.with_mean, a.packs.without_mean, a.packs.ratio], [3, [a.runs[3]!.run], 2, 1, 2]);
+  const text = armsText(a);
+  assert.match(text, /Wrong format, first call after a card\s+0 of 4 \(0%\)\s+3 of 4 \(75%\)/);
+  assert.match(text, /Inject against on: inject lower in every run/);
+  assert.match(text, /row 8 \(compactions per seat-hour, with packs over without\): 2 times: 2 per seat-hour with packs/);
+});
+
+test("the arms: one run of an arm, or none, cannot be judged; an arm the registry does not name is read from the trace", async () => {
+  const { inject, on } = armRuns();
+  const one = await compareArms([inject[0]!, on[0]!]);
+  assert.deepEqual([one.verdict.judged, one.verdict.words], [false, "cannot be judged: inject has 1 run; the experiment asks two or more of each arm"]);
+  assert.match(one.packs.words, /^not measured: no run without packs among those given/);
+  // Outside any registry: the lead cards with their rules say inject; an arm with no run is said.
+  const lone = armRun(mkdtempSync(join(tmpdir(), "metrics-arms-lone-")), { packs: ["p"], compactions: 0, calls: [leadCard("lead_injected"), jobRun("x", true)] });
+  const solo = await compareArms([lone]);
+  assert.deepEqual([solo.runs[0]!.arm, solo.runs[0]!.arm_from, solo.runs[0]!.packs], ["inject", "trace", true]);
+  assert.equal(solo.verdict.words, "cannot be judged: no on run among those given");
+  assert.match(armsText(solo), /Runs\s+\S+\s+no run/);
+  // A run whose trace tells nothing and no registry names: unknown, and said.
+  const bare = armRun(mkdtempSync(join(tmpdir(), "metrics-arms-bare-")), { packs: [], compactions: 0, calls: [jobRun("x", true)] });
+  const u = await compareArms([bare]);
+  assert.equal(u.runs[0]!.arm, "unknown");
+  assert.ok(u.notes.some((x) => /its arm is not recorded/.test(x)), u.notes.join(" | "));
+});
+
+test("the command: --arms over run directories, --registry, and its usage errors", () => {
+  const { dir, inject, on } = armRuns();
+  const run = (...args: string[]) => spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "metrics.ts"), ...args], { encoding: "utf8" });
+  const j = run("--arms", ...inject, ...on, "--registry", join(dir, "registry.json"), "--json");
+  assert.equal(j.status, 0, j.stderr);
+  const parsed = JSON.parse(j.stdout) as { format: string; verdict: { judged: boolean } };
+  assert.deepEqual([parsed.format, parsed.verdict.judged], ["dfirswarm-metrics-arms/1", true]);
+  const t = run("--arms", ...inject, ...on);
+  assert.equal(t.status, 0, t.stderr);
+  assert.match(t.stdout, /^Arms: 4 run\(s\)/);
+  assert.equal(run("--arms").status, 2);
+  assert.equal(run("--arms", inject[0]!, "--registry").status, 2);
+  assert.equal(run("--arms", join(dir, "nothing")).status, 2);
+  // One run's JSON carries section 8 whole.
+  const one = JSON.parse(run(inject[0]!, "--json").stdout) as { section8: Array<{ n: number }> };
+  assert.deepEqual(one.section8.map((x) => x.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
 });

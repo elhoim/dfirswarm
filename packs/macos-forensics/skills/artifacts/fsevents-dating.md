@@ -3,6 +3,7 @@ id: artifacts/fsevents-dating
 title: Ordering and dating FSEvents records
 when: Order FSEvents records, date one, read its flags, or use an external volume's log.
 needs: []
+card: fsevents_parse event ids order records within one volume's continuous history, never across volumes or a restored history; a record has no timestamp. Dating needs a matching operation with an independent time on each side; one anchor bounds one side only. A Renamed flag gives neither name nor the actor. Does not show: a date from an id, or which Mac an external volume's log belongs to.
 tools: [fsevents_parse]
 requires_host: []
 ---

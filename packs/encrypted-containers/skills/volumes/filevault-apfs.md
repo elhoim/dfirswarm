@@ -3,6 +3,7 @@ id: volumes/filevault-apfs
 title: FileVault and APFS volumes
 when: An Apple volume is encrypted: legacy Core Storage FileVault 2 or APFS.
 needs: []
+card: crypto_metadata ({"path": "<image>", "offset": <bytes>}) picks fvdeinfo or fsapfsinfo by the signature at the offset; the APFS software-crypto flag does not mean a volume is encrypted. A reader failing on the object is a tool limit, not a volume finding. Do not assume a password or recovery key opens a raw image away from its original hardware. Does not show: that every keychain item decrypts.
 tools: [crypto_metadata]
 requires_host: [fvdeinfo, fsapfsinfo]
 ---

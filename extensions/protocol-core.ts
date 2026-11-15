@@ -61,6 +61,8 @@ export const tableLockTiming = {
   waitMs: TABLE_LOCK_WAIT_MS,
   staleMs: TABLE_LOCK_STALE_MS,
   heartbeatMs: TABLE_LOCK_HEARTBEAT_MS,
+  /** How long a call waits in this process's own line for a lock before it gives up (the line is in order; see withNamedLock). */
+  queueMs: 120_000,
 };
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
@@ -1205,11 +1207,192 @@ export type HeldLock = {
   assertOwned(): Promise<void>;
 };
 
+/**
+ * The board and the lock table: posts, threads, cursors and claims. Its
+ * name is fixed: scripts/swarm.sh takes it for an examiner's post and
+ * scripts/reap.sh for a dead seat's claims.
+ */
 export async function withTableLock<T>(
   sandboxRoot: string,
   fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   return withNamedLock(sandboxRoot, ".table.lock", fn);
+}
+
+/**
+ * Each register behind a lock of its own (Plan 2, A10). The ledger, the
+ * budget and the file history shared the table lock with the board, so a
+ * record that took seconds held every post and every fold of usage behind
+ * it (P-10: 216 timeouts in one run). Now a call waits only for calls to the
+ * same register: in this process in the order they asked (withNamedLock's
+ * line, one per lock), and on disk only for another process that writes the
+ * same files. Each of these registers has one, so each keeps a lock on disk:
+ *
+ * - the ledger (ledger/entries.jsonl, attestations.jsonl, disputes.jsonl):
+ *   the hub (a host run: every pane), and the operator's commands that
+ *   record external material (scripts/questions-cli.ts, scripts/material.ts)
+ *   and the net broker (scripts/net-broker.ts);
+ * - the budget (budget.json, and the stop a cap or the operator writes:
+ *   done/STOPPED, the harness's sentinel): the hub or the panes folding
+ *   usage, and the operator's caps, pause, extension, stop and resume
+ *   (scripts/caps.ts, scripts/stop-policy.ts, scripts/provider-limit.ts,
+ *   scripts/resume.ts, finish-line.ts markStopped);
+ * - the file history (history/<hash>/index.json): the hub or the panes, and
+ *   the web app's restore.
+ *
+ * The order is the table lock before any of these, never after: nothing
+ * holding one of them posts or claims.
+ */
+export const LEDGER_LOCK = ".ledger.lock";
+export const BUDGET_LOCK = ".budget.lock";
+export const HISTORY_LOCK = ".history.lock";
+
+export function withLedgerLock<T>(sandboxRoot: string, fn: (lock: HeldLock) => Promise<T>): Promise<T> {
+  return withNamedLock(sandboxRoot, LEDGER_LOCK, fn);
+}
+
+export function withBudgetLock<T>(sandboxRoot: string, fn: (lock: HeldLock) => Promise<T>): Promise<T> {
+  return withNamedLock(sandboxRoot, BUDGET_LOCK, fn);
+}
+
+export function withHistoryLock<T>(sandboxRoot: string, fn: (lock: HeldLock) => Promise<T>): Promise<T> {
+  return withNamedLock(sandboxRoot, HISTORY_LOCK, fn);
+}
+
+/**
+ * Tests only: `held` runs once a lock is taken, before the holder's work,
+ * with the lock's name, so a test can make a holder slow (a record that
+ * takes five seconds) without changing the holder.
+ */
+export const lockTestHooks: { held?: (name: string) => Promise<void> | void } = {};
+
+/**
+ * An append-only register's text (ledger/entries.jsonl, its attestations, its
+ * disputes), as `readFile(file, "utf8")` gives it, with "" for a file that is
+ * not there. This process keeps what it read, and reads from disk only what
+ * was appended since: a record read the whole ledger under its lock, I/O that
+ * grew with the register (Plan 2, A10). What is kept is the text up to the
+ * last newline; a line still being written is read again next time, and the
+ * 64 bytes before the kept end are read with every append and compared, so a
+ * file rewritten under the process (another inode, shorter, or a different
+ * end of what was kept) is read whole again. At most APPEND_ONLY_HELD_MAX_BYTES
+ * are kept across files, the least recently read let go first; a file larger
+ * than that is read whole each time, as before.
+ */
+export async function readAppendOnlyText(file: string): Promise<string> {
+  const key = resolve(file);
+  const before = appendOnlyChains.get(key) ?? Promise.resolve("");
+  const mine = before.catch(() => "").then(() => readAppendOnlyNow(key));
+  appendOnlyChains.set(key, mine);
+  try {
+    return await mine;
+  } finally {
+    if (appendOnlyChains.get(key) === mine) appendOnlyChains.delete(key);
+  }
+}
+
+/** What readAppendOnlyText keeps in all, at most. */
+export const APPEND_ONLY_HELD_MAX_BYTES = 64 * 1024 * 1024;
+const APPEND_ONLY_CHECK_BYTES = 64;
+type AppendOnlyHeld = { dev: number; ino: number; kept: number; text: string; end: Buffer; seenSize: number; seenMtimeMs: number; partial: string };
+const appendOnlyHeld = new Map<string, AppendOnlyHeld>();
+const appendOnlyChains = new Map<string, Promise<string>>();
+/** How the reads went, for a test: whole files read, appends read, reads that read nothing. */
+export const appendOnlyReadStats = { whole: 0, appended: 0, unchanged: 0 };
+
+/** How many files readAppendOnlyText keeps, and their bytes (the hub's health line names it). */
+export function appendOnlyHeldSize(): { files: number; bytes: number } {
+  let bytes = 0;
+  for (const h of appendOnlyHeld.values()) bytes += h.kept;
+  return { files: appendOnlyHeld.size, bytes };
+}
+
+async function readAppendOnlyNow(key: string): Promise<string> {
+  const st = await stat(key).catch(() => null);
+  if (!st || !st.isFile()) {
+    appendOnlyHeld.delete(key);
+    return st ? readFile(key, "utf8").catch(() => "") : "";
+  }
+  const had = appendOnlyHeld.get(key);
+  if (had && had.dev === st.dev && had.ino === st.ino && st.size >= had.kept) {
+    if (st.size === had.seenSize && st.mtimeMs === had.seenMtimeMs) {
+      appendOnlyReadStats.unchanged += 1;
+      appendOnlyHeld.delete(key);
+      appendOnlyHeld.set(key, had);
+      return had.text + had.partial;
+    }
+    if (st.size > had.seenSize) {
+      const from = had.kept - had.end.length;
+      const handle = await open(key, "r").catch(() => null);
+      if (handle) {
+        let buf: Buffer;
+        try {
+          buf = Buffer.alloc(st.size - from);
+          let got = 0;
+          while (got < buf.length) {
+            const { bytesRead } = await handle.read(buf, got, buf.length - got, from + got);
+            if (bytesRead <= 0) break;
+            got += bytesRead;
+          }
+          buf = buf.subarray(0, got);
+        } finally {
+          await handle.close().catch(() => undefined);
+        }
+        if (buf.length >= had.end.length && buf.subarray(0, had.end.length).equals(had.end)) {
+          appendOnlyReadStats.appended += 1;
+          const added = buf.subarray(had.end.length);
+          const nl = added.lastIndexOf(0x0a);
+          const whole = nl >= 0 ? added.subarray(0, nl + 1) : added.subarray(0, 0);
+          const next: AppendOnlyHeld = {
+            dev: st.dev,
+            ino: st.ino,
+            kept: had.kept + whole.length,
+            text: had.text + whole.toString("utf8"),
+            end: whole.length ? Buffer.from(buf.subarray(Math.max(0, had.end.length + whole.length - APPEND_ONLY_CHECK_BYTES), had.end.length + whole.length)) : had.end,
+            seenSize: from + buf.length,
+            seenMtimeMs: st.mtimeMs,
+            partial: added.subarray(whole.length).toString("utf8"),
+          };
+          keepAppendOnly(key, next);
+          return next.text + next.partial;
+        }
+      }
+    }
+  }
+  // First read, or the file is not what was kept: read whole.
+  appendOnlyReadStats.whole += 1;
+  const bytes = await readFile(key).catch(() => null);
+  if (!bytes) {
+    appendOnlyHeld.delete(key);
+    return "";
+  }
+  const nl = bytes.lastIndexOf(0x0a);
+  const kept = nl + 1;
+  const held: AppendOnlyHeld = {
+    dev: st.dev,
+    ino: st.ino,
+    kept,
+    text: bytes.subarray(0, kept).toString("utf8"),
+    end: Buffer.from(bytes.subarray(Math.max(0, kept - APPEND_ONLY_CHECK_BYTES), kept)),
+    seenSize: bytes.length,
+    seenMtimeMs: st.mtimeMs,
+    partial: bytes.subarray(kept).toString("utf8"),
+  };
+  keepAppendOnly(key, held);
+  return held.text + held.partial;
+}
+
+function keepAppendOnly(key: string, held: AppendOnlyHeld): void {
+  appendOnlyHeld.delete(key);
+  if (held.kept > APPEND_ONLY_HELD_MAX_BYTES) return;
+  appendOnlyHeld.set(key, held);
+  let total = 0;
+  for (const h of appendOnlyHeld.values()) total += h.kept;
+  for (const [k, h] of appendOnlyHeld) {
+    if (total <= APPEND_ONLY_HELD_MAX_BYTES || k === key) break;
+    appendOnlyHeld.delete(k);
+    total -= h.kept;
+  }
 }
 
 /**
@@ -1227,7 +1410,65 @@ export async function withNamedLock<T>(
   fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   const lockDir = join(sandboxRoot, "locks", name);
-  await mkdir(join(sandboxRoot, "locks"), { recursive: true });
+  // The place in the line is taken before anything is awaited, so the line is in the order of the calls.
+  const turn = inProcessTurn(lockDir, name);
+  turn.catch(() => undefined);
+  await mkdir(join(sandboxRoot, "locks"), { recursive: true }).catch(async (err) => {
+    (await turn.catch(() => () => undefined))();
+    throw err;
+  });
+  // The calls of one process take a lock in the order they asked, in a line of their own, and only the head of the
+  // line goes for the lock on disk. In a VM run the hub is the only writer, so every call that "timed out waiting for
+  // locks/.table.lock" (216 in the run s01a4f4, 110 in s5d814f) had lost a 20 ms poll to another call of the same
+  // process for ten seconds. waitMs now bounds only the wait for another process's lock.
+  const release = await turn;
+  try {
+    return await withLockOnDisk(sandboxRoot, name, lockDir, fn);
+  } finally {
+    release();
+  }
+}
+
+/** The line of this process's calls for each lock, by lock directory: the tail's promise, and how many wait. */
+const lockLines = new Map<string, { tail: Promise<void>; waiting: number }>();
+
+async function inProcessTurn(lockDir: string, name: string): Promise<() => void> {
+  const line = lockLines.get(lockDir) ?? { tail: Promise.resolve(), waiting: 0 };
+  lockLines.set(lockDir, line);
+  const before = line.tail;
+  let done!: () => void;
+  const mine = new Promise<void>((r) => (done = r));
+  line.tail = before.then(() => mine);
+  line.waiting += 1;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ahead = line.waiting - 1;
+  let gaveUp = false;
+  try {
+    await Promise.race([
+      before,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for locks/${name} (${ahead} call(s) of this process were ahead for ${tableLockTiming.queueMs} ms)`)), tableLockTiming.queueMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch (err) {
+    // The turn is given up: when it comes it is passed on at once, so the line does not stop behind a call that left.
+    gaveUp = true;
+    line.waiting -= 1;
+    void before.then(done, done);
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  void gaveUp;
+  return () => {
+    line.waiting -= 1;
+    done();
+    if (line.waiting === 0 && lockLines.get(lockDir) === line) lockLines.delete(lockDir);
+  };
+}
+
+async function withLockOnDisk<T>(sandboxRoot: string, name: string, lockDir: string, fn: (lock: HeldLock) => Promise<T>): Promise<T> {
   const deadline = Date.now() + tableLockTiming.waitMs;
   const token = `${process.pid}-${randomUUID()}`;
   const probe = join(sandboxRoot, "locks", `.probe.${token}`);
@@ -1278,6 +1519,7 @@ export async function withNamedLock<T>(
     },
   };
   try {
+    if (lockTestHooks.held) await lockTestHooks.held(name);
     return await fn(held);
   } finally {
     clearInterval(heartbeat);
@@ -1996,7 +2238,8 @@ export async function claimName(
     const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
     const clash = names.find((n) => n.id !== agentId && key(n.name) === key(name));
     if (clash) {
-      return { ok: false as const, error: `${clash.id} already answers to "${name}". Pick another.`, taken_by: clash.id };
+      const taken = names.filter((n) => n.id !== agentId).map((n) => `"${n.name}"`);
+      return { ok: false as const, error: `${clash.id} already answers to "${name}". Pick another: a name none of these has (${taken.join(", ")}), for example "${name} ${agentId.slice(-2)}".`, taken_by: clash.id };
     }
     const previous = had?.name;
     const next = names.filter((n) => n.id !== agentId);
@@ -3251,6 +3494,14 @@ export function usageFromSessionEntries(entries: unknown[]): SessionUsageSlice {
           slice.compaction_usd = Number(((slice.compaction_usd ?? 0) + usage.cost).toFixed(6));
         }
       }
+    } else if (entry.type === "custom" && entry.customType === "self-compact-presummary-usage" && isRecord(entry.data)) {
+      // The summary a seat begins on a copy at the notice line (self-compact.ts PRESUMMARY_USAGE_TYPE), recorded when its
+      // call ends: compaction cost, though no compaction entry carries it.
+      usage = asUsage(entry.data.usage);
+      if (usage) {
+        slice.compaction_tokens = (slice.compaction_tokens ?? 0) + usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+        slice.compaction_usd = Number(((slice.compaction_usd ?? 0) + usage.cost).toFixed(6));
+      }
     }
     if (!usage) continue;
     slice.input += usage.input;
@@ -4376,7 +4627,7 @@ export async function applySessionUsage(
   over_budget: boolean;
   first_over: boolean;
 }> {
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     // A sandbox with no budget yet starts one; a budget.json that is there
     // and does not read is the run's caps, and is never rebuilt from
     // defaults (no cap, a fifteen-minute clock started now). It is read once
@@ -4392,7 +4643,7 @@ export async function applySessionUsage(
         throw new Error(`${BUDGET_UNREADABLE_PREFIX} (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
       });
     if (options.monotonic) {
-      // Checked here, under the table lock, against the row this write
+      // Checked here, under the budget's lock, against the row this write
       // replaces: two reports in flight at once cannot both pass a check made
       // before either was written and leave the smaller one on disk. A report
       // under a session id is checked against that session's last report: a
@@ -4560,7 +4811,7 @@ export async function recordFileVersion(
   // binary overwrites the other, and the surviving index entry names a hash
   // the stored bytes do not have.
   const key = pathKey;
-  return withTableLock(sandboxRoot, async (held) => {
+  return withHistoryLock(sandboxRoot, async (held) => {
     const dir = historyDir(sandboxRoot, key);
     await mkdir(dir, { recursive: true });
     const versions = await listFileHistory(sandboxRoot, key);
@@ -4866,7 +5117,7 @@ export function budgetPressure(budget: BudgetRecord, now = Date.now()): BudgetPr
 
 /**
  * Change the caps while the run goes on: the operator's `swarm.sh cap`.
- * Under the table lock, as every fold of usage is, so the next fold (the
+ * Under the budget's lock, as every fold of usage is, so the next fold (the
  * hub's, a seat's) reads it and keeps it. Each change is kept in cap_changes
  * with the caps it left, which is how the shell watch tells it from a shell
  * writer's. A swarm-wide stop steer the run is no longer over is withdrawn;
@@ -4886,7 +5137,7 @@ export async function setCaps(
     if (k === "wall_clock_minutes" && v <= 0) throw new Error("the wall clock must be above zero minutes");
   }
   if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists); a cap does not bring it back");
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     const budget = await readBudget(sandboxRoot);
     const before: Partial<Record<CapField, number | null>> = {};
     for (const [k, v] of fields) {
@@ -4928,7 +5179,7 @@ export async function setCaps(
  */
 export async function setTokenAlerts(sandboxRoot: string, marks: number[], by: string): Promise<{ before: number[]; after: number[] }> {
   if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists); its token marks stay as they were");
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     const budget = await readBudget(sandboxRoot);
     const before = tokenMarks(budget.token_alerts);
     const after = tokenMarks(marks);
@@ -4945,7 +5196,7 @@ export async function setTokenAlerts(sandboxRoot: string, marks: number[], by: s
  * End the pause in force, whatever its cause: the wall clock's stretch up to
  * the pause is kept, a new one starts now, and the pause goes to the history
  * with who lifted it and what they gave. Mutates `budget`; the caller holds
- * the table lock and writes it.
+ * the budget's lock and writes it.
  */
 function endPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField, number>>, now: number): PauseRecord | null {
   if (!budget.paused) return null;
@@ -4961,7 +5212,7 @@ function endPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField
  * Lift a cap's pause, when the run is no longer over a cap (endPause). The
  * steer that announced it is withdrawn. A pause that is not a cap's (the
  * provider's limit, the operator's hold) is not lifted by room under the
- * caps. Mutates `budget`; the caller holds the table lock and writes it.
+ * caps. Mutates `budget`; the caller holds the budget's lock and writes it.
  */
 function liftPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField, number>>, now = Date.now()): PauseRecord | null {
   if (!budget.paused || !isCapPause(budget.paused)) return null;
@@ -4985,7 +5236,7 @@ function stillOver(budget: BudgetRecord, now: number): string | null {
 /**
  * The operator's extension of a run (swarm.sh extend): more wall clock
  * (minutes), more tokens, more dollars, each added to the cap it extends,
- * under the table lock as every cap change is. A run paused at a cap whose
+ * under the budget's lock as every cap change is. A run paused at a cap whose
  * caps then leave room goes on (the watchdog wakes its seats); one still over
  * a cap is refused, saying which and by how much, and nothing is changed. A
  * pause that is not a cap's stays: the caps are extended under it. A
@@ -5000,7 +5251,7 @@ export async function extendRun(
   const given = Object.entries(add).filter(([, v]) => v !== undefined && v !== null) as Array<[keyof typeof add, number]>;
   if (!given.length) throw new Error("nothing to extend by: give --minutes N, --tokens N or --usd N");
   for (const [k, v] of given) if (!Number.isFinite(v) || v <= 0) throw new Error(`--${k} takes a number above zero (got ${v})`);
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     // The run's end is read under the lock every stop writes it under: a
     // stop, the harness's or the operator's, that took the lock first is
     // not undone by an extension that was waiting for it.
@@ -5050,7 +5301,7 @@ export async function pauseRun(
   now = Date.now(),
   opts: { by?: string; models?: string[]; until?: string; since?: string; recheck?: (budget: BudgetRecord) => Promise<boolean> } = {},
 ): Promise<{ paused: boolean; at: string; already?: true; stale?: true }> {
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     if (await swarmDoneExists(sandboxRoot)) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
     const budget = await readBudget(sandboxRoot).catch(() => null);
     if (!budget) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
@@ -5086,10 +5337,10 @@ export async function pauseRun(
  * pause only when the caps now leave room, and otherwise it is refused,
  * naming the cap, with nothing changed (swarm.sh extend gives room). The
  * watchdog then wakes every seat once, as after an extension. Under the
- * table lock; a finished or stopped run is not brought back.
+ * budget's lock; a finished or stopped run is not brought back.
  */
 export async function unpauseRun(sandboxRoot: string, by: string, now = Date.now()): Promise<{ budget: BudgetRecord; resumed: PauseRecord }> {
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): there is no pause to lift; swarm.sh resume continues it");
     if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) throw new Error("the run was stopped (done/STOPPED exists): there is no pause to lift; swarm.sh resume continues it");
     const budget = await readBudget(sandboxRoot);
@@ -5128,11 +5379,11 @@ export function providerLimitRetryAt(p: Pick<PauseRecord, "at" | "until">): numb
  * time has come (providerLimitRetryAt), the pause is lifted, by "harness",
  * and the watchdog wakes the seats as after any lift; a run whose seats are
  * all refused again is paused again by the same rule that paused it. Under
- * the table lock, so two watchdogs do not both lift it. Null when the run
+ * the budget's lock, so two watchdogs do not both lift it. Null when the run
  * is not paused for the provider's limit or its time has not come.
  */
 export async function liftProviderLimit(sandboxRoot: string, now = Date.now()): Promise<PauseRecord | null> {
-  return withTableLock(sandboxRoot, async (held) => {
+  return withBudgetLock(sandboxRoot, async (held) => {
     // Read under the lock every stop writes it under: a run the operator
     // stopped while it was paused keeps the pause it was stopped in.
     if (await swarmDoneExists(sandboxRoot)) return null;
@@ -5317,7 +5568,7 @@ export async function markStopSteer(
   sandboxRoot: string,
   reason: StopReason,
 ): Promise<{ claimed: boolean; at: string }> {
-  return withTableLock(sandboxRoot, async () => {
+  return withBudgetLock(sandboxRoot, async () => {
     const budget = await readBudget(sandboxRoot).catch(() => null);
     if (!budget) return { claimed: false, at: new Date().toISOString() };
     if (budget.stop_steer_at) return { claimed: false, at: budget.stop_steer_at };
@@ -5332,7 +5583,7 @@ export async function markStopSteer(
 
 /** Drop the stop clock when the swarm is back under both limits (a raised cap). */
 export async function clearStopSteer(sandboxRoot: string): Promise<void> {
-  await withTableLock(sandboxRoot, async () => {
+  await withBudgetLock(sandboxRoot, async () => {
     const budget = await readBudget(sandboxRoot).catch(() => null);
     if (!budget?.stop_steer_at) return;
     delete budget.stop_steer_at;
@@ -5355,7 +5606,7 @@ export async function harnessStop(
   options: { verify?: boolean } = {},
 ): Promise<{ created: boolean; sentinel: string; stale?: true }> {
   const sentinel = sentinelPath(sandboxRoot);
-  return withTableLock(sandboxRoot, async () => {
+  return withBudgetLock(sandboxRoot, async () => {
     if (await swarmDoneExists(sandboxRoot)) return { created: false, sentinel };
     if (options.verify) {
       const budget = await readBudget(sandboxRoot).catch(() => null);
@@ -5476,6 +5727,18 @@ export function postIsFor(to: string, agentId: string, team: ReadonlyArray<{ id:
   return !team.some((m) => m.id.toLowerCase() !== me && named(m));
 }
 
+/**
+ * A harness announcement to everyone that is news for whoever looks, not a reason to wake: the catalogue's revision
+ * posts. In the run sf4406b 51 of them went to all eight seats, each waking every waiting seat for a full turn at
+ * 55,000 to 150,000 tokens; a third to a half of all waits returned within two seconds. The post is still delivered
+ * with the next inbox or wait that returns for another reason.
+ */
+export function quietAnnouncement(post: { from: string; to: string; body: string }): boolean {
+  if (post.from !== SYSTEM_AGENT) return false;
+  if (!/^\s*(all|everyone|team)?\s*$/i.test(post.to ?? "")) return false;
+  return /^Catalogue revision \d+\b/.test(post.body.trimStart());
+}
+
 export const WAIT_MAX_SECONDS = 300;
 export const WAIT_POLL_MS = 500;
 
@@ -5549,7 +5812,7 @@ async function waitLoop(
           if (!(n > (seen[thread] ?? 0) && n <= id)) continue;
           const post = await readPost(file).catch(() => null);
           // A post that cannot be read is not known to be someone else's.
-          if (!post || postIsFor(post.to, ctx.agentId, team)) {
+          if (!post || (postIsFor(post.to, ctx.agentId, team) && !quietAnnouncement(post))) {
             forMe = true;
             break;
           }
@@ -6067,6 +6330,15 @@ export const TOOL_SCRIPT_MAX_BYTES = 64 * 1024;
 export const TOOL_OUTPUT_MAX_BYTES = 64 * 1024;
 /** Where the harness keeps the whole output of a call whose result reached the model as a prefix. */
 export const TOOL_OUTPUT_REL = "tool-output";
+/**
+ * How long a forged tool's call reads its pipes after the tool's own process
+ * has ended and its group was killed. What is still holding them then left
+ * the group (setsid) and is not waited on: the call used to end only when
+ * every holder of its stdout closed it, so a 2 s tool whose child started its
+ * own session returned after that child's 12 s, and one that never ended hung
+ * the call.
+ */
+export const TOOL_PIPE_DRAIN_MS = 1_000;
 
 /** A whole output kept on disk, as the trace and the model's result name it. */
 export type FullOutputRef = {
@@ -6077,6 +6349,11 @@ export type FullOutputRef = {
   sha256: string;
   /** Set when the file could not be written whole; the prefix the model saw is still on the trace. */
   write_error?: string;
+  /**
+   * Set when the output was larger than the keep bound: the file holds its first and last part with a line between them
+   * that says so, `bytes` and `sha256` are the file's, and these are the whole output's (which is kept nowhere).
+   */
+  cut?: { whole_bytes: number; whole_sha256: string; head_bytes: number; tail_bytes: number };
 };
 
 function fmtBytes(n: number): string {
@@ -6124,25 +6401,64 @@ export async function keepToolOutput(sandboxRoot: string, rel: string, data: Buf
  * tool past 50 KB) into the sandbox, streamed: the file is the record and
  * may be far larger than memory should hold.
  */
-export async function keepToolOutputFromFile(sandboxRoot: string, rel: string, source: string): Promise<FullOutputRef> {
-  const hash = createHash("sha256");
+export async function keepToolOutputFromFile(sandboxRoot: string, rel: string, source: string, keepMax: number = shellKeepMaxBytes()): Promise<FullOutputRef> {
+  const whole = createHash("sha256");
+  const kept = createHash("sha256");
   let bytes = 0;
   let lines = 0;
+  let written = 0;
+  const half = Math.max(1, Math.floor(keepMax / 2));
+  // Past the head's half the newest bytes are held, at most a half of the bound, and written last.
+  let tail: Buffer[] = [];
+  let tailBytes = 0;
   const target = join(sandboxRoot, rel);
   await mkdir(dirname(target), { recursive: true });
   const out = await open(target, "w");
+  const put = async (b: Buffer) => {
+    if (!b.length) return;
+    kept.update(b);
+    written += b.length;
+    await out.write(b);
+  };
   try {
     for await (const chunk of createReadStream(source)) {
       const buffer = chunk as Buffer;
-      hash.update(buffer);
+      whole.update(buffer);
       bytes += buffer.length;
       lines += countNewlines(buffer);
-      await out.write(buffer);
+      const room = half - written;
+      if (room > 0) await put(buffer.subarray(0, room));
+      const rest = room > 0 ? buffer.subarray(room) : buffer;
+      if (!rest.length) continue;
+      tail.push(rest);
+      tailBytes += rest.length;
+      while (tail.length > 1 && tailBytes - tail[0]!.length >= half) tailBytes -= tail.shift()!.length;
     }
+    const headBytes = written;
+    if (bytes <= keepMax) {
+      for (const b of tail) await put(b);
+      return { path: rel, bytes, lines, sha256: kept.digest("hex") };
+    }
+    let last = Buffer.concat(tail);
+    tail = [];
+    if (last.length > half) last = last.subarray(last.length - half);
+    const wholeSha = whole.digest("hex");
+    await put(Buffer.from(`\n[... ${bytes - headBytes - last.length} bytes of this output are not kept: it was ${bytes} bytes (sha256 ${wholeSha}), more than the ${keepMax} a shell's output is kept to (SWARM_SHELL_KEEP_MAX_BYTES). Above is its first ${headBytes} bytes, below its last ${last.length}. Run what wrote it as a job (job_run) to have its whole output sealed. ...]\n`, "utf8"));
+    await put(last);
+    return { path: rel, bytes: written, lines, sha256: kept.digest("hex"), cut: { whole_bytes: bytes, whole_sha256: wholeSha, head_bytes: headBytes, tail_bytes: last.length } };
   } finally {
     await out.close();
   }
-  return { path: rel, bytes, lines, sha256: hash.digest("hex") };
+}
+
+/**
+ * How much of a seat's shell output is kept (SWARM_SHELL_KEEP_MAX_BYTES, 64 MiB): its first and last half of that.
+ * Four kept outputs of one run were 170 to 202 MB each, and every store sweep read them. A job's output is not bounded
+ * here: it is sealed whole.
+ */
+export function shellKeepMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_SHELL_KEEP_MAX_BYTES);
+  return Number.isFinite(n) && n >= 4096 ? Math.floor(n) : 64 * 1024 * 1024;
 }
 
 /** The line a prefix result ends with, so the model knows what it has and where the rest is. */
@@ -6179,7 +6495,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "post", "inbox", "wait", "claim_file", "release_file", "claims", "list_team", "budget",
   "file_history", "file_restore", "file_diff", "thread_open", "thread_join", "done",
   "playwright", "browser_check", "make_tool", "tools", "system", "inputs", "name", "record", "ledger",
-  "attest", "dispute",
+  "attest", "dispute", "record_finding", "record_answer", "record_coverage", "record_limitation", "record_absence", "record_candidate",
+  // the record tools a seat is offered (B2), an answer format sighted in a result (B5), a pack added to a live run (E7)
+  "record_tools", "format_sighted", "pack_added",
   // the harness's own trace events: a forged tool with one of these names
   // would land its calls under the same name and be counted as the event
   "agent_start", "agent_stop", "thinking", "claim_violation", "inputs_guard", "inputs_violation",
@@ -6196,6 +6514,10 @@ export const TOOL_RESERVED_NAMES = new Set([
   // The keeper restarting the collector, an operator's own command or
   // console action, and the console opening an artifact with its scripts.
   "collector_restarted", "operator_action", "artifact_scripts",
+  // A seat's shell call past its limit, its images left out of a model call and the cap a provider set, a card shown with a tool's
+  // result, a seat silent in one call (the watchdog), and the hub's heap past three quarters of its limit.
+  "shell_timeout", "image_cap", "images_left_out", "skill_card", "call_stalled", "hub_memory_high",
+  "seat_down", "seat_relaunched", "seat_dead", "all_agents_dead", "answer_too_large", "image_scaled", "hub_health", "hub_heap_snapshot", "hub_recycled",
   // A long command run again pointed at its kept output, a seat stopped
   // before a model call, a ledger correction, the operator's --notify hook,
   // the hub's history quota and a connection refused its seat token; a
@@ -6205,7 +6527,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   // hypothesis), its hash on the trace (HARNESS_RECORD_TOOL).
   "harness_record",
   // Tool jobs in worker VMs and the catalogue they grow (scripts/job-service.ts).
-  "job_run", "job_status", "catalog_request",
+  "job_run", "job_status", "store_find", "jobs", "image_crop", "catalog_request",
   // The hub's note of a seat's access to a sensitive output (scripts/sensitive-access.ts).
   "sensitive_access",
   // The host-side model gateway (scripts/model-gateway.ts).
@@ -6217,6 +6539,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and interpreted, the watchdog's regroup in an until-solved run, and the
   // operator's answer to a lead.
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
+  // The watchdog offering the leads of a holder stuck in one call, or freeing a silent seat's (leads.ts seatStallLeads).
+  "lead_stall",
   // The question register (extensions/questions.ts): its tools, and the premise register's (premises.ts).
   "question_open", "questions", "question_ask", "premise_propose",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
@@ -6286,7 +6610,21 @@ export type ForgedToolManifest = {
    * (`*` for any run of characters). Matched, never enforced.
    */
   use?: { extensions?: string[]; magic?: Array<{ offset: number; hex: string }>; names?: string[] };
+  /**
+   * What the tool is not for, and the tool that is (IMPROVEMENT-PLAN-2 D4):
+   * at most four lines, each `{what, use}` with `use` another tool of the
+   * library. Shown in the tool's description; tests/tool-not-for.test.ts
+   * holds every pack's lines to a tool that exists.
+   */
+  not_for?: Array<{ what: string; use: string }>;
 };
+
+/** A manifest's not_for lines, as its description shows them: "" when it has none. */
+export function notForWords(m: { not_for?: unknown }): string {
+  const rows = Array.isArray(m.not_for) ? m.not_for.filter((r): r is { what: string; use: string } => Boolean(r) && typeof r === "object" && typeof (r as { what?: unknown }).what === "string" && typeof (r as { use?: unknown }).use === "string") : [];
+  if (!rows.length) return "";
+  return ` Not for: ${rows.slice(0, 4).map((r) => `${r.what.slice(0, 160)} (use ${r.use.slice(0, 64)})`).join("; ")}.`;
+}
 
 export type ForgeToolSpec = {
   name: string;
@@ -7277,6 +7615,9 @@ export async function runForgedTool(
     const stderr = new StreamCapture(TOOL_OUTPUT_MAX_BYTES / 4, sandboxRoot, toolOutputRel(options.agentId, manifest.name, "err"));
     let timedOut = false;
     let settled = false;
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    let drain: NodeJS.Timeout | undefined;
+    let backstop: NodeJS.Timeout | undefined;
     // Its own process group, so a timeout or an abort kills the grandchildren
     // too — a `bash` entry that spawned `sleep` must not outlive the call.
     // Colour is forced off: a tool's stdout is data for a model, not a terminal.
@@ -7310,7 +7651,13 @@ export async function runForgedTool(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(drain);
+      clearTimeout(backstop);
       options.signal?.removeEventListener("abort", onAbort);
+      // A process that left the group may still hold the pipes: the call
+      // stops reading them and keeps what it already has.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       const fullOutput = stdout.close();
       const fullStderr = stderr.close();
       resolveRun({
@@ -7326,11 +7673,18 @@ export async function runForgedTool(
         ...(fullStderr ? { full_stderr: fullStderr } : {}),
       });
     };
+    const ended = () => finish(exited?.code ?? null, exited?.signal ?? null);
+    // Killed at the limit or on an abort: the call ends a drain after the
+    // kill even if the tool's own exit is never seen.
+    const kill = () => {
+      killTree();
+      backstop ??= setTimeout(ended, 2 * TOOL_PIPE_DRAIN_MS);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree();
+      kill();
     }, timeoutMs);
-    const onAbort = () => killTree();
+    const onAbort = () => kill();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -7338,7 +7692,16 @@ export async function runForgedTool(
       stderr.push(Buffer.from(`${manifest.runtime}: ${err.message}\n`));
       finish(null, null);
     });
-    child.on("close", (code, signal) => finish(code, signal));
+    // The tool's own process ended: what is left in its group ends with it,
+    // and the pipes are read for a short drain, not until every holder
+    // closes them (one that left the group with setsid may never).
+    child.on("exit", (code, signal) => {
+      exited = { code, signal };
+      clearTimeout(timer);
+      killTree();
+      drain ??= setTimeout(ended, TOOL_PIPE_DRAIN_MS);
+    });
+    child.on("close", (code, signal) => finish(exited?.code ?? code, exited?.signal ?? signal));
     child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(args ?? {}));
   });
@@ -8182,6 +8545,29 @@ export type LedgerEntry = {
   /** A coverage record, written by the hub: the planned routes of its questions that nothing under them examined. */
   not_examined?: Array<{ source: string; method: string; why: string }>;
   /** An external entry: where the material came from (LEDGER_SOURCE_CLASSES), written by the harness. */
+  /** An answer's qualifier (candidate, partial, the open part), apart from its value; and why a revision changed a value that was in the asked format. */
+  qualifier?: string;
+  value_changed_because?: string;
+  /** A negative that rests on the seat's own scanner: the control runs that show the scanner finds what it looks for. */
+  control?: Array<{ ref: string; found: string }>;
+  /** A negative that rests on pictures: the ones the recording seat was handed, and those of the same job and directory it was not. */
+  images_read?: string[];
+  images_unread?: Array<{ job: string; dir: string; total: number; unread: string[] }>;
+  /** A finding's carriers of a value, each decoded, undecodable or not examined. */
+  carriers?: Array<{ carrier: string; state: "decoded" | "undecodable" | "not_examined"; why: string }>;
+  /**
+   * An answer's or a finding's candidate values beside its value: each still
+   * open, ruled out by a machine check it names (by: job:<id>/<path> or
+   * E-<seq>), or a decoy (a payload that declares itself fake, a test or a
+   * vendor's sample). A revision carries them; only a check removes one.
+   */
+  candidates?: Array<{ value: string; state: "open" | "ruled_out" | "decoy"; why: string; by?: string }>;
+  /** An answer's: the carriers its value could be in, by name; "nothing open" and established wait for a carrier-table row for each. */
+  carrier_names?: string[];
+  /** A finding's: what in the artefact declares it fake, a test or a vendor's sample (a decoy candidate). */
+  decoy?: string;
+  /** An answer's whose value rests on a decoy: the machine check that shows it is the answer all the same. */
+  decoy_check?: { by: string; why: string };
   source_class?: (typeof LEDGER_SOURCE_CLASSES)[number];
   /** An external entry: who supplied it, when, from where, its sha256, what it may be used for (and, for a capture, its grant and request). */
   provenance?: { supplied_by: string; at: string; from: string; sha256?: string; permitted_use: string } & Record<string, unknown>;
@@ -8276,6 +8662,19 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
     ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
+    // An answer's qualifier and why its value changed, a negative's control and the images read and not read for it, a
+    // finding's carriers: each only when present, so an entry from before them has the core it always had.
+    ...(e.qualifier ? { qualifier: e.qualifier } : {}),
+    ...(e.value_changed_because ? { value_changed_because: e.value_changed_because } : {}),
+    ...(e.control?.length ? { control: e.control.map((c) => ({ ref: c.ref, found: c.found })) } : {}),
+    ...(e.images_read?.length ? { images_read: e.images_read } : {}),
+    ...(e.images_unread?.length ? { images_unread: e.images_unread.map((x) => ({ job: x.job, dir: x.dir, total: x.total, unread: x.unread })) } : {}),
+    ...(e.carriers?.length ? { carriers: e.carriers.map((c) => ({ carrier: c.carrier, state: c.state, why: c.why })) } : {}),
+    // A record's candidates, an answer's carrier names and decoy check, a finding's decoy mark: each only when present.
+    ...(e.candidates?.length ? { candidates: e.candidates.map((c) => ({ value: c.value, state: c.state, why: c.why, ...(c.by ? { by: c.by } : {}) })) } : {}),
+    ...(e.carrier_names?.length ? { carrier_names: e.carrier_names } : {}),
+    ...(e.decoy ? { decoy: e.decoy } : {}),
+    ...(e.decoy_check ? { decoy_check: { by: e.decoy_check.by, why: e.decoy_check.why } } : {}),
   };
 }
 

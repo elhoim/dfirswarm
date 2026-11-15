@@ -1,0 +1,163 @@
+/**
+ * References in a tool job's arguments (IMPROVEMENT-PLAN-2 item D4). A seat
+ * cites a job's file as `job:<id>/<path>` everywhere else, and in eight runs
+ * it gave that form to tools as a path (eleven jobs of one run failed on
+ * "no such file"), wrote `$OUT/x` where one tool wanted a relative name, and
+ * learned each tool's dialect by its refusals. No pack tool reads a
+ * reference itself, so the job service does it for all of them: an argument
+ * that is wholly a reference to a sealed file or directory is replaced by
+ * the path the worker sees it at, `$OUT` and `${OUT}` at the head of an
+ * argument are the job's output directory, and a reference that names
+ * nothing is refused before the job runs, with the form that works.
+ *
+ * Only a whole string is read as a reference: a reference inside a longer
+ * text (a note, a pattern) is left alone.
+ */
+import { existsSync, lstatSync } from "node:fs";
+import { join, normalize } from "node:path";
+import { elsewhereWords } from "./store-find.ts";
+import { eachOf, type EachSpec } from "./tool-each.ts";
+
+/** One argument that was a reference, where it was, and what it became. */
+export type ArgRef = { at: string; from: string; to: string; object: string };
+
+/**
+ * A refusal; `missing` names the sealed job or import and the path in it that is not there, for the
+ * caller to say where that path is instead (store-find.ts elsewhereWords: the job that holds it, the
+ * nearest names, store_find), which needs the store's indexes and so is not done here.
+ */
+export type ArgRefsResult = { ok: true; args: Record<string, unknown>; resolved: ArgRef[] } | { ok: false; reason: string; missing?: { kind: "job" | "import"; id: string; rel: string } };
+
+/** What the service knows of a job: its state, or undefined when the run has no such job. */
+export type JobStateOf = (id: string) => string | undefined;
+
+const JOB = /^job:(j\d{6})(?:\/(.*))?$/s;
+const IMPORT = /^import:([a-z0-9-]{1,64})(?:\/(.*))?$/s;
+const INPUT = /^input:(.+)$/s;
+const OUT = /^(?:\$OUT|\$\{OUT\})(\/.*)?$/s;
+
+/** A path inside an object: no parent step, no absolute path, no NUL; "" for the object itself. */
+function inside(rel: string | undefined): string | null {
+  const r = (rel ?? "").replace(/^\/+/, "");
+  if (!r) return "";
+  if (r.includes("\0")) return null;
+  const n = normalize(r).replace(/\/+$/, "");
+  if (n === ".." || n.startsWith("../") || n.startsWith("/")) return null;
+  return n === "." ? "" : n;
+}
+
+function shape(abs: string): "file" | "dir" | null {
+  try {
+    const st = lstatSync(abs);
+    return st.isFile() ? "file" : st.isDirectory() ? "dir" : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The arguments with every whole-string reference replaced by its
+ * run-relative path, and `$OUT` / `${OUT}` at a string's head by `{OUT}`
+ * (which the service makes the job's output directory when it runs); or the
+ * refusal for the first reference that names nothing. `resolved` lists what
+ * was replaced, for the job's record and its scope.
+ */
+export function resolveToolArgs(S: string, tool: string, args: Record<string, unknown>, jobState: JobStateOf): ArgRefsResult {
+  const resolved: ArgRef[] = [];
+  let refusal: string | null = null;
+  let missing: { kind: "job" | "import"; id: string; rel: string } | undefined;
+  const refuse = (at: string, text: string, what?: { kind: "job" | "import"; id: string; rel: string }): string => {
+    if (refusal === null && what) missing = what;
+    refusal ??= `tool ${tool}: ${at} ${text}`;
+    return "";
+  };
+  const one = (v: string, at: string): string => {
+    const out = OUT.exec(v);
+    if (out) return `{OUT}${out[1] ?? ""}`;
+    const j = JOB.exec(v);
+    const i = j ? null : IMPORT.exec(v);
+    if (j || i) {
+      const kind = j ? "job" : "import";
+      const id = (j ?? i)![1]!;
+      // A seat names a job's file from its listing, where it stands under out/: both forms name the same file.
+      const rel = inside(((j ?? i)![2] ?? "").replace(/^out(\/|$)/, ""));
+      if (rel === null) return refuse(at, `is ${JSON.stringify(v.slice(0, 200))}: the path inside a ${kind} has no parent step`);
+      if (j) {
+        const state = jobState(id);
+        if (state === undefined) return refuse(at, `names ${kind}:${id}, and this run has no job ${id} (jobs lists them)`);
+        if (state !== "committed") return refuse(at, `names job:${id}, whose output is not sealed yet (it is ${state}): a tool reads a job's files once job_status says it is committed`);
+      }
+      const base = j ? `store/jobs/${id}/out` : `store/imports/${id}/out`;
+      const path = rel ? `${base}/${rel}` : base;
+      if (!shape(join(S, path))) return refuse(at, `names ${kind}:${id}${rel ? `/${rel}` : ""}, and ${kind} ${id} has no ${rel || "output"} (${j ? `job_status ${id}` : "the board's post of it"} lists its files; a name is written as the listing has it)`, rel ? { kind, id, rel } : undefined);
+      resolved.push({ at, from: v, to: path, object: `${kind}:${id}` });
+      return path;
+    }
+    const inp = INPUT.exec(v);
+    if (inp) {
+      const rel = inside(inp[1]);
+      if (rel === null || rel === "") return refuse(at, `is ${JSON.stringify(v.slice(0, 200))}: an input is input:<its path under inputs/>`);
+      const path = `inputs/${rel}`;
+      if (!shape(join(S, path))) return refuse(at, `names input:${rel}, and the run has no inputs/${rel} (inputs.json lists the inputs by path)`);
+      resolved.push({ at, from: v, to: path, object: `input:${rel}` });
+      return path;
+    }
+    return v;
+  };
+  const walk = (v: unknown, at: string, depth: number): unknown => {
+    if (typeof v === "string") return one(v, at);
+    if (depth > 8) return v;
+    if (Array.isArray(v)) return v.map((x, k) => walk(x, `${at}[${k}]`, depth + 1));
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, `${at}.${k}`, depth + 1)]));
+    return v;
+  };
+  const out = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, walk(v, k, 0)]));
+  if (refusal) return { ok: false, reason: refusal, ...(missing ? { missing } : {}) };
+  return { ok: true, args: out, resolved };
+}
+
+/** What a job's answer says of the references it was given, in one sentence; "" when there were none. */
+export function argRefsWords(resolved: ArgRef[]): string {
+  if (!resolved.length) return "";
+  const shown = resolved.slice(0, 3).map((r) => `${r.at}: ${r.from} is ${r.to}`);
+  return `The tool was given ${resolved.length === 1 ? "the path of the reference" : "the paths of the references"} in its arguments (${shown.join("; ")}${resolved.length > 3 ? `; and ${resolved.length - 3} more` : ""}).`;
+}
+
+/** A job of the run as a seat's own directory shows it: sealed (its manifest is there), under way, or none. */
+function storeJobState(S: string): JobStateOf {
+  return (id) => (existsSync(join(S, "store", "jobs", id, "manifest.json")) ? "committed" : existsSync(join(S, "store", "jobs", id)) ? "not sealed yet" : undefined);
+}
+
+/** The arguments with `{OUT}` made `to` wherever a string holds it. */
+export function withOut(args: Record<string, unknown>, to: string): Record<string, unknown> {
+  const sub = (v: unknown): unknown => (typeof v === "string" ? v.split("{OUT}").join(to) : Array.isArray(v) ? v.map(sub) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, sub(x)])) : v);
+  return sub(args) as Record<string, unknown>;
+}
+
+export type DirectArgs = { ok: true; args: Record<string, unknown>; resolved: ArgRef[]; each: EachSpec | null } | { ok: false; reason: string };
+
+/**
+ * A pack tool called directly, as a Pi tool in the seat, given what job_run
+ * gives it (IMPROVEMENT-PLAN-2 D4): a required parameter that is missing is
+ * refused by its name; a whole argument that is a reference (job:, import:,
+ * input:) becomes the path it names, and one that names nothing is refused
+ * with the form that works and where the path is instead (store-find.ts
+ * elsewhereWords); `$OUT`, `${OUT}` and `{OUT}` at an argument's head are
+ * the seat's own directory (work/<id>/), where a direct call writes; and a
+ * directory given to a one-file reader is run once per file it reads there
+ * (tool-each.ts), each = the plan. These ran only on the job_run path, and a
+ * tool called directly read `job:j000003/x` as a file name.
+ */
+export async function directToolArgs(S: string, agentId: string, tool: string, args: Record<string, unknown>, man: { params?: Record<string, { type?: string; required?: boolean; description?: string }>; use?: unknown; description?: string }): Promise<DirectArgs> {
+  for (const [key, p] of Object.entries(man.params ?? {})) if (p && typeof p === "object" && p.required && (args[key] === undefined || args[key] === null)) return { ok: false, reason: `tool ${tool} needs ${key}` };
+  const refs = resolveToolArgs(S, tool, args, storeJobState(S));
+  if (!refs.ok) {
+    const more = refs.missing ? await elsewhereWords(S, refs.missing.kind, refs.missing.id, refs.missing.rel).catch(() => "") : "";
+    return { ok: false, reason: more ? `${refs.reason}; ${more}` : refs.reason };
+  }
+  const own = /^[a-z][a-z0-9_-]{0,31}$/.test(agentId) ? `work/${agentId}` : "work";
+  const out = withOut(refs.args, own);
+  const each = eachOf(S, tool, out, man as Parameters<typeof eachOf>[3]);
+  if (!each.ok) return { ok: false, reason: each.reason };
+  return { ok: true, args: out, resolved: refs.resolved, each: each.each };
+}

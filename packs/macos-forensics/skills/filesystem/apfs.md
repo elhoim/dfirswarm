@@ -3,6 +3,7 @@ id: filesystem/apfs
 title: APFS, snapshots, and what deletion means now
 when: Establish acquired volumes, snapshots, timestamps and recovery limits.
 needs: []
+card: apfs_inventory ({"path": "<container image>", "offset": <bytes>}) lists the container and volumes (no snapshot, extraction or unlock); a process left behind makes it partial. Snapshots, Fusion, T2 listed unsupported are build limits: write "snapshot coverage unavailable", not "no snapshots". The System volume does not hold the user's home. Does not show: unacquired space or inaccessible volumes.
 tools: [apfs_inventory]
 requires_host: [fsapfsinfo]
 ---

@@ -3,6 +3,7 @@ id: google/workspace-access
 title: Workspace grants, delegation, sharing and forwarding
 when: Reconstruct delegated access, Drive sharing or mail forwarding from Workspace evidence.
 needs: [logs/what-exists]
+card: cloud_normalise {"path": "<Reports API activities>", "provider": "workspace"}: topic_hints are this tool's words, not Google's; read parameter names from the export. A token audit export does not inventory durable access: domain-wide delegation and Apps Script authorisation are separate state. Never test a recovered token. Does not show: that a grant, share or forward was used, or later state.
 tools: [cloud_normalise]
 requires_host: []
 ---

@@ -3,6 +3,7 @@ id: memory/hibernation-pagefile
 title: Hibernation, pagefile
 when: hiberfil.sys, pagefile.sys, swap.
 needs: [memory/windows]
+card: evtx_carve {"path": "<pagefile.sys>"} and mam_scan {"path": "<pagefile.sys>"} read stored bytes: a compressed hibernation file is covered only where readable (no decompressor). A pagefile hit is a file offset; a structure split across pages is not whole. Date a hibernation file by its header and power-state records; it need not predate a cleanup. Does not show: a hit's time, address or process.
 tools: [evtx_carve, mam_scan]
 requires_host: [vol]
 ---

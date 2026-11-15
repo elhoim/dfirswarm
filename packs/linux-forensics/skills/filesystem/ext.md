@@ -3,6 +3,7 @@ id: filesystem/ext
 title: ext metadata and timestamps
 when: Interpreting ext inode times and their relationships, with explicit limits.
 needs: []
+card: timestamp_decode {"value": "<raw field>"} lists every epoch's reading: the inode's format decides, not plausibility. Read the inode size first, then the inode (debugfs, never -w; istat), keeping raw field, precision and mount options. crtime after mtime fits a copy, restore, clock error or edit; ctime after mtime is a lead, not timestomping. Does not show: who set a time, why, or that it changed.
 tools: [timestamp_decode]
 requires_host: [debugfs, istat]
 ---

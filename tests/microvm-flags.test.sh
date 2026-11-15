@@ -210,6 +210,8 @@ sbx="$(sandbox_of "$out")"
 [[ "$(jq -r '.guard' "$sbx/inputs.json")" == "microvm" ]] || fail "inputs.json does not say the VM holds the evidence"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "bind" ]] || fail "inputs.json does not say the evidence was used in place"
 [[ "$(reg vm-ev '.isolation.disk_mib')" == "8192" ]] || fail "the VM disk size is not recorded"
+# A prepared run boots no VM and no worker: it names no launcher for another start's capacity check to count.
+[[ "$(reg vm-ev '.kickoff')" == "null" ]] || fail "a --no-start run's record names a launcher to count: $(reg vm-ev '.kickoff')"
 [[ "$(jq -r '.files | length' "$sbx/inputs.json")" == "2" ]] || fail "the manifest does not list both files"
 # No --quarantine was given, and each seat's holes are no-exec in its VM all
 # the same: the record a malware entry's check reads says so.
@@ -508,6 +510,27 @@ out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pa
 out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label skill-release-vm-default)"
 [[ -z "$(jq -r '.env.SWARM_SKILL_RELEASE // empty' "$(sandbox_of "$out")/vm-spec.json")" ]] || fail "a default run set SWARM_SKILL_RELEASE: the seats' own default (compaction) is the one that applies"
 pass "--skill-release is validated, recorded (compaction by default), said at kickoff, and reaches the VMs; with no pack or no hand-off it is said to do nothing"
+
+# --- the summary begun at the notice line (SWARM_COMPACT_PRESUMMARY): the operator's switch reaches the VMs ---------
+out="$(export SWARM_COMPACT_PRESUMMARY=off; start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label presummary-vm)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a VM kickoff with SWARM_COMPACT_PRESUMMARY=off exited $rc: $out"
+[[ "$(jq -r '.env.SWARM_COMPACT_PRESUMMARY // empty' "$(sandbox_of "$out")/vm-spec.json")" == "off" ]] || fail "the VMs' environment does not carry SWARM_COMPACT_PRESUMMARY: $(jq -c '.env' "$(sandbox_of "$out")/vm-spec.json")"
+out="$(unset SWARM_COMPACT_PRESUMMARY; start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label presummary-vm-default)"
+[[ -z "$(jq -r '.env.SWARM_COMPACT_PRESUMMARY // empty' "$(sandbox_of "$out")/vm-spec.json")" ]] || fail "a run with no SWARM_COMPACT_PRESUMMARY set it in the VMs: the seats' own default (on) is the one that applies"
+pass "SWARM_COMPACT_PRESUMMARY reaches the VMs when the operator sets it, and only then"
+
+# --- the packs' tools without their notes (--pack-skills off, the skills experiment's arm) ---
+out="$(start --isolation host --pack keyed-pack --pack-skills off --label pack-skills-off)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--pack-skills off exited $rc: $out"
+[[ "$(reg pack-skills-off '.pack_skills')" == "off" ]] || fail "the record does not say pack_skills off: $(reg pack-skills-off '.pack_skills')"
+grep -q "^Skills:       off (--pack-skills off): the packs' tools and recipes only; no index, no skill tool, no cards$" <<<"$out" || fail "the kickoff does not say the notes are off: $out"
+grep -q 'Skills carried by this run' "$(sandbox_of "$out")/.pi/APPEND_SYSTEM.md" 2>/dev/null && fail "the prompt carries a skill index under --pack-skills off"
+[[ "$(reg skill-release-default '.pack_skills')" == "on" ]] || fail "the default record should say pack_skills on"
+out="$(start --isolation host --pack keyed-pack --pack-skills maybe --label pack-skills-bad)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'BLOCKER: --pack-skills is on or off, got maybe' <<<"$out" || fail "a wrong --pack-skills was not refused (rc $rc): $out"
+out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --pack-skills off --label pack-skills-vm)"; rc=$?
+[[ "$(jq -r '.env.SWARM_PACK_SKILLS // empty' "$(sandbox_of "$out")/vm-spec.json")" == "off" ]] || fail "the VMs' environment does not carry SWARM_PACK_SKILLS: $(jq -c '.env' "$(sandbox_of "$out")/vm-spec.json")"
+pass "--pack-skills off is validated, recorded, said at kickoff, leaves the index out of the prompt and reaches the VMs"
 
 # --- a credential cannot ride in on --env; a subscription needs an explicit yes ---------
 out="$(start --isolation microvm --env FOO_API_KEY=abc --label bad-env)"; rc=$?

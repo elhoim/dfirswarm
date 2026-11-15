@@ -3,6 +3,7 @@ id: filesystem/recycle-bin
 title: Recycle Bin $I
 when: Original path, size, time.
 needs: [filesystem/deleted]
+card: recyclebin_i {"path": "<directory of $I files, named by the SID>"}: read status and counts first; a truncated record is never a complete path. bin_directory_sid is whose bin got the item, not who deleted it; deleted_at is the move to the bin, not the emptying. r_file names the $R only if you extracted it beside the $I. Does not show: where the content is now; no $I is no proof of no deletion.
 tools: [recyclebin_i, usn_journal]
 requires_host: []
 ---

@@ -29,6 +29,7 @@ import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as Q from "./questions.ts";
 import * as T from "./toolchain.ts";
+import { boundLocalAnswer, joinLedgerPages } from "./reply-bound.ts";
 
 /** Where the hub listens, as the VM sees it; unset on the host. */
 export function boardSocket(env: NodeJS.ProcessEnv = process.env): string {
@@ -333,9 +334,26 @@ type AnyFn = (...args: any[]) => Promise<any>;
 function remote<F extends AnyFn>(name: string, local: F): F {
   return (async (...args: Parameters<F>) => {
     const socket = boardSocket();
-    if (!socket) return local(...args);
+    if (!socket) return boundHere(name, args, await local(...args));
     return callBoard(socket, name, args);
   }) as F;
+}
+
+/**
+ * A host run's answer, held to the wall the hub holds a VM's to
+ * (reply-bound.ts): past it, cut, and the whole kept among this seat's own
+ * kept outputs and named. The sandbox is the call's first argument (a
+ * context, or the run's directory).
+ */
+function boundHere<T>(fn: string, args: unknown[], value: T): Promise<T> {
+  const first = args[0] as { sandboxRoot?: unknown; agentId?: unknown } | string | null | undefined;
+  const sandbox = typeof first === "string" ? first : typeof first?.sandboxRoot === "string" ? first.sandboxRoot : null;
+  if (!sandbox) return Promise.resolve(value);
+  const agent = typeof first === "object" && typeof first?.agentId === "string" ? first.agentId : process.env.AGENT_ID || "unknown";
+  return boundLocalAnswer(fn, value, async (text) => {
+    const kept = await P.keepToolOutput(sandbox, P.toolOutputRel(agent, `answer-${fn}`, "text"), text);
+    return kept.write_error ? { write_error: kept.write_error } : { path: kept.path, bytes: kept.bytes, sha256: kept.sha256 };
+  });
 }
 
 /**
@@ -359,6 +377,7 @@ export const REMOTE_FUNCTIONS = [
   "heldBy",
   "jobStatus",
   "jobSubmit",
+  "jobsList",
   "leadClaim",
   "leadClose",
   "leadConfirm",
@@ -400,6 +419,7 @@ export const REMOTE_FUNCTIONS = [
   "releaseFile",
   "restoreFileVersion",
   "routeReview",
+  "storeFind",
   "swarmDoneExists",
   "systemPost",
   "threadJoin",
@@ -520,11 +540,24 @@ export async function ownFileWire(
 
 export type OwnFileWire = { bytes_b64?: string; hash_only?: { sha256: string; bytes: number }; missing?: true };
 
+/**
+ * Whether the hub said this seat's history quota is spent (`not_stored` on a
+ * revision it kept by its hash): from then on a revision of a file in the
+ * seat's own directory goes as its hash, not its bytes. On the run s082123 a
+ * seat sent about a hundred 11 MB files whole, as base64, after its quota was
+ * full, and the hub hashed each and threw the bytes away.
+ */
+const historySpent = new Set<string>();
 export const recordFileVersion: typeof P.recordFileVersion = async (sandboxRoot, rawPath, agentId, options = {}) => {
   const socket = boardSocket();
   if (!socket) return P.recordFileVersion(sandboxRoot, rawPath, agentId, options);
-  const wire = options.bytes ? { bytes_b64: options.bytes.toString("base64") } : await ownFileWire(sandboxRoot, rawPath, agentId);
-  return (await callBoard(socket, "recordFileVersion", [sandboxRoot, rawPath, agentId, wire ?? null])) as Awaited<ReturnType<typeof P.recordFileVersion>>;
+  // Per run and seat: the quota is the run's hub's.
+  const seatKey = `${sandboxRoot}\u0000${agentId}`;
+  const spent = historySpent.has(seatKey);
+  const wire = options.bytes && !spent ? { bytes_b64: options.bytes.toString("base64") } : options.bytes ? { hash_only: { sha256: P.sha256Hex(options.bytes), bytes: options.bytes.byteLength } } : await ownFileWire(sandboxRoot, rawPath, agentId, spent ? 0 : P.HISTORY_STORE_MAX_BYTES);
+  const rec = (await callBoard(socket, "recordFileVersion", [sandboxRoot, rawPath, agentId, wire ?? null])) as Awaited<ReturnType<typeof P.recordFileVersion>> & { not_stored?: unknown };
+  if (rec && typeof rec.not_stored === "string" && rec.not_stored) historySpent.add(seatKey);
+  return rec;
 };
 
 /** What a VM may publish in one call: its bytes cross the hub link. */
@@ -549,7 +582,7 @@ export const publishFile: typeof P.publishFile = async (ctx, fromRaw, toRaw, opt
 
 export const fileDiff: typeof P.fileDiff = async (sandboxRoot, rawPath, fromRef, toRef, options = {}) => {
   const socket = boardSocket();
-  if (!socket) return P.fileDiff(sandboxRoot, rawPath, fromRef, toRef, options);
+  if (!socket) return boundHere("fileDiff", [sandboxRoot], await P.fileDiff(sandboxRoot, rawPath, fromRef, toRef, options));
   // The bytes on disk go with the call whenever a side is the disk (the
   // default right side is): the hub uses them for a file in a seat's own
   // directory, which it does not open, and its own read for any other.
@@ -630,7 +663,12 @@ export const heldBy = remote("heldBy", P.heldBy);
 export const listClaims = remote("listClaims", P.listClaims);
 export const listFileHistory = remote("listFileHistory", P.listFileHistory);
 export const listForgedTools = remote("listForgedTools", P.listForgedTools);
-export const listLedger = remote("listLedger", P.listLedger);
+/** The ledger's window, whole: past the answer wall the hub answers it in pages (reply-bound.ts ledgerPage), joined here. */
+export const listLedger: typeof P.listLedger = async (sandboxRoot, filter = {}) => {
+  const socket = boardSocket();
+  if (!socket) return boundHere("listLedger", [sandboxRoot, filter], await P.listLedger(sandboxRoot, filter));
+  return joinLedgerPages((cursor) => callBoard(socket, "listLedger", cursor ? [sandboxRoot, filter, cursor] : [sandboxRoot, filter]));
+};
 export const listTeam = remote("listTeam", P.listTeam);
 export const markDone = remote("markDone", P.markDone);
 export const markStopSteer = P.markStopSteer;
@@ -659,6 +697,9 @@ export const releaseAllOwned = remote("releaseAllOwned", P.releaseAllOwned);
 export const releaseFile = remote("releaseFile", P.releaseFile);
 export const swarmDoneExists = remote("swarmDoneExists", P.swarmDoneExists);
 export const systemPost = remote("systemPost", P.systemPost);
+/** Hub-only questions about the store and the job service (scripts/store-find.ts): with no hub there is no job service to ask. */
+export const storeFind = remote("storeFind", async (_root: string, _q: Record<string, unknown>) => ({ ok: false as const, reason: "store_find needs the run's hub (a microVM run with a job service)" }));
+export const jobsList = remote("jobsList", async (_root: string, _q: Record<string, unknown>) => ({ ok: false as const, reason: "jobs needs the run's hub (a microVM run with a job service)" }));
 export const threadJoin = remote("threadJoin", P.threadJoin);
 export const threadOpen = remote("threadOpen", P.threadOpen);
 export const updateToolchainRecord = remote("updateToolchainRecord", T.updateToolchainRecord);
@@ -670,7 +711,7 @@ export const updateToolchainRecord = remote("updateToolchainRecord", T.updateToo
  */
 export const waitForSwarmChange: typeof P.waitForSwarmChange = async (ctx, options = {}) => {
   const socket = boardSocket();
-  if (!socket) return P.waitForSwarmChange(ctx, options);
+  if (!socket) return boundHere("waitForSwarmChange", [ctx], await P.waitForSwarmChange(ctx, options));
   // A function does not cross a socket: the hub checks the lead register for this seat itself.
   const { signal, extraWake: _extraWake, ...rest } = options;
   const seconds = Math.min(Math.max(1, Math.round(rest.seconds ?? 60)), P.WAIT_MAX_SECONDS);

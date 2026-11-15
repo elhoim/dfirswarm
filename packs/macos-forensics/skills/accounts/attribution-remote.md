@@ -3,6 +3,7 @@ id: accounts/attribution-remote
 title: Attribution limits and remote access on a Mac
 when: Tie an action to an account or a person, or decide whether a session was remote.
 needs: []
+card: knowledgec_query rows and unified_log entries name an account, process or session, not a person; screen-on and foreground rows are device state, not presence. Rule out automatic login, a shared account, remote control and a background job. A partial knowledgec_query read goes on with after_start_raw and after_z_pk from resume. Does not show: who typed, or that a configured remote path was used.
 tools: [knowledgec_query, unified_log]
 requires_host: []
 ---

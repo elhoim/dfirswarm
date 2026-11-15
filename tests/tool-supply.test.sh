@@ -96,11 +96,20 @@ jq -e --arg h "$want" '.tool.source == "vendor source 1.0, sha256 abc" and .tool
 grep -q '"type":"material_added"' "$sb/store/journal.jsonl" || fail "no journal line"
 jq -e --arg h "$want" 'select(.kind == "external") | .source_class == "operator_supplied" and .provenance.tool.checked == [$h] and .provenance.tool.for == ["R-1", "L-1"] and .refs == ["import:mat-0001/finder"]' "$sb/ledger/entries.jsonl" >/dev/null || fail "the ledger: $(cat "$sb/ledger/entries.jsonl")"
 post="$(cat "$sb"/threads/main/*-system.md | grep 'TOOL SUPPLIED')" || fail "no board post"
-grep -q 'job_run with inputs \["import:mat-0001/finder"\]' <<<"$post" || fail "$post"
-grep -q 'Nothing in the store can be executed where it stands (sealed files have no execute bit)' <<<"$post" || fail "$post"
-grep -q 'executable temporary directory inside the job' <<<"$post" || fail "$post"
+grep -q 'job_run with programs \["import:mat-0001"\] (and inputs \["import:mat-0001/finder"\] when you declare them)' <<<"$post" || fail "$post"
+grep -q 'Nothing in the store or in a job.s $OUT can be executed where it stands (sealed files have no execute bit, $OUT is no-exec)' <<<"$post" || fail "$post"
+grep -q 'copies it into an executable directory in the worker' <<<"$post" || fail "$post"
 grep -q '"command":"tool-supply"' "$TMP/runs/operator-audit.jsonl" && grep -q '"command":"tool_supply_outcome"' "$TMP/runs/operator-audit.jsonl" || fail "the act is not on the operator's record"
 pass "a tool is sealed with its provenance, on the ledger, on the journal and on the board with the way to run it"
+
+echo "# supplied with nothing said of what it is for: recorded untested, and the seats are told so"
+grep -q 'NOTE: nothing says what this program is for (--provides CAP\[,CAP\]), so it was not tested' <<<"$out" || fail "no NOTE: $out"
+grep -q 'It is recorded as untested (supplied-capabilities.json), and the seats were told on the board that it is untested\.' <<<"$out" || fail "the NOTE does not say the seats were told: $out"
+untested_post="$(cat "$sb"/threads/main/*-system.md | grep 'SUPPLIED PROGRAM NOT TESTED: import:mat-0001')" || fail "no untested post on the board: $(cat "$sb"/threads/main/*-system.md)"
+grep -q 'was not run against a known answer (nothing said what it is for (no --provides))' <<<"$untested_post" || fail "$untested_post"
+grep -q 'says nothing about the evidence' <<<"$untested_post" || fail "$untested_post"
+jq -e '."mat-0001".untested == "nothing said what it is for (no --provides)"' "$sb/supplied-capabilities.json" >/dev/null || fail "not recorded untested: $(cat "$sb/supplied-capabilities.json")"
+pass "a tool supplied without --provides is recorded untested and the seats are told it is untested"
 
 echo "# listed"
 out="$(swarm tool-supply "$id" list)" || fail "list failed: $out"
@@ -135,7 +144,7 @@ cat > "$FAKE/node" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do
   if [[ "\$a" == tool-add ]]; then
-    printf '%s\n' '{"ok":true,"import":"mat-0002","mode":"material","class":"operator_supplied","files":[{"path":"finder","sha256":"x","bytes":1}],"manifest_sha256":"m","journal_seq":3,"entry":2,"permitted_use":"reference: x","complete":true}'
+    printf '%s\n' '{"ok":true,"import":"mat-0099","mode":"material","class":"operator_supplied","files":[{"path":"finder","sha256":"x","bytes":1}],"manifest_sha256":"m","journal_seq":3,"entry":2,"permitted_use":"reference: x","complete":true}'
     exit 0
   fi
 done
@@ -144,8 +153,23 @@ EOF
 chmod +x "$FAKE/node"
 out="$(PATH="$FAKE:$PATH" swarm tool-supply "$id" add "$TMP/supply/finder" --why "again" --source "s")" || fail "the stand-in hub's answer was refused: $out"
 grep -q "WARN: the run's hub did not record the tool's provenance" <<<"$out" || fail "no warning: $out"
-grep -q 'Added mat-0002 (operator_supplied' <<<"$out" || fail "$out"
+grep -q 'Added mat-0099 (operator_supplied' <<<"$out" || fail "$out"
 pass "a hub that does not know tools is said, not trusted"
+
+echo "# --provides: what the program is for is tested where there is a job service; without one it is said not to be tested"
+out="$(swarm material "$id" add "$TMP/supply/finder" --why "data" --provides qr-decode 2>&1)" && fail "--provides was taken for data: $out"
+grep -q -- '--provides is for tool-supply' <<<"$out" || fail "$out"
+out="$(swarm tool-supply "$id" add "$TMP/supply/finder" --why "a second finder" --source "vendor source 1.1" --provides 2>&1)" && fail "--provides with no capability was taken: $out"
+grep -q -- '--provides takes a capability list' <<<"$out" || fail "$out"
+printf '#!/bin/sh\necho scanning v2\n' > "$TMP/supply/finder2"
+rc=0; out="$(swarm tool-supply "$id" add "$TMP/supply/finder2" --why "a second finder" --source "vendor source 1.1" --provides qr-decode 2>&1)" || rc=$?
+[[ "$rc" -eq 4 ]] || fail "a supply with --provides on a run with no job service should exit 4 (sealed, not tested), got $rc: $out"
+grep -q 'it is sealed, and NOT tested. It is recorded as untested, what the kickoff found of qr-decode stands, and the seats were told on the board that it is untested' <<<"$out" || fail "a run with no job service did not say the program was not tested: $out"
+grep -q 'NOTE: nothing says what this program is for' <<<"$out" && fail "the no---provides note was printed with --provides: $out"
+imp="$(jq -r 'to_entries | map(select(.value.provides == ["qr-decode"])) | .[0].key // empty' "$sb/supplied-capabilities.json")"
+[[ -n "$imp" ]] && jq -e --arg i "$imp" '.[$i].untested == "the run has no hub with a job service to test it in"' "$sb/supplied-capabilities.json" >/dev/null || fail "not recorded untested: $(cat "$sb/supplied-capabilities.json")"
+cat "$sb"/threads/main/*-system.md | grep -q "SUPPLIED PROGRAM NOT TESTED: import:$imp was not run against a known answer (the run has no hub with a job service to test it in); it was supplied for qr-decode" || fail "the seats were not told: $(cat "$sb"/threads/main/*-system.md | grep 'NOT TESTED')"
+pass "--provides is tool-supply's, needs a capability, and a run with no job service exits 4: sealed, recorded untested, and the seats told"
 
 echo "# help"
 swarm help tool-supply | grep -q 'tool-supply <id> add PATH --why W --source TEXT' || fail "help tool-supply"

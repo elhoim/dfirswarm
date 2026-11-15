@@ -3,6 +3,7 @@ id: documents/external-and-active-content
 title: External targets, PDF actions and RTF objects
 when: A document has an external relationship, a PDF action marker or an RTF object.
 needs: []
+card: doc_probe ({"path": "<document>"}) resolves nothing: external_targets are targets, not fetches; never contact one. The whole target goes to doc-probe-values.jsonl only with {"write_values": true} in a secret_output job; cite its finding_id. PDF markers are name tokens: reachability is doc_structure's to read, and a zero count is not an absence. Does not show: fetch, execution or reachability.
 tools: [doc_probe, doc_structure]
 requires_host: []
 ---

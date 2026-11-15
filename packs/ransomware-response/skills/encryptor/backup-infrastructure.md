@@ -5,6 +5,7 @@ when: A backup server, immutable store, hypervisor or recovery setting was affec
 needs: []
 tools: [backup_destruction_correlate]
 requires_host: []
+card: backup_destruction_correlate reads audit and chain-check answers by reference ({"backup_audits": [...], "chain_checks": [...]}) and keeps a job's report apart from a chain missing its base. A stopped agent, a deleted catalogue or compromised admin does not show backups destroyed: check the objects for a rebuildable catalogue or offline or immutable copy. Does not show: that every copy is lost.
 ---
 
 Use only if a backup server, an immutable or versioned store, a hypervisor, network storage or a boot-recovery setting was affected. Not for the recovery inventory (`encryptor/destroyed-backups`).

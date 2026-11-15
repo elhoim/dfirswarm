@@ -3,6 +3,7 @@ id: execution/history
 title: Shell and client histories as evidence
 when: Reading bash, zsh, fish or client histories for what was typed.
 needs: []
+card: shell_history {"root": "<home or extracted root>"} carries locators and lengths only: read the text with {"write_commands": true} in a secret_output job. A file without times gives order only; user is unknown unless the evidence's etc/passwd gives that home to one account. An empty or missing file is a question, not a finding. Does not show: that a command ran or succeeded, or who typed it.
 tools: [shell_history]
 requires_host: []
 ---

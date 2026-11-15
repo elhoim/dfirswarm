@@ -304,9 +304,26 @@ test("the contract lists each pilot tool with its description and parameters and
   assert.ok(manifests.length >= 3, "the pilot pack has its tools");
   for (const m of manifests) {
     const params = Object.entries(m.params ?? {}).map(([name, p]) => `${name}${p.required ? "" : "?"}: ${p.type ?? "string"}`);
-    const line = `- \`${m.name}\` (${PILOT}): ${m.description.replace(/\s+/g, " ").trim()} Parameters: ${params.length ? params.join(", ") : "no params"}.`;
-    assert.ok(section.includes(line), `the section lacks the line of ${m.name}:\n${line}\n--- section ---\n${section}`);
+    const whole = m.description.replace(/\s+/g, " ").trim();
+    // In the contract: one line a tool (first sentence, parameter names). The whole is in PACK-TOOLS.md.
+    let about = whole.split(/(?<=[.:;])\s/)[0] ?? "";
+    if (about.length > 140) about = `${about.slice(0, 139)}\u2026`;
+    const names = Object.entries(m.params ?? {}).map(([name, p]) => `${name}${p.required ? "" : "?"}`);
+    // The catalogue is in PACK-TOOLS.md, one line a tool and then each whole; the contract names the tool by pack.
+    const line = `- \`${m.name}\` (${PILOT}): ${about} Parameters: ${names.length ? names.join(", ") : "none"}.`;
+    const catalogue = readFileSync(join(sandbox, "PACK-TOOLS.md"), "utf8");
+    assert.ok(catalogue.includes(line), `PACK-TOOLS.md lacks the line of ${m.name}:\n${line}`);
+    assert.ok(catalogue.indexOf(line) < catalogue.indexOf("## Each tool whole"), "the one-line catalogue comes first");
+    assert.ok(!section.includes(line), `the contract still carries the catalogue line of ${m.name}`);
+    assert.ok(section.includes(`\`${m.name}\``), `the section does not name ${m.name}`);
+    const fullLine = `- \`${m.name}\` (${PILOT}): ${whole} Parameters: ${params.length ? params.join(", ") : "no params"}.`;
+    assert.ok(catalogue.includes(fullLine), `PACK-TOOLS.md lacks ${m.name} whole`);
   }
+  assert.match(section, new RegExp(`\\n- ${PILOT} \\(${manifests.length}\\): `));
+  assert.match(section, /PACK-TOOLS\.md/);
+  assert.match(md, /^# Swarm contract\n\nThis file is about \d+ KB\. Its sections, in the order a seat needs them: /);
+  if (md.includes("\n## Job images\n")) assert.ok(at > md.indexOf("\n## Job images\n"), "after the job images");
+  assert.ok(section.length < manifests.length * 60 + 1500, `the section is ${section.length} characters for ${manifests.length} tools`);
   // Every pilot tool is on disk in the run for the job service to run, and none is named to Pi.
   for (const m of manifests) assert.ok(existsSync(join(sandbox, "tools", m.name, "manifest.json")), `${m.name} is not in the run`);
   const spec = JSON.parse(readFileSync(join(sandbox, "vm-spec.json"), "utf8")) as { env: Record<string, string> };

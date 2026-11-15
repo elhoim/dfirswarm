@@ -3,6 +3,7 @@ id: identity/grants
 title: Consents, app credentials and mailbox rules as durable state
 when: Consents, delegations, mailbox rules or account changes that can outlive a session.
 needs: [logs/what-exists]
+card: Run ual_parse {"path": "<audit export>", "notable_only": true} in a secret_output job for consents, signin_analyse for later sign-ins, cloud_normalise for directory and Workspace changes. A consent is a lead, not a grant: check its result and scopes. A removed session does not show a grant removed, and a configured rule is no proof it acted. Does not show: use of a grant or rule, or later state.
 tools: [ual_parse, signin_analyse, cloud_normalise]
 requires_host: []
 ---

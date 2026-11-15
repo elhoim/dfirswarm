@@ -3,6 +3,7 @@ id: volumes/luks
 title: LUKS volumes, headers and keyslots
 when: A volume, image or detached header may be LUKS.
 needs: []
+card: crypto_id ({"path": "<image>", "offset": <bytes>}) gives the signature and version; crypto_metadata (same arguments) gives the luksDump records, and unavailable is not an empty slot list. A slot is one unlock path, not a count of passwords or proof it opens the data; compare LUKS2's metadata copies. Never change slots or repair the header on the evidence. Does not show: who added a slot or when.
 tools: [crypto_id, crypto_metadata]
 requires_host: [cryptsetup]
 ---

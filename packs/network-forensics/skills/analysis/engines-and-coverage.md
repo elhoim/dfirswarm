@@ -3,6 +3,7 @@ id: analysis/engines-and-coverage
 title: Zeek and Suricata analysis, and its coverage
 when: A finding rests on what Zeek or Suricata produced, or on their silence.
 needs: []
+card: Take the receipt first: zeek_run {"dry_run": true} and suricata_run {"dry_run": true} read no capture. When rule_load.known is false no rule is shown loaded; a missing Zeek log is not a missing event (logs_requested_not_written). program_group.left_behind or unproven makes it partial; run with secret_output: true. Does not show: what another ruleset would, or that other traffic was benign.
 tools: [zeek_run, suricata_run]
 requires_host: []
 ---

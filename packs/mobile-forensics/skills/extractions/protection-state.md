@@ -3,6 +3,7 @@ id: extractions/protection-state
 title: Protected data and acquisition boundaries
 when: Data is missing, unreadable or encrypted: a gap or an absence?
 needs: []
+card: Lock state, passcode and keys come from the operator and acquisition log; silence means unknown. manifest_db {"path": "<backup dir>"}: encryption unknown is not unencrypted; an encrypted backup is not empty. Random-looking readable content is a coverage gap; feasibility is not authority: ask the operator, prescribe no bypass. Does not show: that unreadable data holds anything or was deleted.
 tools: [manifest_db]
 requires_host: []
 ---

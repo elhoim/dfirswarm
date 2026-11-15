@@ -3,6 +3,7 @@ id: exfil/counters
 title: What each byte counter measures
 when: You are about to quote or compare a byte count from pcap_summary or Zeek.
 needs: []
+card: pcap_summary bytes_original sums declared lengths (retransmissions included), bytes_captured what was kept; top_talkers counts sources only. Never compare counters of different definitions; whole-capture totals ignore host and port filters. zeek_run orig_bytes and resp_bytes are payload; the originator opened the connection and is not the internal side. Does not show: application data delivered.
 tools: [pcap_summary, zeek_run]
 requires_host: []
 ---

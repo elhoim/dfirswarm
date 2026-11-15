@@ -18,8 +18,8 @@
  * harness compares what the manifests wrote, as it does a recipe's
  * prefilter.
  */
-import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** What a tool's manifest says it reads. */
 export type ToolUse = { extensions?: string[]; magic?: Array<{ offset: number; hex: string }>; names?: string[] };
@@ -219,4 +219,139 @@ export async function libraryHint(sandbox: string, objects: HintObject[], o: { s
 /** Whether a command already runs a tool: it names the tool's directory, or the tool by its name as a word. */
 export function commandNames(command: string, tool: string): boolean {
   return command.includes(`tools/${tool}/`) || new RegExp(`(?<![\\w-])${tool.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(command);
+}
+
+/**
+ * How many tools one admission answer names. HINT_REPEAT_MS is how long the overlap hint (freshCoverage) leaves an item
+ * out; the library hint is tied to a seat's compaction cycle instead (shortHint, seatLibraryHint).
+ */
+export const HINT_TOOLS_MAX = 3;
+export const HINT_REPEAT_MS = 30 * 60 * 1000;
+
+/** The hint as an answer carries it: a tool is one line, with one input it matched and how many more. */
+export type ShortHint = { note: string; tools: Array<{ tool: string; about: string; matched: HintMatch; more_inputs: number }>; more_tools: number; examined: number; of: number };
+
+/** A description's first sentence, bounded: what a tool is for in one line. */
+export function oneLine(description: string, max = 160): string {
+  const first = description.replace(/\s+/g, " ").trim().split(/(?<=[.:;])\s/)[0] ?? "";
+  return first.length > max ? `${first.slice(0, max - 1)}…` : first;
+}
+
+/**
+ * The hint bounded for an answer (the runs sf4406b and s68ce47: the whole hint was three quarters of all job_run result
+ * text, 12 M characters in one run, and a hinted tool was run 4 times in 237). A tool matched only by its description
+ * naming an extension is left out (every extraction writes a .json); at most HINT_TOOLS_MAX tools, the ones that
+ * matched the most inputs first; each as its name, one line, one matched input and a count of the rest.
+ *
+ * Once a seat and tool a compaction cycle: `seen` maps a tool to the cycle (the seat's count of compactions) it was
+ * last named to this seat in, and a tool is named again only in a later cycle, when a compaction has taken the hint
+ * out of the seat's context. It is updated. Null when nothing is left to say.
+ */
+export function shortHint(full: Awaited<ReturnType<typeof libraryHint>>, seen?: Map<string, number>, cycle = 0): ShortHint | null {
+  if (!full) return null;
+  const fresh = full.tools
+    .map((t) => ({ t, own: t.matched.filter((m) => m.by !== "description") }))
+    .filter((x) => x.own.length && !(seen && (seen.get(x.t.tool) ?? -Infinity) >= cycle))
+    .sort((a, b) => new Set(b.own.map((m) => m.input)).size - new Set(a.own.map((m) => m.input)).size || a.t.tool.localeCompare(b.t.tool));
+  if (!fresh.length) return null;
+  const said = fresh.slice(0, HINT_TOOLS_MAX);
+  for (const x of said) seen?.set(x.t.tool, cycle);
+  return {
+    note: "A hint, not a rule: library tools whose manifest says they read these inputs. Run one as job_run tool=<name> (tools(name) gives its arguments) instead of writing a parser.",
+    tools: said.map((x) => ({ tool: x.t.tool, about: oneLine(x.t.description), matched: x.own[0]!, more_inputs: new Set(x.own.map((m) => m.input)).size - 1 })),
+    more_tools: fresh.length - said.length,
+    examined: full.examined,
+    of: full.of,
+  };
+}
+
+/** A seat's compaction cycle: how many compactions its Pi sessions reported (budget.json, folded by the hub). */
+export async function compactionCycle(sandbox: string, who: string): Promise<number> {
+  try {
+    const budget = JSON.parse(await readFile(join(resolve(sandbox), "budget.json"), "utf8")) as { agents?: Record<string, { compactions?: unknown }> };
+    const n = Number(budget.agents?.[who]?.compactions ?? 0);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Where a hub keeps which tool it named to which seat in which cycle: its own directory, which a restart keeps. */
+export const HINT_MEMORY_FILE = "library-hints.json";
+
+type HintMemory = { seats: Map<string, Map<string, number>>; file: string | null; writing: Promise<void> };
+const memories = new Map<string, HintMemory>();
+
+async function hintMemory(sandbox: string, dir?: string): Promise<HintMemory> {
+  const file = dir ? join(resolve(dir), HINT_MEMORY_FILE) : null;
+  const key = `${resolve(sandbox)}\u0000${file ?? ""}`;
+  const had = memories.get(key);
+  if (had) return had;
+  const seats = new Map<string, Map<string, number>>();
+  if (file) {
+    try {
+      const raw = JSON.parse(await readFile(file, "utf8")) as { version?: number; seats?: Record<string, Record<string, unknown>> };
+      for (const [who, tools] of Object.entries(raw.seats ?? {})) {
+        const m = new Map<string, number>();
+        for (const [tool, cycle] of Object.entries(tools ?? {})) if (Number.isInteger(cycle) && (cycle as number) >= 0) m.set(tool, cycle as number);
+        seats.set(who, m);
+      }
+    } catch {
+      // none yet, or unreadable: every tool may be named again once
+    }
+  }
+  const made = memories.get(key) ?? { seats, file, writing: Promise.resolve() };
+  memories.set(key, made);
+  return made;
+}
+
+/** Forget what this process holds in memory (a test that stands for a hub restart). */
+export function forgetHintMemory(): void {
+  memories.clear();
+}
+
+/**
+ * The library hint a seat is given at a job's admission, once a seat and tool a compaction cycle: the cycle is the
+ * seat's count of compactions in budget.json, and what was named in which cycle is kept in the hub's directory
+ * (HINT_MEMORY_FILE), so a hub that restarts does not name the same tools again to every seat. It was a 30-minute
+ * timer in the hub's memory: a seat was told again inside one context, and every seat again after a restart.
+ */
+export async function seatLibraryHint(sandbox: string, who: string, full: Awaited<ReturnType<typeof libraryHint>>, o: { dir?: string } = {}): Promise<ShortHint | null> {
+  if (!full) return null;
+  const memory = await hintMemory(sandbox, o.dir);
+  const cycle = await compactionCycle(sandbox, who);
+  const seen = memory.seats.get(who) ?? new Map<string, number>();
+  memory.seats.set(who, seen);
+  const hint = shortHint(full, seen, cycle);
+  if (hint && memory.file) {
+    const file = memory.file;
+    const body = JSON.stringify({ version: 1, seats: Object.fromEntries([...memory.seats].map(([w, m]) => [w, Object.fromEntries(m)])) });
+    memory.writing = memory.writing.then(async () => {
+      await mkdir(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      await writeFile(tmp, body, { mode: 0o600 });
+      await rename(tmp, file);
+    }).catch(() => undefined);
+    await memory.writing;
+  }
+  return hint;
+}
+
+/**
+ * The overlap hint a job's admission carries (who else works these questions or objects), said once: the items a seat
+ * was told within HINT_REPEAT_MS are left out, and a hint with nothing new is not sent. It rode on 73 to 92% of all job
+ * answers in two runs, the same leads and holders each time. `seen` maps an item's words to when it was last said.
+ */
+export type CoverageHint = { overlaps: Array<{ lead: string; holder: string; answers: string[]; since: string | null }>; objects: string[]; jobs: string[] };
+export function freshCoverage(hint: CoverageHint | null, seen: Map<string, number>, now = Date.now()): CoverageHint | null {
+  if (!hint) return null;
+  const fresh = (key: string): boolean => {
+    if (now - (seen.get(key) ?? -Infinity) < HINT_REPEAT_MS) return false;
+    seen.set(key, now);
+    return true;
+  };
+  const overlaps = hint.overlaps.filter((o) => fresh(`lead:${o.lead}:${o.holder}`));
+  const objects = hint.objects.filter((o) => fresh(`object:${o}`));
+  const jobs = hint.jobs.filter((j) => fresh(`job:${j.split(" ")[0]}`));
+  return overlaps.length || objects.length || jobs.length ? { overlaps, objects, jobs } : null;
 }

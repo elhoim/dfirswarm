@@ -3,6 +3,7 @@ id: filesystem/indx
 title: Index slack
 when: Names a directory index still holds.
 needs: [filesystem/mft]
+card: indx_carve {"path": "<extracted $I30>", "slack_only": true} gives stale entries, no record number: tie them by name, parent and times. Extract it first: extract_stream {"image": "<image>", "inode": "<entry>-160-<id>", "offset": 2048, "output": "work/<your id>/<name>"}. indx_carve drops salvaged entries unless {"include_unreliable": true}: report the count. Does not show: a deletion or a wipe.
 tools: [indx_carve, extract_stream, usn_journal]
 requires_host: [istat]
 ---

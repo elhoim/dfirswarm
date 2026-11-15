@@ -5,6 +5,7 @@ when: You hold a recovered binary or script, repeated tails, or note placement.
 needs: []
 tools: [encrypted_survey, ransom_note_scan, encryption_extent, ransomware_family_match]
 requires_host: [yara]
+card: Hash recovered code, never run it; a yara match is a lead, not proof of execution or attribution. encryption_extent ({"policy": "sampling", "census": "<census>"}): high_entropy_fraction is a share of the inspected bytes, not a percentage encrypted. ransom_note_scan (a job with secret_output: true) shows where a note was written, not what was encrypted. Does not show: who ran what.
 ---
 
 Use only if you hold a recovered binary or script, or read tails and note placement. Not for the execution chain (`encryptor/traces`).

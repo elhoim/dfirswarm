@@ -227,7 +227,7 @@ test("the harness's rows under a seat's id are one list, here and in the watchdo
   }
   assert.ok(tools.size > 20 && written.size > 20, `read the extension (${tools.size} tools, ${written.size} rows)`);
   // Written inside a tool call the seat made: its model answered.
-  const inCall = new Set(["claim_violation", "done_deferred", "finish_line", "inputs_check", "inputs_violation", "ledger_superseded", "record_deferred", "record_leads", "record_violation", "review_deferred"]);
+  const inCall = new Set(["claim_violation", "done_deferred", "finish_line", "inputs_check", "inputs_violation", "ledger_superseded", "record_deferred", "record_leads", "record_violation", "review_deferred", "skill_card"]);
   const unclassified = [...written].filter((n) => n !== "agent_error" && !tools.has(n) && !SEAT_HARNESS_ROWS.has(n) && !inCall.has(n));
   assert.deepEqual(unclassified, [], "a new row under a seat's id is a harness row (SEAT_HARNESS_ROWS) or one written inside a call");
 });

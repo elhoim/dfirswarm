@@ -3,6 +3,7 @@ id: logs/powershell-history
 title: PowerShell history
 when: ConsoleHost_history.txt, -EncodedCommand, engine 2.
 needs: [logs/powershell]
+card: ConsoleHost_history.txt is configurable, with no per-command times: a missing line is not a command never typed. Its file times (mft_records {"path": "<$MFT>", "name": "ConsoleHost_history"}) date no line: time lines only by a timed source; check every profile. -EncodedCommand is base64 of UTF-16LE: keep the encoded form, record the decoding. Does not show: who typed it, or that it completed.
 tools: [mft_records, evtx_query]
 requires_host: []
 ---

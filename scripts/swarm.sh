@@ -12,7 +12,34 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The launcher runs from a frozen copy of itself. Bash reads a script as it goes: a start or a stop, which run for
+# minutes, read on from the checkout as it was being edited (a start that had worked ended "line 12500: syntax error",
+# exit 2). So `start`, `stop` and `resume` (a start of a run that ended) copy this file first and exec the copy (the
+# same process: its pid, its signals and its status are the launcher's), and a VM run's frozen host copy
+# (freeze_harness) takes these same bytes for scripts/swarm.sh: the launcher and the hub run one file. The block is one
+# command, read whole before it runs. A copy is named for its launcher's pid and kept while it runs, and no longer: a
+# watcher started here removes it within a second of the launcher's end, whichever way it ends (the kickoff's own
+# exit traps are its own), and holds nothing of the launcher's input or output. A copy whose watcher did not outlive
+# it (a hangup kills nothing here, but a kill can) is removed by the next start, stop or resume.
+if [[ -z "${SWARM_LAUNCHER_COPY:-}" && ( "${1:-}" == start || "${1:-}" == stop || "${1:-}" == resume ) ]]; then
+  for _launcher_old in "${TMPDIR:-/tmp}"/dfirswarm-launcher.*; do
+    [[ -d "$_launcher_old" ]] || continue
+    _launcher_pid="${_launcher_old##*/dfirswarm-launcher.}"; _launcher_pid="${_launcher_pid%%.*}"
+    if [[ "$_launcher_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$_launcher_pid" 2>/dev/null; then rm -rf "$_launcher_old" 2>/dev/null || true; fi
+  done
+  _launcher_dir="$(mktemp -d "${TMPDIR:-/tmp}/dfirswarm-launcher.$$.XXXXXX" 2>/dev/null)" || _launcher_dir=""
+  if [[ -n "$_launcher_dir" ]] && cp "${BASH_SOURCE[0]}" "$_launcher_dir/swarm.sh" 2>/dev/null; then
+    ( trap '' HUP; while kill -0 "$$" 2>/dev/null; do sleep 1; done; rm -rf "${_launcher_dir:?}" ) </dev/null >/dev/null 2>&1 &
+    SWARM_LAUNCHER_COPY="$_launcher_dir/swarm.sh" SWARM_LAUNCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
+      exec bash "$_launcher_dir/swarm.sh" "$@"
+  fi
+  [[ -z "$_launcher_dir" ]] || rm -rf "$_launcher_dir"
+fi
+
+# The checkout, also when this is the launcher's copy; the copy's path is the launcher's own, and neither is passed on.
+ROOT="${SWARM_LAUNCHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+LAUNCHER_COPY="${SWARM_LAUNCHER_COPY:-}"
+unset SWARM_LAUNCHER_ROOT SWARM_LAUNCHER_COPY
 # trace_emit: a harness line into a run's trace, through its collector. A
 # copy of this script alone (a suite runs one from a bare directory) goes
 # without it, and puts nothing of its own on a trace.
@@ -74,6 +101,29 @@ VM_HOST_WAY_ON="Or run the agents unisolated with --isolation host: each is then
 # pid file held the pid of a bash that was not the daemon, so `stop` killed
 # that and left the daemon running. With the exec, the subshell becomes setsid
 # and setsid becomes the daemon, all one pid, and `$!` is right again.
+# A daemon's log, each line stamped with the UTC time it was written: a log without times could not be laid beside
+# the trace. Fed by the daemon's output (`> >(log_stamper FILE)`), it appends to FILE, ends when the daemon closes its
+# output, and ignores the terminal's hangup and interrupt as the detached daemon does, so it never takes the daemon's
+# output away from it.
+# It lives as long as the daemon, so it holds nothing of the launcher's but the pipe it reads: a process substitution
+# is a fork of the shell that made it, with the launcher's stdout and stderr (and any copy bash keeps of them above 2).
+# Measured: a stamper that kept them held the launcher's output open for the whole run, so a command substitution of
+# `swarm.sh start`, a pipe into tee, ssh and the console's start job (status set when the output closes) waited for
+# the run to end. Its stdout and stderr go to /dev/null and every other descriptor is closed before it reads.
+log_stamper() { # <log file>
+  trap '' HUP INT QUIT TERM
+  exec >/dev/null 2>&1
+  local fd
+  for fd in /dev/fd/*; do
+    fd="${fd##*/}"
+    if [[ "$fd" =~ ^[0-9]+$ ]] && ((fd > 2)); then eval "exec $fd>&-" || true; fi
+  done
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+  done >> "$1"
+}
+
 detach_exec() {
   if command -v setsid >/dev/null 2>&1; then
     exec setsid "$@"
@@ -118,7 +168,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for symbols   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot, and the symbol files its build converts (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
-  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance; pack-add <id> <pack> [--why W] brings a pack's tools and notes into it
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -156,6 +206,7 @@ Tools the agents write:
   --allow-install        Let them pip-install from pypi.org; --no-pypi keeps it off the allowlist
   --tools-from DIR       Start with a library of tools from earlier runs
   --pack ID[,ID]         Installed packs: their skills, tools and host checks
+  --no-pack ID[,ID]      A pack the kickoff is not to add on its own (memory-forensics for a dump)
   --pack-tools-as-jobs ID[,ID]   Their tools run as job_run(tool, args), not as Pi tools
 
 Network, closed by default (--network dynamic: bounded lookups the hub decides by --policy PRESET):
@@ -184,10 +235,10 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
       [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--token-alert N[,M...]] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
-      [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N] [--skill-release compaction|auto|off]
+      [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N] [--skill-release compaction|auto|off] [--skill-cards on|off|inject] [--pack-skills on|off]
       [--allow-install] [--no-pypi] [--no-read DIR]... [--accept-signer-exposure]
       [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
-      [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--allow-missing-symbols] [--toolbox SETS|auto|off] [--toolbox-required]
+      [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--allow-missing-symbols] [--toolbox SETS|auto|off] [--toolbox-required] [--requires CAPS]
       [--quarantine] [--case-id ID] [--examiner NAME] [--operator ID] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
@@ -396,6 +447,26 @@ Limits
                       and the summary input is not shaped. Recorded as
                       skill_release in the registry; skill_release_policy and
                       skill_unload on the trace. Needs --pack.
+  --skill-cards on|off|inject
+                      (inject: as on, and a lead that is opened or claimed
+                      comes back with the rules of the two notes that fit it
+                      best, not their names: the forced arm of a notes
+                      experiment.)
+                      Whether a call to a tool a skill names (job_run tool=X,
+                      or the tool itself), by an agent that does not hold that
+                      skill, comes back with the skill's card: its own card:
+                      line, or the lines that say when to use it, its first
+                      example call and what it does not show. Once per skill
+                      and agent until a compaction; a tool more than three
+                      skills name shows none; the hand-off header carries the
+                      cards of the skills a compaction took out. on, the
+                      default; off leaves skills to skill(id) alone. Recorded
+                      as skill_cards in the registry; skill_card on the trace.
+  --pack-skills on|off
+                      off: the packs' tools and recipes only. No skill index in
+                      the prompt, no skill tool, no cards: the arm of an
+                      experiment that measures what the notes add. on, the
+                      default. Recorded as pack_skills in the registry.
 
 Evidence
   --inputs DIR        A read-only copy of DIR under inputs/. Agents read and grep
@@ -439,6 +510,13 @@ Evidence
                       SWARM.md: dfir, crypto, linux, comma-separated. auto picks
                       dfir when --catalog is on; off checks nothing.
   --toolbox-required  A missing tool is a blocker rather than a warning.
+  --requires CAPS     What the case's questions need done, comma-separated:
+                      video-decode, audio-decode, qr-decode, ocr, image-convert,
+                      pdf-text, office-macros, archive-7z, pcap, stego, memory
+                      (or the goal's metadata block, requires: ...). Checked
+                      where the agents run, by a program that does the work;
+                      one not met is a warning before the run starts (a
+                      blocker with --toolbox-required), and SWARM.md says it.
   --inputs-image FILE Attach a disk image read-only and use it as inputs/, instead of
                       copying a directory. The refusal comes from the host kernel on
                       the device: the write bit cannot be put back, so the metadata
@@ -517,6 +595,12 @@ Tools the agents write
                       added to the toolbox check. Dependencies resolve first and
                       every pack is verified against its checksums before the run
                       starts. Without --pack a run carries no pack at all.
+                      With --pack, a process or memory dump at the top of an
+                      --inputs directory (by name or first bytes) adds
+                      memory-forensics, said at kickoff and in SWARM.md.
+  --no-pack ID[,ID]   Packs the kickoff is not to add on its own: with
+                      memory-forensics, a dump among the inputs leaves the
+                      run's packs as they are, and SWARM.md says why.
   --pack-tools-as-jobs ID[,ID]
                       The tools of these packs (named in --pack or needed by
                       one) are not registered as Pi tools. SWARM.md lists each
@@ -1129,6 +1213,17 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
+  # images/ is what pack.sh reads to check a pack (recipe.py, install.py) and profiles.json, which says which job image
+  # holds a pack: the keeper's pack-add runs from this copy and checks the pack it adds as the kickoff did.
+  rm -rf "${host:?}/images"
+  cp -R "$ROOT/images" "$host/images"
+  rm -rf "${host:?}/images/__pycache__"
+  # The launcher runs a copy of swarm.sh it took when it began: the frozen copy has those bytes, whatever the
+  # checkout's file holds now, so the hub's stop and the launcher are one script.
+  if [[ -n "${LAUNCHER_COPY:-}" && -f "$LAUNCHER_COPY" ]]; then
+    cp "$LAUNCHER_COPY" "$host/scripts/swarm.sh"
+    cp "$LAUNCHER_COPY" "$dir/scripts/swarm.sh"
+  fi
   # The draft release the hub seals after custody renders the report, which
   # reads the Markdown renderer, the version and the mark: frozen with it.
   rm -rf "${host:?}/ui" "${host:?}/brand"
@@ -2645,6 +2740,76 @@ pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1> [local
   done <<< "$pack_dirs"
 }
 
+# E7: a process or memory dump among the inputs adds the memory pack. The
+# run's packs choose the images the census and the seats run in, so they are
+# fixed before the catalogue exists and cannot follow it: instead the top level
+# of every --inputs directory is looked at here, before the packs resolve, by
+# name and by the first bytes (scripts/dump-members.ts kickoffDumps). A run that
+# has packs gains memory-forensics (and so its skills enter the index under the
+# same budget as every pack's, a router alone above it); a run started without
+# --pack stays without. A pack the operator excluded (--no-pack) is never added,
+# and neither is one this host has not installed: either is said, here and in
+# SWARM.md. A resume keeps the packs its run started with. Reads and sets the
+# start's own locals: packs, no_packs, inputs_dirs, inputs_names, resume_of;
+# sets kickoff_dumps (the detect's JSON, empty when there is no dump) and
+# kickoff_dumps_decision (dump-members.ts MemoryPackDecision).
+kickoff_add_memory_pack() {
+  local mp=memory-forensics np excluded=0 di dargs=() said rec_packs
+  local np_list=()
+  IFS=',' read -ra np_list <<<"$no_packs"
+  for np in ${np_list[@]+"${np_list[@]}"}; do
+    np="$(printf '%s' "$np" | tr -d '[:space:]')"
+    [[ -n "$np" ]] || continue
+    if [[ ",$packs," == *",$np,"* ]]; then
+      echo "BLOCKER: --pack and --no-pack both name $np." >&2
+      exit 2
+    fi
+    [[ "$np" == "$mp" ]] && excluded=1
+  done
+  if [[ -n "$resume_of" ]]; then
+    # The run's own packs: what its kickoff added, it carries on with.
+    rec_packs="$(json_get "$resume_of" | jq -r '[(.packs // [])[]? | .id? // empty] | join(",")' 2>/dev/null)"
+    if [[ ",$rec_packs," == *",$mp,"* && ",$packs," != *",$mp,"* && "$excluded" -eq 0 ]]; then
+      packs="${packs:+$packs,}$mp"
+      echo "Packs:        $mp, which this run's kickoff added for a dump among its inputs, is kept"
+    fi
+    return 0
+  fi
+  [[ ${#inputs_dirs[@]} -gt 0 ]] || return 0
+  for di in "${!inputs_dirs[@]}"; do
+    dargs+=(--inputs "${inputs_dirs[$di]}" --under "$([[ ${#inputs_dirs[@]} -eq 1 ]] && echo inputs || echo "inputs/${inputs_names[$di]}")")
+  done
+  if ! kickoff_dumps="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/dump-members.ts" detect "${dargs[@]}" 2>/dev/null)" \
+    || ! jq -e '.total | numbers' <<<"$kickoff_dumps" >/dev/null 2>&1; then
+    echo "WARN: the kickoff could not look for process or memory dumps among the inputs; the packs are those named, and the catalogue still says any dump it lists." >&2
+    kickoff_dumps=""
+    return 0
+  fi
+  if [[ "$(jq -r '.total' <<<"$kickoff_dumps")" -eq 0 ]]; then
+    kickoff_dumps=""
+    return 0
+  fi
+  said="$(jq -r 'def sz: if . >= 1073741824 then "\(. / 1073741824 * 10 | round / 10) GiB" elif . >= 1048576 then "\(. / 1048576 * 10 | round / 10) MiB" elif . >= 1024 then "\(. / 1024 | round) KiB" else "\(.) B" end;
+    "\(.total) process or memory dump(s) at the top of the inputs (\(.bytes | sz) in all): " + ([.dumps[:12][] | "\(.path) (\(.bytes | sz), \(.kind))"] | join(", ")) + (if .total > 12 then ", and \(.total - 12) more" else "" end)' <<<"$kickoff_dumps")"
+  if [[ ",$packs," == *",$mp,"* ]]; then
+    kickoff_dumps_decision=named
+    echo "Dumps:        $said; $mp is among the run's packs"
+  elif [[ "$excluded" -eq 1 ]]; then
+    kickoff_dumps_decision=excluded
+    echo "NOTE: $said. $mp was not added: --no-pack excludes it." >&2
+  elif [[ -z "$packs" ]]; then
+    kickoff_dumps_decision=no-packs
+    echo "NOTE: $said. $mp was not added: the run has no --pack, and the kickoff adds one only to a run that has packs (--pack $mp reads them)." >&2
+  elif ! "$ROOT/scripts/pack.sh" resolve "$mp" >/dev/null 2>&1; then
+    kickoff_dumps_decision=unavailable
+    echo "WARN: $said. $mp was not added: it is not installed on this host (scripts/pack.sh install packs/$mp)." >&2
+  else
+    kickoff_dumps_decision=added
+    packs="$packs,$mp"
+    echo "Packs:        $mp added: $said (--no-pack $mp leaves it out)"
+  fi
+}
+
 # --pack-tools-as-jobs: the packs whose tools are not registered as Pi tools. A
 # seat calls one as job_run(tool, args), in the job image of its pack, and the
 # contract (SWARM.md, "Pack tools run as jobs") lists each with its parameters.
@@ -2909,48 +3074,176 @@ render_contract() {
 }
 
 # The contract's section on the tools --pack-tools-as-jobs left out of Pi's
-# tool list: each with its one-line description and its parameters (the
-# summary the extension's paramSummary gives), after the "Tool jobs" section.
-# A contract that cannot name them would leave the seats without those tools,
-# so the kickoff stops instead.
+# tool list: how to run one, and each pack's tool names, after the job images
+# (where a seat looks for how to run work). The catalogue, one line a tool
+# (its first sentence and its parameters) and then each tool whole, is in
+# PACK-TOOLS.md beside it: one line a tool for every pack is about 36k
+# characters, most of what a first read of SWARM.md returns. A contract that
+# cannot name them would leave the seats without those tools, so the kickoff
+# stops instead.
 pack_tools_contract_section() { # <sandbox> <pack ids, comma-separated>
   local sandbox="$1" packs="$2"
   SWARM_SECTION_PACKS="$packs" node --no-warnings -e '
-const fs = require("fs");
-const path = require("path");
-const [file, tools] = process.argv.slice(1);
-const packs = new Set(process.env.SWARM_SECTION_PACKS.split(",").filter(Boolean));
-const rows = [];
-for (const dir of fs.readdirSync(tools).sort()) {
-  let m;
-  try { m = JSON.parse(fs.readFileSync(path.join(tools, dir, "manifest.json"), "utf8")); } catch { continue; }
-  if (!m || m.name !== dir || !m.pack || !packs.has(m.pack)) continue;
-  const params = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}: ${(p && p.type) || "string"}`);
-  rows.push(`- \`${m.name}\` (${m.pack}): ${String(m.description || "").replace(/\s+/g, " ").trim()} Parameters: ${params.length ? params.join(", ") : "no params"}.`);
-}
-if (!rows.length) { console.error("no tool of " + [...packs].join(", ") + " is in the run"); process.exit(1); }
-const text = fs.readFileSync(file, "utf8");
-const section =
-  "## Pack tools run as jobs\n\n" +
-  `The tools of the packs ${[...packs].sort().join(", ")} are not in your tool list; a skill of those packs that names one means this call. ` +
-  "Run one with `job_run(tool: <name>, args: {...})`: it runs sealed in a worker VM of its pack'"'"'s image, what it writes under `{OUT}/<name>` is sealed " +
-  "in the store and cited as `job:<id>/<path>`, and `args` are the parameters below (a name ending in `?` is optional). " +
-  "A wrong or missing one is refused, naming the tool'"'"'s parameters.\n\n" +
-  rows.join("\n") + "\n\n";
-let at = text.indexOf("\n## Job images\n");
-if (at < 0) {
-  const start = text.indexOf("## Tool jobs\n");
-  if (start < 0) { console.error("the contract has no Tool jobs section"); process.exit(1); }
-  const next = text.indexOf("\n## ", start + 1);
-  at = next < 0 ? text.length : next;
-}
-at += 1;
-fs.writeFileSync(file + ".tmp", text.slice(0, at) + section + text.slice(at));
-fs.renameSync(file + ".tmp", file);
+  const fs = require("fs");
+  const path = require("path");
+  const [file, tools] = process.argv.slice(1);
+  const packs = new Set(process.env.SWARM_SECTION_PACKS.split(",").filter(Boolean));
+  const rows = [];
+  const full = [];
+  const byPack = new Map();
+  const listed = new Map();
+  for (const dir of fs.readdirSync(tools).sort()) {
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(tools, dir, "manifest.json"), "utf8")); } catch { continue; }
+    if (m && m.name === dir && m.pack && !packs.has(m.pack)) listed.set(m.pack, (listed.get(m.pack) || 0) + 1);
+    if (!m || m.name !== dir || !m.pack || !packs.has(m.pack)) continue;
+    const params = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}: ${(p && p.type) || "string"}`);
+    const whole = String(m.description || "").replace(/\s+/g, " ").trim();
+    full.push(`- \`${m.name}\` (${m.pack}): ${whole} Parameters: ${params.length ? params.join(", ") : "no params"}.`);
+    // One line in the catalogue: the first sentence, bounded, and the parameter names.
+    let about = whole.split(/(?<=[.:;])\s/)[0] || "";
+    if (about.length > 140) about = about.slice(0, 139) + "\u2026";
+    const names = Object.entries(m.params || {}).map(([k, p]) => `${k}${p && p.required ? "" : "?"}`);
+    rows.push(`- \`${m.name}\` (${m.pack}): ${about} Parameters: ${names.length ? names.join(", ") : "none"}.`);
+    byPack.set(m.pack, [...(byPack.get(m.pack) || []), m.name]);
+  }
+  if (!rows.length) { console.error("no tool of " + [...packs].join(", ") + " is in the run"); process.exit(1); }
+  const text = fs.readFileSync(file, "utf8");
+  const section =
+    "## Pack tools run as jobs\n\n" +
+    `The tools of the packs ${[...packs].sort().join(", ")} are not in your tool list; a skill of those packs that names one means this call. ` +
+    "Run one with `job_run(tool: <name>, args: {...})`: it runs sealed in a worker VM of its pack'"'"'s image, what it writes under `{OUT}/<name>` is sealed " +
+    "in the store and cited as `job:<id>/<path>`, and `args` are its parameters. A wrong or missing one is refused, naming the tool'"'"'s parameters. " +
+    "What each tool does and its parameters, one line a tool, are in `PACK-TOOLS.md` beside this file (grep it for a name or a word; each tool whole follows " +
+    "there), and `tools(name: <name>)` gives a tool'"'"'s manifest. The tools, by pack:\n\n" +
+    [...byPack.keys()].sort().map((p) => `- ${p} (${byPack.get(p).length}): ${byPack.get(p).map((n) => "`" + n + "`").join(", ")}`).join("\n") + "\n\n";
+  fs.writeFileSync(path.join(path.dirname(file), "PACK-TOOLS.md"),
+    "# Pack tools run as jobs\n\nRun one with `job_run(tool: <name>, args: {...})`. A parameter name ending in `?` is optional.\n\n" +
+    "## One line a tool\n\n" + rows.join("\n") + "\n\n## Each tool whole\n\nWhat it does and its parameters with their types.\n\n" + full.join("\n\n") + "\n");
+  // After the sections that say how work runs (Tool jobs, Job images, Job image capabilities), whichever come last.
+  let at = -1;
+  for (const h of ["## Tool jobs\n", "## Job images\n", "## Job image capabilities\n"]) {
+    const start = text.indexOf("\n" + h);
+    if (start < 0) continue;
+    const next = text.indexOf("\n## ", start + 1);
+    at = Math.max(at, next < 0 ? text.length : next);
+  }
+  if (at < 0) { console.error("the contract has no Tool jobs section"); process.exit(1); }
+  at += 1;
+  let out = text.slice(0, at) + section + text.slice(at);
+  // "Pack tools" says the packs put their tools in the tool list: only the packs not run as jobs do.
+  out = out.replace(/## Pack tools\n\nThis run'"'"'s packs \([^)]*\) put \d+ tools in your tool list;([^\n]*)\n\n/, (whole, rest) => {
+    const n = [...listed.values()].reduce((a, b) => a + b, 0);
+    return n ? `## Pack tools\n\nThis run'"'"'s packs (${[...listed.keys()].sort().join(", ")}) put ${n} tools in your tool list;${rest}\n\n` : "";
+  });
+  fs.writeFileSync(file + ".tmp", out);
+  fs.renameSync(file + ".tmp", file);
 ' "$sandbox/SWARM.md" "$sandbox/tools" || {
     echo "BLOCKER: --pack-tools-as-jobs: SWARM.md could not list the tools of $packs as jobs (see above); the seats would be left without them." >&2
     exit 1
   }
+}
+
+# The contract as a seat first reads it, after the kickoff's last append (the
+# case policy, an earlier run's claims): its size and its sections in its first
+# lines, and within what one read returns (scripts/render-contract.ts
+# finishContract). A resumed run keeps the contract it was given.
+finish_contract() { # <sandbox>
+  local sandbox="$1" out
+  [[ -z "${resume_of:-}" && -f "$sandbox/SWARM.md" ]] || return 0
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/render-contract.ts" --finish "$sandbox/SWARM.md")" || {
+    echo "WARN: SWARM.md's first lines (its size and sections) could not be written; the contract stands as rendered." >&2
+    return 0
+  }
+  jq -r 'if (.dropped | length) > 0 then "Contract:     SWARM.md \(.bytes) bytes; left out to stay within one read: \(.dropped | join(", "))" else empty end' <<<"$out" 2>/dev/null || true
+  if [[ "$(jq -r '.bytes' <<<"$out" 2>/dev/null || echo 0)" -gt 51200 ]]; then
+    echo "WARN: SWARM.md is $(jq -r '.bytes' <<<"$out") bytes, more than one read of it returns (50 KB): its first lines say so and list its sections. The goal is the largest part a kickoff cannot shorten." >&2
+  fi
+}
+
+# A process's start time as ps gives it: with its pid, it names that process and never a later one given the same pid.
+# In UTC and the C locale: ps writes it in the reader's time zone and language, so a start whose shell had another TZ
+# read a live launcher's time as another time and counted it as ended.
+proc_started() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# Whether <pid> is still the launcher that began at <started>.
+launcher_alive() { # <pid> <started>
+  [[ -n "${1:-}" && -n "${2:-}" ]] && kill -0 "$1" 2>/dev/null && [[ "$(proc_started "$1")" == "$2" ]]
+}
+
+# A start's claim on this host, written before it asks whether it fits and kept up to date until its registry record
+# names its launcher: three starts launched together each count the ones before them, though none has a record or a
+# hub yet. <launcher pid>.json in a directory of the harness's home (beside its hubs; a refused start leaves nothing
+# under runs/) named for the runs directory as the file system has it, its links and its spelling resolved: two starts
+# on one runs directory meet there whatever their TMPDIR, TZ or way of naming it. A claim whose launcher has ended is
+# nothing, and is removed by whoever reads it.
+kickoffs_dir() {
+  printf '%s/kickoffs/%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}" "$(resolve_path_nocreate "$RUNS_DIR" | cksum | cut -d' ' -f1)"
+}
+kickoff_claim() { # <seats> <seat vCPUs> <seat MiB> <workers> <worker vCPUs> <worker MiB>
+  local dir claim try
+  dir="$(kickoffs_dir)"
+  claim="$(jq -n --argjson pid "$$" --arg started "$(proc_started "$$")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson n "${1:-0}" --argjson c "${2:-0}" --argjson m "${3:-0}" --argjson w "${4:-0}" --argjson wc "${5:-0}" --argjson wm "${6:-0}" \
+    '{pid: $pid, started: $started, at: $at, seats: $n, workers: $w, memory_mib: ($n * $m + $w * $wm), cpus: ($n * $c + $w * $wc)}')" || return 0
+  # A check (`start --check`) writes nothing that outlives it: its claim goes with the check's own temporary files.
+  [[ "${CHECK_ONLY:-0}" -eq 1 ]] && CHECK_TMP+=("$dir/$$.json")
+  # Twice: another start's sweep may take an old empty directory away between the mkdir and the write.
+  for try in 1 2; do
+    mkdir -p "$dir" 2>/dev/null || return 0
+    printf '%s\n' "$claim" > "$dir/$$.json.tmp" 2>/dev/null && mv "$dir/$$.json.tmp" "$dir/$$.json" 2>/dev/null && return 0
+  done
+  return 0
+}
+
+# The memory and vCPUs the other microVM runs going on this host may ask for, as arguments of `vm.ts capacity`:
+# each run's seats (n x its VM size) and its tool-job workers. A run counts while its hub lives, and while it is still
+# in its kickoff (the catalogue, the image pull: no hub yet), known by its launcher in its record (kickoff.pid with
+# the process's start time) or, before its record is written, by its claim (kickoff_claim). Each run once.
+other_runs_load() { # <this run's id, or empty>
+  local self="${1:-}"
+  local mem=0 cpus=0 runs=0 kicking=0 id sb m c pid kpid kst seen=" " f
+  if [[ -f "$REGISTRY" ]]; then
+    while IFS=$'\t' read -r id sb m c kpid kst; do
+      [[ -n "$id" && "$id" != "$self" ]] || continue
+      pid="$(cat "$sb/hub.pid" 2>/dev/null || true)"
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        :
+      elif [[ "$kpid" != "$$" ]] && launcher_alive "$kpid" "$kst"; then
+        kicking=$((kicking + 1))
+      else
+        continue
+      fi
+      [[ -n "$kpid" ]] && seen+="$kpid "
+      mem=$((mem + m)); cpus=$((cpus + c)); runs=$((runs + 1))
+    done < <(jq -r '.runs | (if type == "array" then .[] else (.[]) end) | select((.state == "running" or .state == "prepared") and ((.isolation | type) == "object") and .isolation.mode == "microvm")
+        | [.id, (.sandbox // ""), ((.n // 0) * (.isolation.memory_mib // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.memory_mib // 0))), ((.n // 0) * (.isolation.cpus // 0) + ((.isolation.jobs.workers // 0) * (.isolation.jobs.cpus // 0))), (.kickoff.pid // "" | tostring), (.kickoff.started // "")] | @tsv' "$REGISTRY" 2>/dev/null)
+  fi
+  for f in "$(kickoffs_dir)"/*.json; do
+    [[ -f "$f" ]] || continue
+    kpid="" kst="" m=0 c=0
+    IFS=$'\t' read -r kpid kst m c < <(jq -r '[(.pid | tostring), .started, (.memory_mib // 0), (.cpus // 0)] | @tsv' "$f" 2>/dev/null || true) || true
+    [[ -n "${kpid:-}" && "$kpid" != "$$" ]] || continue
+    [[ "$seen" == *" $kpid "* ]] && continue
+    if launcher_alive "$kpid" "$kst"; then
+      mem=$((mem + m)); cpus=$((cpus + c)); runs=$((runs + 1)); kicking=$((kicking + 1))
+    else
+      rm -f "$f" 2>/dev/null || true
+    fi
+  done
+  # The claims left for other runs directories by launchers that ended (a start refused after it claimed) go too, and
+  # a directory of them empty for an hour: nothing else would read them.
+  local area
+  area="$(dirname "$(kickoffs_dir)")"
+  for f in "$area"/*/*.json; do
+    [[ -f "$f" ]] || continue
+    kpid="${f##*/}"; kpid="${kpid%.json}"
+    if [[ "$kpid" =~ ^[0-9]+$ ]] && ! kill -0 "$kpid" 2>/dev/null; then rm -f "$f" 2>/dev/null || true; fi
+  done
+  if [[ -d "$area" ]]; then find "$area" -mindepth 1 -maxdepth 1 -type d -empty -mmin +60 -exec rmdir {} + 2>/dev/null || true; fi
+  OTHER_RUNS_ARGS=""
+  [[ "$runs" -gt 0 ]] && OTHER_RUNS_ARGS="--others-memory $mem --others-cpus $cpus --others-runs $runs"
+  OTHER_RUNS_KICKING="$kicking"
+  echo "$OTHER_RUNS_ARGS"
 }
 
 # A swarm with no definition of done is the failure mode the incident write-up
@@ -3587,6 +3880,7 @@ cmd_start() {
   # only one, for one set), and says whether there is evidence at all.
   local inputs_dirs=() inputs_names=()
   local pack_tools_as_jobs=""
+  local requires_caps=""
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
   # The run's operator (--operator ID): a person enrolled on this install,
   # recorded with the run; `--as operator` on the run's acts names them.
@@ -3594,7 +3888,7 @@ cmd_start() {
   # A memory input whose kernel table the image lacks stops the start
   # (catalog/missing.json) unless the operator lets the run go on without it.
   local allow_missing_symbols=0
-  local packs=""
+  local packs="" no_packs="" kickoff_dumps="" kickoff_dumps_decision=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
   local notify_cmd="" notify_targets="" allow_root=0 verify_copy=1 ledger_from="" synced_allowed_by="" disk_encryption="unknown" model_gateway=0
   # The case policy and the network mode (scripts/case-policy.ts): the flags
@@ -3613,7 +3907,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   local seal_herdr=1
   # The derived catalogue's ceiling of generations a run (--derived-limit;
   # SWARM_DERIVED_LIMIT the default, 50 without either): recorded with the
@@ -3648,6 +3942,10 @@ cmd_start() {
   local inbox_page_chars=""
   # When a skill body an agent has marked done leaves its context: compaction, auto or off. Empty means compaction.
   local skill_release=""
+  # Whether a note's card comes with the result of a call to one of its tools: on (empty) or off.
+  local skill_cards=""
+  local seed_leads=auto lead_max_questions=""
+  local pack_skills=""
   local extra_env=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3735,8 +4033,12 @@ cmd_start() {
       # Repeated, the packs add up (as in image-for): a second --pack used to
       # replace the first without a word.
       --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
+      # A pack the kickoff would add on its own (the memory pack, for a dump
+      # among the inputs) that the operator does not want.
+      --no-pack) no_packs="${no_packs:+$no_packs,}${2:-}"; shift 2 ;;
       --pack-tools-as-jobs) pack_tools_as_jobs="${pack_tools_as_jobs:+$pack_tools_as_jobs,}${2:-}"; shift 2 ;;
       --toolbox-required) toolbox_required=1; shift ;;
+      --requires) requires_caps="$2"; shift 2 ;;
       --quarantine) quarantine=1; shift ;;
       --no-write-guard) write_guard=0; shift ;;
       --accept-signer-exposure) accept_signer_exposure=1; shift ;;
@@ -3773,6 +4075,12 @@ cmd_start() {
       --compact-model) compact_model="$2"; shift 2 ;;
       --inbox-page-chars) inbox_page_chars="$2"; shift 2 ;;
       --skill-release) skill_release="$2"; shift 2 ;;
+      --skill-cards) skill_cards="$2"; shift 2 ;;
+      # One open, unheld lead per question at kickoff (leads-cli.ts seed), and the most questions one lead may name.
+      --seed-leads) seed_leads=1; shift ;;
+      --no-seed-leads) seed_leads=0; shift ;;
+      --lead-max-questions) lead_max_questions="$2"; [[ "$lead_max_questions" =~ ^[1-8]$ ]] || { echo "BLOCKER: --lead-max-questions takes 1 to 8." >&2; exit 2; }; shift 2 ;;
+      --pack-skills) pack_skills="$2"; shift 2 ;;
       --case-id) case_id="$2"; shift 2 ;;
       --examiner) examiner="$2"; shift 2 ;;
       --operator) operator_id="${2:-}"; shift 2 ;;
@@ -4286,7 +4594,7 @@ import json, re, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
-out = {"toolbox": "", "until_solved": "", "stall_minutes": "", "stop": ""}
+out = {"toolbox": "", "until_solved": "", "stall_minutes": "", "stop": "", "requires": ""}
 premises = []
 if m:
     for k in out:
@@ -4381,6 +4689,14 @@ print(json.dumps(out))
 STRIP
 )"
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
+  # What the case requires done: the kickoff's --requires, else the goal's metadata block.
+  if [[ -z "$requires_caps" ]]; then
+    requires_caps="$(jq -r '.requires // ""' <<<"$goal_meta" | tr -d '[]"' | tr -s ', ' ',' | sed 's/^,//; s/,$//')"
+  fi
+  if [[ -n "$requires_caps" && ! "$requires_caps" =~ ^(video-decode|audio-decode|qr-decode|ocr|image-convert|pdf-text|office-macros|archive-7z|pcap|stego|memory)(,(video-decode|audio-decode|qr-decode|ocr|image-convert|pdf-text|office-macros|archive-7z|pcap|stego|memory))*$ ]]; then
+    echo "BLOCKER: requires: $requires_caps names a capability the toolbox does not know; it takes video-decode, audio-decode, qr-decode, ocr, image-convert, pdf-text, office-macros, archive-7z, pcap, stego, memory, comma-separated." >&2
+    exit 2
+  fi
   local goal_brief
   goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
   # A must_establish: key that names no question (docs/adr/0013): said, never guessed.
@@ -4468,7 +4784,10 @@ STRIP
       fi ;;
   esac
   if [[ "$catalog" -eq 1 && "$toolbox" == "off" ]]; then toolbox="dfir"; fi
+  # A case that says what it requires is checked for it, whatever the sets.
+  if [[ -n "$requires_caps" && "$toolbox" == "off" ]]; then toolbox="dfir"; fi
   if [[ "$catalog" -eq 1 ]]; then quarantine=1; fi
+  kickoff_add_memory_pack
   local pack_dirs=""
   if [[ -n "$packs" ]]; then
     # dependencies first, and every one verified against its own checksums
@@ -4476,21 +4795,8 @@ STRIP
     local _pd
     while read -r _pd; do
       [[ -n "$_pd" ]] || continue
-      "$ROOT/scripts/pack.sh" verify "$(basename "$_pd")" >/dev/null || {
+      installed_pack_check "$_pd" || {
         echo "BLOCKER: pack $(basename "$_pd") does not verify; install it again." >&2; exit 1; }
-      # An installed pack older than the one this checkout ships runs as it
-      # was installed: its tools and skills are the old ones, fixes and all.
-      local _id _have _ship _shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
-      _id="$(basename "$_pd")"
-      if [[ -f "$_shipped/$_id/pack.json" ]]; then
-        _have="$(jq -r '.version // empty' "$_pd/pack.json" 2>/dev/null)"
-        _ship="$(jq -r '.version // empty' "$_shipped/$_id/pack.json" 2>/dev/null)"
-        if [[ -n "$_have" && -n "$_ship" ]] && python3 -c 'import sys
-t = lambda v: tuple(int(x) for x in v.split("."))
-sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/null; then
-          echo "WARN: pack $_id is installed at $_have and this checkout ships $_ship; the run uses $_have. Update it with: scripts/pack.sh install $_shipped/$_id" >&2
-        fi
-      fi
     done <<< "$pack_dirs"
   fi
   PACK_SECRETS_ENV='{}'
@@ -4560,6 +4866,14 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   fi
   if [[ -n "$compact_model" && "$self_compact" -ne 1 ]]; then
     echo "BLOCKER: --compact-model names the summary model of self-compaction; drop --no-self-compact." >&2
+    exit 2
+  fi
+  if [[ -n "$skill_cards" && "$skill_cards" != "on" && "$skill_cards" != "off" && "$skill_cards" != "inject" ]]; then
+    echo "BLOCKER: --skill-cards is on, off or inject, got $skill_cards." >&2
+    exit 2
+  fi
+  if [[ -n "$pack_skills" && "$pack_skills" != "on" && "$pack_skills" != "off" ]]; then
+    echo "BLOCKER: --pack-skills is on or off, got $pack_skills." >&2
     exit 2
   fi
   if [[ -n "$skill_release" && "$skill_release" != "auto" && "$skill_release" != "compaction" && "$skill_release" != "off" ]]; then
@@ -4813,6 +5127,18 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     # default, and says so; none fitting leaves the run without jobs, said.
     # An operator's own --workers N is kept or refused, never lowered.
     local vm_capacity cap_n cap_cpus cap_mem try_workers fitted=""
+    # What the other microVM runs going on this host may take (their seats and their workers): a run fits beside them or it does not.
+    local others_args=() others_line
+    # This start's own claim first, at the most it may ask for, so a start launched beside it counts it. A prepared run
+    # (--no-start) boots no VM and no worker: it claims nothing, and its record names no launcher to count.
+    [[ "$start_agents" -eq 1 ]] && kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" "$worker_cpus" "$worker_memory"
+    OTHER_RUNS_ARGS="" OTHER_RUNS_KICKING=0
+    other_runs_load "${swarm_id:-}" >/dev/null
+    others_line="$OTHER_RUNS_ARGS"
+    read -r -a others_args <<<"$others_line"
+    if [[ -n "$others_line" ]]; then
+      echo "Capacity:     counted beside $(awk '{print $6}' <<<"$others_line") other microVM run(s) on this host$([[ "${OTHER_RUNS_KICKING:-0}" -gt 0 ]] && printf ', %s of them still in their kickoff (no hub yet)' "$OTHER_RUNS_KICKING"): $(awk '{print $4}' <<<"$others_line") vCPU and $(awk '{print $2}' <<<"$others_line") MiB they may ask for"
+    fi
     for try_workers in $(seq "$([[ "$jobs" -eq 1 ]] && echo "$workers" || echo 0)" -1 0); do
       cap_n="$n" cap_cpus="$vm_cpus" cap_mem="$vm_memory"
       if [[ "$try_workers" -gt 0 ]]; then
@@ -4820,12 +5146,18 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
         [[ "$worker_cpus" -gt "$cap_cpus" ]] && cap_cpus="$worker_cpus"
         [[ "$worker_memory" -gt "$cap_mem" ]] && cap_mem="$worker_memory"
       fi
-      if vm_capacity="$(vm_cli capacity --n "$cap_n" --cpus "$cap_cpus" --memory "$cap_mem")"; then
+      if vm_capacity="$(vm_cli capacity --n "$cap_n" --cpus "$cap_cpus" --memory "$cap_mem" ${others_args[@]+"${others_args[@]}"})"; then
         fitted="$try_workers"
         break
       fi
       [[ "$workers_given" -eq 1 && "$jobs" -eq 1 ]] && break
     done
+    # The claim is what was fitted: none when nothing fits, the workers that fit otherwise.
+    if [[ -z "$fitted" ]]; then
+      rm -f "$(kickoffs_dir)/$$.json"
+    elif [[ "$start_agents" -eq 1 ]]; then
+      kickoff_claim "$n" "$vm_cpus" "$vm_memory" "$fitted" "$worker_cpus" "$worker_memory"
+    fi
     if [[ -z "$fitted" ]]; then
       echo "BLOCKER: $(jq -r '.blockers | join("; ")' <<<"$vm_capacity" 2>/dev/null || printf '%s' "$vm_capacity")" >&2
       [[ "$workers_given" -eq 1 && "$jobs" -eq 1 ]] && echo "  The $workers tool-job worker VM(s) of --workers count with the seats: lower --workers or --worker-memory, or run without jobs (--no-jobs)." >&2
@@ -5197,6 +5529,22 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     "$sandbox/tools"
   local id
   kickoff_pre_arm "$sandbox"
+  # The dumps the kickoff found among the inputs, what it did about the memory
+  # pack, and which tools of the run's packs read one: SWARM.md says them
+  # (scripts/render-contract.ts). A resumed run keeps its own.
+  if [[ -n "$kickoff_dumps" && -z "$resume_of" ]]; then
+    local kd_readers='[]' kd_t kd_pd
+    while IFS= read -r kd_t; do
+      [[ -n "$kd_t" ]] || continue
+      while IFS= read -r kd_pd; do
+        if [[ -n "$kd_pd" && -f "$kd_pd/tools/$kd_t/manifest.json" ]]; then
+          kd_readers="$(jq -c --arg t "$kd_t" '. + [$t]' <<<"$kd_readers")"
+          break
+        fi
+      done <<<"$pack_dirs"
+    done < <(jq -r '.reader_names[]?' <<<"$kickoff_dumps")
+    jq -c --arg d "$kickoff_dumps_decision" --argjson r "$kd_readers" 'del(.reader_names) + {decision: $d, readers: $r}' <<<"$kickoff_dumps" > "$sandbox/kickoff-dumps.json"
+  fi
   if [[ -n "$resume_of" ]]; then
     # A resume clears nothing the run holds: the board, the ledger and the
     # registers, the trace and its anchor, work/, the sessions, the kept
@@ -5364,6 +5712,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # tools are the image's, and this host's are none of theirs.
     local toolbox_args=()
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
+    [[ -n "$requires_caps" ]] && toolbox_args+=(--requires "$requires_caps")
     vm_cli toolbox --image "${job_image:-$vm_image}" --preset "$toolbox" --packs "$(paste -sd: - <<< "$pack_dirs")" --out "$sandbox/toolbox.json" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
   elif [[ "$toolbox" != "off" && "$isolation" == "microvm" ]]; then
     # A prepared VM run: the check belongs to the image, not this host, and
@@ -5372,6 +5721,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   elif [[ "$toolbox" != "off" ]]; then
     local toolbox_args=()
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
+    [[ -n "$requires_caps" ]] && toolbox_args+=(--requires "$requires_caps")
     bash "$ROOT/scripts/toolbox.sh" "$sandbox" "$toolbox" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
   fi
   if [[ -n "$resume_of" ]]; then
@@ -5843,6 +6193,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         | awk '!seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
     fi
   fi
+  seed_job_capabilities "$sandbox" "$job_images_json"
   JOBS_FOR_CONTRACT="$([[ "$isolation" == "microvm" && "$jobs" -eq 1 ]] && jq -nc --argjson images "$job_images_json" --argjson pp "$pack_profiles_json" --arg dflt "${job_image:-}" --argjson d "$([[ "${derived_catalog:-1}" -eq 1 ]] && echo true || echo false)" --argjson w "$workers" --argjson c "$worker_cpus" --argjson m "$worker_memory" --arg h "$allow_hosts$([[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 && "$local_only" -eq 0 ]] && printf '%s' "${allow_hosts:+,}pypi.org,files.pythonhosted.org")" '{workers: $w, cpus: $c, memoryMib: $m, derived: $d, allowHosts: ($h | split(",") | map(select(length > 0)))} + (if ($images | length) > 0 then {images: $images, packProfiles: $pp, image: $dflt} else {} end)')" \
   CASE_ID_FOR_CONTRACT="$case_id" EXAMINER_FOR_CONTRACT="$examiner" ALLOW_INSTALL_FOR_CONTRACT="$allow_install" INSTALL_HOSTS_FOR_CONTRACT="$install_hosts" \
     HOST_CAPS_FOR_CONTRACT="$host_caps_json" WRITE_GUARD_FOR_CONTRACT="$write_guard_mode" \
@@ -5870,6 +6221,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     } >> "$sandbox/SWARM.md"
     echo "Prior claims: $(jq -r '.entries' <<<"$LEDGER_FROM_RECORD") entr$([[ "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" == 1 ]] && echo y || echo ies) of run $ledger_from in prior/ledger.md, as hypotheses ($([[ "$(jq -r '.reviewed' <<<"$LEDGER_FROM_RECORD")" == true ]] && echo 'examiner-accepted only' || echo 'unreviewed'))"
   fi
+  finish_contract "$sandbox"
   mkdir -p "$sandbox/.pi"
   # Removed first, like every file here the kickoff writes into .pi/: a host pane's shell can write the
   # sandbox, and a resume runs this again in it, so a link planted at the name would be written through.
@@ -5887,14 +6239,17 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   [[ "$self_compact" -eq 1 ]] && sp_args+=(--self-compact)
   [[ "$forging" -eq 1 ]] && sp_args+=(--forging)
   for sp_id in "${agent_ids[@]}"; do sp_args+=(--seat "$sp_id"); done
-  while IFS= read -r sp_d; do [[ -n "$sp_d" ]] && sp_args+=(--pack-dir "$sp_d"); done <<< "$pack_dirs"
+  # --pack-skills off: the packs' tools only, so their skill index is not written into the prompt.
+  [[ "${pack_skills:-on}" == "off" ]] || while IFS= read -r sp_d; do [[ -n "$sp_d" ]] && sp_args+=(--pack-dir "$sp_d"); done <<< "$pack_dirs"
   if ! sp_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/seat-prompt.ts" "${sp_args[@]}" 2>&1)"; then
     echo "BLOCKER: the lines every agent's prompt carries could not be written ($(tail -1 <<<"$sp_out")). Every agent is started with them, so none was started." >&2
     exit 1
   fi
   echo "Prompt:       every agent's prompt carries its id and the stop rule$(jq -r '(.lines | map(", " + (if . == "self_compact" then "the self-compaction mechanics" elif . == "inputs" then "the read-only inputs rule" else "the forging rule" end)) | join(""))' <<<"$sp_out") in files Pi keeps for every run (.pi/seat-<id>.md, .pi/APPEND_SYSTEM.md)"
-  if [[ -n "$pack_dirs" ]]; then
-    echo "Skills:       $(jq -r 'if .written then "the index of \(.packs | length) pack(s) is in every agent'"'"'s prompt: \(.packs | map(.skills) | add) skills, \(.shown_tokens) tokens of entries" + (if .mode == "routers" then " (over budget: " + ([.packs[] | select(.shown == "router") | .id] | join(", ")) + " show their router only)" else "" end) else "the packs carry no skills" end' <<<"$sp_out")"
+  if [[ -n "$pack_dirs" && "${pack_skills:-on}" == "off" ]]; then
+    echo "Skills:       off (--pack-skills off): the packs' tools and recipes only; no index, no skill tool, no cards"
+  elif [[ -n "$pack_dirs" ]]; then
+    echo "Skills:       $(jq -r 'if .written then "the index of \(.packs | length) pack(s) is in every agent'"'"'s prompt: \(.packs | map(.skills) | add) skills, \(.shown_tokens) tokens of entries" + (if .mode == "routers" then " (over budget: " + ([.packs[] | select(.shown == "router") | .id + (if (.core_shown // [] | length) > 0 then " (router and \(.core_shown | length) core)" else "" end)] | join(", ")) + " show their router" + (if any(.packs[]; (.core_shown // [] | length) > 0) then ", and the core notes they name as the budget allows)" else " only)" end) else "" end) else "the packs carry no skills" end' <<<"$sp_out")"
     jq -r '(.unreadable | map("WARN: the skill index of pack " + .pack + " could not be read (" + .reason + "): its skills are not in the agents'"'"' prompt; skill() still reaches them") | .[]), (.over_budget | map("WARN: the skill index is over its budget: " + .) | .[]), (if (.no_router | length) > 0 then "WARN: no router to shorten the index of " + (.no_router | join(", ")) + ": shown whole" else empty end), (if (.long_entries | length) > 0 then "WARN: " + (.long_entries | length | tostring) + " index entr(ies) pass " + (.budget.entry | tostring) + " tokens (" + ([.long_entries[] | .pack + ":" + .id] | join(", ")) + "); shown whole" else empty end)' <<<"$sp_out" >&2
   fi
   # Pi's own compaction settings, pinned per run: a pane read whatever the
@@ -5974,6 +6329,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg compact_model "$compact_model" \
     --arg inbox_page_chars "${inbox_page_chars:-40000}" \
     --arg skill_release "${skill_release:-compaction}" \
+    --arg skill_cards "${skill_cards:-on}" \
+    --arg pack_skills "${pack_skills:-on}" \
     --argjson metered "$metered" \
     --arg unmetered_why "$(unmetered_why_word "$metered" "$subscription_models_csv")" \
     --arg cap_tokens "$cap_tokens" \
@@ -6008,6 +6365,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson until_solved "${until_solved:-0}" \
     --arg stop_policy "${stop_policy:-cap-pause}" \
     --arg stall_minutes "${stall_minutes:-}" \
+    --arg no_packs "$no_packs" \
+    --argjson kickoff_pid "$([[ "$start_agents" -eq 1 ]] && echo "$$" || echo null)" \
+    --arg kickoff_started "$(proc_started "$$")" \
     '{
       id: $id,
       "label": $run_label,
@@ -6069,6 +6429,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       },
       inbox_page_chars: ($inbox_page_chars | tonumber),
       skill_release: $skill_release,
+      skill_cards: $skill_cards,
+      pack_skills: $pack_skills,
       metered: ($metered == 1),
       unmetered_why: (if $unmetered_why == "" then null else $unmetered_why end),
       cap_tokens: (if $cap_tokens == "" then null else ($cap_tokens | tonumber) end),
@@ -6094,7 +6456,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       allow_root: ($allow_root == 1),
       hold: null,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
-      state: "prepared"
+      state: "prepared",
+      kickoff: (if $kickoff_pid == null then null else {pid: $kickoff_pid, started: $kickoff_started} end),
+      no_packs: ($no_packs | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))
     } + (if $pack_tools_as_jobs == "" then {} else {pack_tools_as_jobs: ($pack_tools_as_jobs | split(","))} end)')"
   # A resumed run is the same record: its start, its hold and what it was
   # given stay; what this start set comes on top, with the resume beside it.
@@ -6110,6 +6474,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # The record names this launcher now (kickoff.pid): its claim has said all it had to.
+  [[ "$isolation" == "microvm" ]] && rm -f "$(kickoffs_dir)/$$.json" 2>/dev/null
+  true
   # What the run was started with, for swarm.sh resume: outside the run,
   # 0600, in a directory denied to the panes where the guard can deny it (a
   # VM mounts none of runs/). The notify command is never in it: it is kept
@@ -6145,6 +6512,15 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     jq -r 'if (.must_establish_unknown // []) | length > 0 then "WARN: the goal says these must be established and numbers no such question, so nothing is required of them: \(.must_establish_unknown | join(", ")). Name a question as the goal numbers it (- 1), or require it once the run exists: swarm.sh question <run> amend Q-n --expect-rev N --must-establish --why \"…\"" else empty end' <<<"$seeded_out" >&2 2>/dev/null || true
   else
     echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  fi
+  # On by default for a team with a seat of the weak model class (leads.ts modelClass), for any team with --seed-leads.
+  if [[ "${seed_leads:-auto}" != 0 ]]; then
+    local seeded_leads
+    if seeded_leads="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" seed "$sandbox" $([[ "${seed_leads:-auto}" == auto ]] && printf -- '--weak-only') 2>/dev/null)"; then
+      jq -r 'if (.opened | length) > 0 then "Leads:        \(.opened | length) seeded, one for each question no lead answers (\(.opened | join(", "))): open and unheld, for a seat to claim" else empty end' <<<"$seeded_leads"
+    else
+      echo "WARN: --seed-leads: the leads could not be seeded; the seats open their own." >&2
+    fi
   fi
   # The operator's notify command, outside the run and 0600: a webhook's
   # URL is often its secret, and nothing an agent writes may name what the
@@ -6196,6 +6572,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
         ;;
     esac
     echo "Skill release: ${skill_release:-compaction} (${skill_release_says})"
+    if [[ "${pack_skills:-on}" == "off" ]]; then :; elif [[ "${skill_cards:-on}" == "off" ]]; then echo "Skill cards: off (a note reaches a seat only when it calls skill(id))"; else echo "Skill cards: on (a call to a tool a note names, by a seat that does not hold the note, comes back with the note's card)"; fi
   fi
   if [[ -n "$models_spec" ]]; then
     echo "Models:       $MODEL_SUMMARY"
@@ -6351,7 +6728,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,premise_propose,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,image_crop,name,record,record_finding,record_answer,record_coverage,record_limitation,record_absence,record_candidate,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,premise_propose,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -6379,7 +6756,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   # Tool jobs in worker VMs, when the run has a job service.
   if [[ "$isolation" == "microvm" && "${jobs:-1}" -eq 1 ]]; then
-    PI_TOOLS+=",job_run,job_status,catalog_request"
+    PI_TOOLS+=",job_run,job_status,store_find,jobs,catalog_request"
   fi
   # The dynamic network's tools, when the run has its fetch service.
   if [[ "$isolation" == "microvm" && "${network_mode:-closed}" != "closed" ]]; then
@@ -6452,12 +6829,23 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     if [[ -n "$compact_at" ]]; then provider_env+=(--env "SWARM_COMPACT_AT=$compact_at"); fi
     if [[ -n "$compact_prompt" ]]; then provider_env+=(--env "SWARM_COMPACT_PROMPT=$compact_prompt"); fi
     if [[ -n "$compact_model" ]]; then provider_env+=(--env "SWARM_COMPACT_MODEL=$compact_model"); fi
+    if [[ -n "${SWARM_COMPACT_PRESUMMARY:-}" ]]; then provider_env+=(--env "SWARM_COMPACT_PRESUMMARY=$SWARM_COMPACT_PRESUMMARY"); fi
   fi
   if [[ -n "$inbox_page_chars" ]]; then
     provider_env+=(--env "SWARM_INBOX_PAGE_CHARS=$inbox_page_chars")
   fi
   if [[ -n "$skill_release" ]]; then
     provider_env+=(--env "SWARM_SKILL_RELEASE=$skill_release")
+  fi
+  if [[ -n "$skill_cards" ]]; then
+    provider_env+=(--env "SWARM_SKILL_CARDS=$skill_cards")
+  fi
+  if [[ -n "${lead_max_questions:-}" ]]; then
+    provider_env+=(--env "SWARM_LEAD_MAX_QUESTIONS=$lead_max_questions")
+    export SWARM_LEAD_MAX_QUESTIONS="$lead_max_questions"
+  fi
+  if [[ "${pack_skills:-on}" == "off" ]]; then
+    provider_env+=(--env "SWARM_PACK_SKILLS=off")
   fi
   # A case can turn on a library the host does not have. The answer is not
   # root — nothing here needs it, and the read-only guard over inputs/ is the
@@ -6725,9 +7113,11 @@ EOF
   fi
   # The run's frozen copy when it has one, as the hub and its keeper.
   nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+  # Every line of its log carries the time it was written (log_stamper), not only its own "idle-nudge:" lines.
+  : > "$sandbox/traces/idle-nudge.log"
   detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
     bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-    >"$sandbox/traces/idle-nudge.log" 2>&1 &
+    > >(log_stamper "$sandbox/traces/idle-nudge.log") 2>&1 &
   echo $! > "$sandbox/idle-nudge.pid"
   # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
   # found dead a minute later: an empty log, no state file, nothing in the
@@ -6740,7 +7130,7 @@ EOF
   if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
     detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-      >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
+      > >(log_stamper "$sandbox/traces/idle-nudge.log") 2>&1 </dev/null &
     echo $! > "$sandbox/idle-nudge.pid"
     sleep 2
     if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
@@ -8064,8 +8454,9 @@ vm_ref_for_profile() { # <profile>
 # The job images of a run: each pack's own profile (images/recipe.py
 # profile-for), and the one holding every pack as the default. An image this
 # host does not hold is pulled; one that cannot be had is left out, and its
-# packs' jobs run in the default, said. Sets job_images_json (profile -> ref)
-# and pack_profiles_json (pack id -> profile).
+# packs' jobs run in the default, said. Sets job_images_json (profile -> ref),
+# pack_profiles_json (pack id -> profile) and job_image_digests_json (profile ->
+# the digest this host holds under that reference, as it was read here).
 plan_job_images() { # <pack dirs, one per line> <default job image>
   local dirs="$1" default_ref="$2" d id profile ref digest default_profile
   local images='{}' packs='{}'
@@ -8088,7 +8479,8 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
   # Each image on this host, or pulled now, before the clock starts; a
   # kickoff that starts no agent (--no-start, a check) looks for none, as it
   # does not for the agents' own image.
-  local have='{}' p
+  local have='{}' p seen_digests='{}'
+  job_image_digests_json='{}'
   if [[ "${start_agents:-1}" -ne 1 || "${CHECK_ONLY:-0}" -eq 1 ]]; then
     job_images_json="$images"
     pack_profiles_json="$packs"
@@ -8103,6 +8495,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
     if [[ -n "$digest" || "${CHECK_ONLY:-0}" -eq 1 ]]; then
       have="$(jq -c --arg p "$p" --arg r "$ref" '. + {($p): $r}' <<<"$have")"
+      [[ -n "$digest" ]] && seen_digests="$(jq -c --arg p "$p" --arg d "$digest" '. + {($p): $d}' <<<"$seen_digests")"
     elif [[ "$p" == "$default_profile" ]]; then
       echo "BLOCKER: the job image $ref, which holds every pack of the run, is not on this host and could not be pulled; build it (images/README.md) or pass --image." >&2
       return 1
@@ -8111,6 +8504,7 @@ plan_job_images() { # <pack dirs, one per line> <default job image>
     fi
   done
   job_images_json="$have"
+  job_image_digests_json="$seen_digests"
   pack_profiles_json="$(jq -c --argjson have "$have" --arg dflt "$default_profile" 'with_entries(.value = (if $have[.value] then .value else $dflt end))' <<<"$packs")"
 }
 
@@ -8162,7 +8556,7 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
 cmd_image_for() {
   local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason jobs=1 brain_base=1 jobs_json='[]'
   # plan_job_images looks for no image when nothing is started.
-  local start_agents=0 job_images_json='{}' pack_profiles_json='{}'
+  local start_agents=0 job_images_json='{}' pack_profiles_json='{}' job_image_digests_json='{}'
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
@@ -8422,7 +8816,9 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
   # The inbox page bound is read by readInbox, which for a VM runs here.
   # The custody the hub takes at the finish has the operator's deadline.
-  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" SWARM_VM_IMAGE_DIGEST="${vm_image_digest:-}" SWARM_CUSTODY_TIMEOUT="${custody_timeout:-${SWARM_CUSTODY_TIMEOUT:-14400}}" detach_exec node --experimental-strip-types --no-warnings "$script" \
+  # SWARM_HUB_SUPERVISED: its keeper (hub-supervise.sh, started below once the hub listens) brings it back, so the hub may
+  # end itself at a quiet moment past its heap line (hub-health.ts recycleDue).
+  printf '%s' "$input" | SWARM_HUB_SUPERVISED=1 SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" SWARM_VM_IMAGE_DIGEST="${vm_image_digest:-}" SWARM_CUSTODY_TIMEOUT="${custody_timeout:-${SWARM_CUSTODY_TIMEOUT:-14400}}" detach_exec node --experimental-strip-types --no-warnings --max-old-space-size="${SWARM_HUB_HEAP_MB:-8192}" --heapsnapshot-near-heap-limit=1 --diagnostic-dir="$dir" "$script" \
     "$sandbox" --dir "$dir" --run "$run" "${hub_args[@]}" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
   local hub_pid=$!
   echo "$hub_pid" > "$sandbox/hub.pid"
@@ -8810,6 +9206,15 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when finalisatio
   if dir="$(hub_dir_of "$sandbox")"; then
     # The hub's own lines the collector did not take stay with the run.
     [[ -f "$dir/hub-spill.jsonl" && ! -L "$dir/hub-spill.jsonl" && -s "$dir/hub-spill.jsonl" ]] && cp -P "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
+    # A heap snapshot a hub left when it ran out of memory (--heapsnapshot-near-heap-limit) is the operator's to read, not the run's
+    # (a hub's memory holds the seats' tokens): kept under ~/.dfirswarm/diagnostics/<run>/, 0700, and said.
+    local snap kept_snaps=0
+    for snap in "$dir"/*.heapsnapshot; do
+      [[ -f "$snap" && ! -L "$snap" ]] || continue
+      mkdir -p "$HOME/.dfirswarm/diagnostics/$run" && chmod 700 "$HOME/.dfirswarm/diagnostics" "$HOME/.dfirswarm/diagnostics/$run" 2>/dev/null
+      mv "$snap" "$HOME/.dfirswarm/diagnostics/$run/" 2>/dev/null && kept_snaps=$((kept_snaps + 1))
+    done
+    [[ "$kept_snaps" -gt 0 ]] && echo "Hub heap snapshot(s) kept: $kept_snaps in $HOME/.dfirswarm/diagnostics/$run/ (the hub ran out of memory; they hold its tokens, so they stay out of the run)." >&2
     # Only a directory this run could have made, and only once its hub has
     # gone: a hub still up keeps it (and hub.dir, hub.pid), so the next stop
     # finds the hub, waits for it and seals after it, never beside it.
@@ -8950,9 +9355,14 @@ vm_build_spec() { # <hub dir> <out file>
     [[ -n "$compact_at" ]] && add_env SWARM_COMPACT_AT "$compact_at"
     [[ -n "$compact_prompt" ]] && add_env SWARM_COMPACT_PROMPT "$compact_prompt_vm"
     [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
+    # The operator's switch for the summary begun at the notice line: a VM takes no environment of the host's own.
+    [[ -n "${SWARM_COMPACT_PRESUMMARY:-}" ]] && add_env SWARM_COMPACT_PRESUMMARY "$SWARM_COMPACT_PRESUMMARY"
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
   [[ -n "${skill_release:-}" ]] && add_env SWARM_SKILL_RELEASE "$skill_release"
+  [[ -n "${skill_cards:-}" ]] && add_env SWARM_SKILL_CARDS "$skill_cards"
+  [[ -n "${lead_max_questions:-}" ]] && add_env SWARM_LEAD_MAX_QUESTIONS "$lead_max_questions"
+  [[ "${pack_skills:-on}" == "off" ]] && add_env SWARM_PACK_SKILLS off
   # The hub refuses a part larger than its own size: a size set for this run
   # reaches the guests too, so both ends cut the same parts.
   [[ -n "${SWARM_TRANSFER_PART_BYTES:-}" ]] && add_env SWARM_TRANSFER_PART_BYTES "$SWARM_TRANSFER_PART_BYTES"
@@ -9118,6 +9528,7 @@ launch_vm_agents() {
     fi
   fi
   start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
+  start_image_capabilities "$sandbox" "$hub_dir" "$rec"
   if [[ "${network_mode:-closed}" != "closed" ]] && ! start_net_fetch "$sandbox" "$hub_dir" "$swarm_id"; then
     stop_vm_run "$sandbox" "$swarm_id" 0
     stop_sandbox_daemons "$sandbox" keep-record
@@ -9250,6 +9661,39 @@ launch_vm_agents() {
     echo "Agents:       $n Pi sessions up in their VMs, each linked to the hub"
   fi
   SWARM_GUARD_MEASURED="microvm"
+}
+
+# What each job image can do (scripts/image-capabilities.ts). The cache keeps each image's last result by its
+# digest (plan_job_images reads each one's), so the next run of the same image can say it in its contract before a seat
+# reads it, and an image rebuilt under the same name is not shown an earlier one's.
+image_capabilities_cache() { printf '%s\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}/image-capabilities"; }
+
+# Before the contract is rendered: job-capabilities.json as pending, with an earlier run's result for an image of the
+# same digest, so SWARM.md's "Job image capabilities" says it, and that this run tests every image again.
+seed_job_capabilities() { # <sandbox> <job images JSON>
+  local sandbox="$1" images="${2:-}" digests="${job_image_digests_json:-}"
+  [[ -n "$images" ]] || images='{}'
+  [[ -n "$digests" ]] || digests='{}'
+  [[ -z "${resume_of:-}" ]] || return 0
+  [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off && "${isolation:-}" == microvm && "${jobs:-1}" -eq 1 ]] || return 0
+  [[ "$(jq 'length' <<<"$images" 2>/dev/null || echo 0)" -gt 0 ]] || return 0
+  rm -f "$sandbox/job-capabilities.json"
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/image-capabilities.ts" "$sandbox" --seed --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" >/dev/null 2>&1 || true
+}
+
+# As soon as the hub's job service is up, before the seats' VMs are made: one known-answer probe job an image, in the
+# background, run from the run's frozen copy. The seats get the result on the board (as early as a job can give it,
+# often before their first inbox) and in job-capabilities.json. SWARM_IMAGE_CAPABILITIES=off skips it.
+start_image_capabilities() { # <sandbox> <hub dir> <run record JSON>
+  local sandbox="$1" hub_dir="$2" record="$3" images cap_profiles digests="${job_image_digests_json:-}"
+  [[ -n "$digests" ]] || digests='{}'
+  [[ "${SWARM_IMAGE_CAPABILITIES:-on}" != off ]] || return 0
+  images="$(jq -c '.isolation.jobs.images // {}' <<<"$record" 2>/dev/null || echo '{}')"
+  cap_profiles="$(jq -r 'keys | join(",")' <<<"$images" 2>/dev/null || true)"
+  [[ -n "$cap_profiles" && -S "$hub_dir/admin.sock" ]] || return 0
+  ( node --experimental-strip-types --no-warnings "$(run_script "$hub_dir" scripts/image-capabilities.ts)" "$sandbox" --hub-admin "$hub_dir/admin.sock" --profiles "$cap_profiles" \
+      --images "$images" --digests "$digests" --cache "$(image_capabilities_cache)" > >(log_stamper "$sandbox/traces/image-capabilities.log") 2>&1 & ) >/dev/null 2>&1
+  echo "Capabilities: each job image ($cap_profiles) is being tested now with known-answer probes; the seats are told on the board (job-capabilities.json), and SWARM.md says it"
 }
 
 cmd_reap() {
@@ -9395,7 +9839,7 @@ last_trace_ts() { # <sandbox>
 
 cmd_stop() {
   local stop_args=("$@")
-  local id="${1:-}" no_custody=0 custody_timeout="" after_hub=0 vms_left=0 found_dead=0 dead_last_trace=""
+  local id="${1:-}" no_custody=0 custody_timeout="" after_hub=0 vms_left=0 found_dead=0 dead_last_trace="" ask_first=0
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -9404,11 +9848,15 @@ cmd_stop() {
       # what is left is cleared, and the run keeps the state the hub gave it.
       --after-hub) after_hub=1; no_custody=1; shift ;;
       --custody-timeout) custody_timeout="$2"; shift 2 ;;
+      # Ask the seats for what they hold before the run is put away: a seat of the run s01a4f4 had computed an answer a
+      # minute before the stop and had not recorded it. The seats are told the run stops in N minutes and to record every
+      # value they have, as an answer or a finding; the stop goes on after N minutes.
+      --ask-first) ask_first="${2:-}"; [[ "$ask_first" =~ ^[0-9]+$ && "$ask_first" -ge 1 && "$ask_first" -le 30 ]] || { echo "stop: --ask-first takes minutes, 1 to 30" >&2; exit 2; }; shift 2 ;;
       *) echo "stop: unknown argument $1" >&2; exit 2 ;;
     esac
   done
   if [[ -z "$id" ]]; then
-    echo "stop requires <id> [--no-custody] [--custody-timeout SEC]" >&2
+    echo "stop requires <id> [--ask-first MINUTES] [--no-custody] [--custody-timeout SEC]" >&2
     exit 2
   fi
   ensure_registry
@@ -9428,6 +9876,18 @@ cmd_stop() {
   trap 'echo >&2; echo "stop interrupted while ${stop_step}. Nothing is lost: scripts/swarm.sh stop '"$id"' again finishes it (every step is safe to repeat)." >&2; exit 130' INT TERM
   local sandbox stop_hub_dir
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  if [[ "$ask_first" -gt 0 && -n "$sandbox" && -d "$sandbox" && "$after_hub" -eq 0 ]]; then
+    stop_step="asking the seats what they hold"
+    node --experimental-strip-types --no-warnings -e '
+      const [protocol, S, body] = process.argv.slice(1);
+      import(protocol).then((P) => P.systemPost(S, { tag: "ask", to: "all", body })).catch(() => process.exit(1));
+    ' "$ROOT/extensions/protocol.ts" "$sandbox" "THE RUN STOPS IN ${ask_first} MINUTE(S), by the operator. Before it does, put on the ledger everything you hold and have not recorded: every value you have found for a question (record it as the answer, or as a finding with answers: [n] if you are not its lead's holder; an unverified value is recorded as a candidate, with what is still open), and the state of what you are in the middle of. Start nothing new. What is not on the ledger when the run stops is lost." >/dev/null 2>&1 \
+      && echo "Asked:        the seats were told the run stops in ${ask_first} minute(s) and to record what they hold; waiting" \
+      || echo "WARN: the seats could not be told (the post failed); stopping now" >&2
+    operator_trace "$sandbox" stop_ask_first "$id" "$ask_first"
+    sleep $((ask_first * 60))
+    stop_step="holding the jobs"
+  fi
   # Hold jobs before closing panes: Herdr may take time to answer, and the
   # hub must not accept a job or start a worker during that wait.
   if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
@@ -9638,22 +10098,29 @@ cmd_context() {
 }
 
 # Process metrics from a run's own registers (scripts/metrics.ts, docs/usage.md
-# "Metrics"), or two runs of one goal compared question by question. Read
-# only: nothing is written into either run.
+# "Metrics"), two runs of one goal compared question by question, or the runs
+# of the notes experiment set side by side by their --skill-cards arm (each
+# run's arm read from its registry record). Read only: nothing is written into
+# any run.
 cmd_metrics() {
-  local compare=0 json=() ids=()
+  local compare=0 arms=0 json=() ids=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --compare) compare=1; shift ;;
+      --arms) arms=1; shift ;;
       --json) json=(--json); shift ;;
       -*) die_usage "metrics: unknown option $1" ;;
       *) ids+=("$1"); shift ;;
     esac
   done
-  if [[ "$compare" -eq 1 ]]; then
+  if [[ "$compare" -eq 1 && "$arms" -eq 1 ]]; then
+    die_usage "metrics takes --compare or --arms, not both"
+  elif [[ "$compare" -eq 1 ]]; then
     [[ ${#ids[@]} -eq 2 ]] || die_usage "metrics --compare takes two run ids"
+  elif [[ "$arms" -eq 1 ]]; then
+    [[ ${#ids[@]} -ge 1 ]] || die_usage "metrics --arms takes one run id or more"
   else
-    [[ ${#ids[@]} -eq 1 ]] || die_usage "metrics takes one run id (or --compare <id-A> <id-B>)"
+    [[ ${#ids[@]} -eq 1 ]] || die_usage "metrics takes one run id (or --compare <id-A> <id-B>, or --arms <id>...)"
   fi
   ensure_registry
   local id sandbox dirs=()
@@ -9662,7 +10129,9 @@ cmd_metrics() {
     [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
     dirs+=("$sandbox")
   done
-  if [[ "$compare" -eq 1 ]]; then
+  if [[ "$arms" -eq 1 ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" --arms "${dirs[@]}" --registry "$REGISTRY" ${json[@]+"${json[@]}"}
+  elif [[ "$compare" -eq 1 ]]; then
     node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" --compare "${dirs[@]}" ${json[@]+"${json[@]}"}
   else
     node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" "${dirs[0]}" ${json[@]+"${json[@]}"}
@@ -10164,7 +10633,7 @@ cmd_requests() {
 #   evidence <id> list [--json]
 #   material <id> add PATH --why W [--class operator_supplied|case_material] [--sensitive] [--as ID]
 #   material <id> list [--json]
-#   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+#   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--provides CAP[,CAP]] [--for R-n|L-n]... [--as ID]
 #   tool-supply <id> list [--json]
 # A tool supplied is material (class operator_supplied) with its provenance: where it came
 # from and how it was built (the operator's statement), the hashes the operator checked
@@ -10200,6 +10669,20 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
       ;;
     add)
       [[ -n "${1:-}" ]] || { echo "BLOCKER: $name add needs the path of the file or directory." >&2; exit 2; }
+      # --provides CAP[,CAP] (tool-supply): what the program is supplied for. Each is tested against a known answer in
+      # a worker job once the files are sealed (scripts/supply-probe.ts): a decoder supplied to eight runs read no image.
+      local provides="" kept=() arg
+      while [[ $# -gt 0 ]]; do
+        arg="$1"; shift
+        if [[ "$arg" == --provides ]]; then
+          [[ "$mode" == tool ]] || { echo "BLOCKER: --provides is for tool-supply (a program is tested; data is not)." >&2; exit 2; }
+          provides="${1:-}"; [[ -n "$provides" ]] || { echo "BLOCKER: --provides takes a capability list (qr-decode,video-decode,image-convert)." >&2; exit 2; }
+          shift
+        else
+          kept+=("$arg")
+        fi
+      done
+      set -- ${kept[@]+"${kept[@]}"}
       while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
       out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$mode-add" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       OPERATOR_AUDIT_DETAIL="$(jq -c '{material: {ok: (.ok != false), import: (.import // null), class: (.class // null), entry: (.entry // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
@@ -10221,10 +10704,230 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
         + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
         + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
+      # A tool is tested where the seats run it, against a known answer (--provides and a hub with a job service), or it
+      # is recorded as untested and the seats are told so: never left to be read as working.
+      local probe_admin="" probe_out="" probe_rc=0 probe_import="" untested="" told
+      if [[ "$mode" == tool ]]; then
+        probe_import="$(jq -r '.import // empty' <<<"$out")"
+        probe_admin="$(question_admission_args "$sandbox" | sed -n 2p)"
+        if [[ -z "$provides" ]]; then
+          untested="nothing said what it is for (no --provides)"
+        elif [[ -z "$probe_admin" ]]; then
+          untested="the run has no hub with a job service to test it in"
+        fi
+        if [[ -n "$untested" && -n "$probe_import" ]]; then
+          probe_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/supply-probe.ts" "$sandbox" "$probe_import" --untested "$untested" \
+            ${provides:+--provides "$provides"} ${probe_admin:+--hub-admin "$probe_admin"} 2>&1)" || true
+          told="$(jq -r 'if .posted == true then "the seats were told on the board that it is untested" else "the board post that it is untested could not be made: tell the seats yourself (swarm.sh say)" end' <<<"$probe_out" 2>/dev/null || echo "it could not be recorded as untested ($probe_out): tell the seats yourself (swarm.sh say)")"
+          OPERATOR_AUDIT_DETAIL="$(jq -c '{probe: .}' <<<"$probe_out" 2>/dev/null || echo '{}')" operator_audit "${name//-/_}_probe" "$id" add || true
+        fi
+      fi
+      if [[ "$mode" == tool && -z "$provides" ]]; then
+        echo "NOTE: nothing says what this program is for (--provides CAP[,CAP]), so it was not tested: whether it works where the seats run it is not known. A decoder that starts and prints its version can still read no file. It is recorded as untested (supplied-capabilities.json), and ${told:-nothing told the seats}."
+      fi
       printf '%s\n' "$out"
+      if [[ -n "$provides" && -n "$untested" ]]; then
+        echo "WARN: the run has no hub with a job service to test the program in (--provides $provides): it is sealed, and NOT tested. It is recorded as untested, what the kickoff found of $provides stands, and ${told:-nothing told the seats}." >&2
+        exit 4
+      elif [[ -n "$provides" ]]; then
+        probe_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/supply-probe.ts" "$sandbox" "$probe_import" --provides "$provides" --hub-admin "$probe_admin")" || probe_rc=$?
+        jq -r '.probes[]? | "Tested \(.capability): \(if .ok then "works" else "DOES NOT WORK" end) (\(.said)\(if .job then "; job " + .job else "" end))"' <<<"$probe_out" 2>/dev/null || printf '%s\n' "$probe_out"
+        jq -r --arg imp "import:$probe_import" 'select(.requires) | .requires | "Required capabilities: \(.met)/\(.of) met" + (if (.newly_met | length) > 0 then " (\(.newly_met | join(", ")) now met by \($imp))" else "" end) + (if (.unmet | length) > 0 then "; not met: \(.unmet | join(", "))" else "" end) + "."' <<<"$probe_out" 2>/dev/null || true
+        OPERATOR_AUDIT_DETAIL="$(jq -c '{probe: .}' <<<"$probe_out" 2>/dev/null || echo '{}')" operator_audit "${name//-/_}_probe" "$id" add || true
+        if [[ "$probe_rc" -ne 0 ]]; then
+          echo "BLOCKER: $probe_import does not do what it was supplied for (see above). It stays sealed and the seats were told it does not work; supply one that passes." >&2
+          exit 3
+        fi
+      fi
       ;;
     *) echo "BLOCKER: $name takes add or list (got $sub)." >&2; exit 2 ;;
   esac
+}
+
+# An installed pack as a run is given it, at the kickoff and by pack-add: its files must match its own checksums
+# (scripts/pack.sh verify, whose problems go to stderr), and one older than the pack this checkout ships is said, since
+# the run takes it as it was installed: its tools and skills are the old ones, fixes and all. 1 when it does not verify.
+installed_pack_check() { # <installed pack dir>
+  local pd="$1" id have ship shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
+  id="$(basename "$pd")"
+  "$ROOT/scripts/pack.sh" verify "$id" >/dev/null || return 1
+  [[ -f "$shipped/$id/pack.json" ]] || return 0
+  have="$(jq -r '.version // empty' "$pd/pack.json" 2>/dev/null)"
+  ship="$(jq -r '.version // empty' "$shipped/$id/pack.json" 2>/dev/null)"
+  if [[ -n "$have" && -n "$ship" ]] && python3 -c 'import sys
+t = lambda v: tuple(int(x) for x in v.split("."))
+sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$have" "$ship" 2>/dev/null; then
+    echo "WARN: pack $id is installed at $have and this checkout ships $ship; the run uses $have. Update it with: scripts/pack.sh install $shipped/$id" >&2
+  fi
+  return 0
+}
+
+# How a seat runs a tool pack-add brought, said true to the run it was brought into. With tool forging on, the
+# extension reads tools/ at the end of each turn and registers what is new as a tool of the seat's own; without it, the
+# seat's tool list is the one its start named. A run with a job service runs any tool in tools/ as job_run(tool:), and
+# picks a tool's image by its pack's profile, which a pack added after the kickoff does not have: such a tool runs in
+# the run's default job image unless the seat names a profile, so the post names the run's image that holds the pack,
+# if one does. A run with neither has its tools' scripts, run from bash.
+pack_add_how() { # <run record JSON> <pack> <installed pack dir>
+  local rec="$1" pack="$2" pd="$3" progs="" profiles="{}"
+  progs="$(jq -r '[.binaries[]? | (.package // .name)] | reduce .[] as $x ([]; if index([$x]) then . else . + [$x] end)
+    | (.[:4] | join(", ")) + (if length > 4 then ", …" else "" end)' "$pd/requires/host.json" 2>/dev/null || true)"
+  [[ -f "$ROOT/images/profiles.json" ]] && profiles="$(jq -c '.profiles // {}' "$ROOT/images/profiles.json" 2>/dev/null || echo '{}')"
+  jq -r --arg pack "$pack" --arg progs "$progs" --argjson profiles "$profiles" '
+    (.tool_forging == true) as $forge
+    | (.isolation.mode == "microvm" and ((.isolation.jobs | type) == "object")) as $jobs
+    | (.isolation.jobs.images // {}) as $img
+    | (.isolation.jobs.image // "") as $dref
+    | ([$img | to_entries[] | select(.value == $dref) | .key] | first // null) as $dprof
+    | ([$profiles | to_entries[] | select($img[.key] != null)
+        | {key, packs: (.value | if type == "array" then . else (.packs // []) end)}
+        | select(.packs | index($pack) != null) | {key, n: (.packs | length)}] | sort_by(.n) | first.key // null) as $hold
+    | (if $progs == "" then "" else " (\($progs))" end) as $p
+    | (if ($img | length) == 0 then
+         " A job runs in the run'"'"'s one worker image, made for the packs the run started with: a tool that runs one of \($pack)'"'"'s programs\($p) may not find it there, and the job says which program is missing."
+       elif $hold == null then
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end) unless you name a profile, and no job image of this run holds \($pack): a tool that runs one of its programs\($p) may not find it, and the job says which program is missing (SWARM.md'"'"'s Job images lists the profiles)."
+       elif $hold == $dprof then
+         " A tool of it runs in the run'"'"'s default job image (profile \($dprof)), which holds \($pack)."
+       else
+         " A tool of it runs in the run'"'"'s default job image\(if $dprof then " (profile \($dprof))" else "" end), made for the packs the run started with, unless you name a profile: a tool that runs one of \($pack)'"'"'s programs\($p) needs job_run(tool: <name>, profile: \"\($hold)\", args: {...}), the run'"'"'s job image that holds \($pack)."
+       end) as $where
+    | if $forge and $jobs then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn (tools(name: <name>) gives one whole); a direct call runs one in your own VM, which has few forensic programs, and job_run(tool: <name>, args: {...}) runs one as a job.\($where)"
+      elif $forge then
+        "Tool forging is on in this run, so they join your tool list at the end of your next turn and a call runs one where you are, as a forged tool runs; tools(name: <name>) gives one whole."
+      elif $jobs then
+        "They are not in your tool list (it was fixed at the start): run one with job_run(tool: <name>, args: {...}); its parameters are in tools/<name>/manifest.json.\($where)"
+      else
+        "They are not in your tool list (it was fixed at the start), and this run has no job service: a tool is the script tools/<name>/<entry>, run by the runtime its manifest names (tools/<name>/manifest.json, with its parameters), which takes its arguments as one JSON object on stdin; run it with bash."
+      end' <<<"$rec"
+}
+
+# A pack brought into a running run (E7): the memory pack, for a dump the catalogue finds inside an image after the
+# kickoff (the kickoff adds it only for a dump at the top of the inputs; hub-supervise.sh calls this when the job
+# service says a catalogue lists one), or another pack the operator names. The run's images, its seats' tool lists and
+# their skill index are fixed at its start, so the pack comes in by what a running run can take: its tools into
+# tools/ (the job service reads tools/ as it is: a seat runs one with job_run(tool: <name>); pack_add_how says where),
+# its notes copied into notes/<pack>/ (read-only; every seat's VM mounts the run live), the run's record (its packs,
+# with when, by whom and why this one was added), the trace (the operator's line, or the harness's pack_added), and a
+# post to every seat naming both. Under the kickoff's rule: only a run that has packs, never a pack the operator
+# excluded (--no-pack), never one this host has not installed or whose files no longer match its checksums (an older
+# install is said, as the kickoff says it), never one that declares secrets (a job does not carry them). Exit 0 when the
+# pack is in the run (added now or before), 3 when a rule keeps it out (said), 2 on a usage error.
+#   pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
+cmd_pack_add() {
+  local id="${1:-}" pack="${2:-}" why="" by=operator
+  [[ -n "$id" && -n "$pack" && "$id" != -* && "$pack" != -* ]] || die_usage "pack-add requires <id> <pack> [--why TEXT] [--by catalogue|operator]"
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --why) why="${2:-}"; shift 2 ;;
+      --by) by="${2:-}"; shift 2 ;;
+      *) die_usage "pack-add: unknown option $1" ;;
+    esac
+  done
+  [[ "$by" == catalogue || "$by" == operator ]] || die_usage "pack-add: --by is catalogue or operator"
+  ensure_registry
+  local rec sandbox state version sha tools_added=() t name notes post
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  [[ "$state" == running || "$state" == prepared ]] || { echo "BLOCKER: $id is $state; a pack is added only to a run that is going." >&2; exit 2; }
+  if jq -e --arg p "$pack" '[(.packs // [])[]? | .id? // empty] | index($p) != null' <<<"$rec" >/dev/null 2>&1; then
+    echo "Packs:        $pack is already among $id's packs; nothing added."
+    return 0
+  fi
+  if jq -e --arg p "$pack" '(.no_packs // []) | index($p) != null' <<<"$rec" >/dev/null 2>&1; then
+    echo "NOTE: $pack was not added to $id: its kickoff excluded it (--no-pack)." >&2
+    exit 3
+  fi
+  if [[ "$(jq '[(.packs // [])[]?] | length' <<<"$rec")" -eq 0 ]]; then
+    echo "NOTE: $pack was not added to $id: the run has no pack, and a pack is added only to a run that has packs (as its kickoff would)." >&2
+    exit 3
+  fi
+  # The pack and what it depends on that the run lacks, as the kickoff resolves them (dependencies first).
+  local resolved dirs=() d pid have
+  if ! resolved="$("$ROOT/scripts/pack.sh" resolve "$pack" 2>/dev/null)" || [[ -z "$resolved" ]]; then
+    echo "WARN: $pack was not added to $id: it, or a pack it depends on, is not installed on this host (scripts/pack.sh install packs/$pack)." >&2
+    exit 3
+  fi
+  have="$(jq -r '[(.packs // [])[]? | .id? // empty] | join(",")' <<<"$rec")"
+  while IFS= read -r d; do
+    [[ -n "$d" && -f "$d/pack.json" ]] || continue
+    pid="$(jq -r '.id' "$d/pack.json")"
+    [[ ",$have," == *",$pid,"* ]] && continue
+    if [[ "$(jq '(.secrets // []) | length' "$d/pack.json" 2>/dev/null || echo 0)" -gt 0 ]]; then
+      echo "WARN: $pack was not added to $id: $pid declares secrets, which a running run's jobs do not carry; start a run with --pack $pack." >&2
+      exit 3
+    fi
+    dirs+=("$d")
+  done <<<"$resolved"
+  # Each pack it brings is held as the kickoff holds every pack, before anything is copied: its files match its own
+  # checksums (one changed since it was installed is not copied into a live run), and an older install is said.
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    installed_pack_check "$d" || {
+      echo "BLOCKER: $pack was not added to $id: pack $(basename "$d") does not verify (pack.sh's reason is above). If a file of it changed since it was installed, install it again: scripts/pack.sh install packs/$(basename "$d")" >&2
+      exit 3
+    }
+  done
+  local entries=() added=() names=() said=()
+  for d in "${dirs[@]}"; do
+    pid="$(jq -r '.id' "$d/pack.json")"
+    version="$(jq -r '.version // "?"' "$d/pack.json")"
+    sha="$(sha256_of "$d/pack.json")"
+    # The tools: as the kickoff seeds a pack's (a pack's copy, its manifest naming the pack).
+    tools_added=()
+    chmod u+w "$sandbox/tools" 2>/dev/null || true
+    [[ -d "$d/tools" ]] && install_tools_from "$sandbox" "$d/tools" "$pid"
+    for t in "$d"/tools/*/; do
+      [[ -d "$t" ]] || continue
+      name="$(basename "${t%/}")"
+      jq -e --arg p "$pid" '.pack == $p' "$sandbox/tools/$name/manifest.json" >/dev/null 2>&1 && tools_added+=("$name") && names+=("$name")
+    done
+    # The notes, as files: skill() reads the packs the run started with, so these are read where they are.
+    notes="notes/$pid"
+    if [[ -d "$d/skills" ]]; then
+      [[ -d "$sandbox/$notes" ]] && chmod -R u+w "$sandbox/$notes" 2>/dev/null
+      rm -rf "${sandbox:?}/$notes"
+      mkdir -p "$sandbox/$notes"
+      cp -R "$d/skills/." "$sandbox/$notes/"
+      chmod -R a-w "$sandbox/$notes" 2>/dev/null || true
+    fi
+    entries+=("$(jq -nc --arg p "$pid" --arg v "$version" --arg sha "$sha" --arg by "$by" --arg why "$why" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg asked "$pack" \
+      --argjson tools "$(printf '%s\n' ${tools_added[@]+"${tools_added[@]}"} | jq -R 'select(length > 0)' | jq -s .)" \
+      '{id: $p, version: $v, manifest_sha256: $sha, added: ({at: $at, by: $by, why: (if $why == "" then null else $why end), tools: $tools, notes: "notes/\($p)"} + (if $p == $asked then {} else {for: $asked} end))}')")
+    added+=("$pid $version")
+    said+=("${pid} ${version} (${#tools_added[@]} tool(s), notes under notes/${pid}/)")
+  done
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    echo "Packs:        $pack is already among $id's packs; nothing added."
+    return 0
+  fi
+  registry_merge "$id" "$(jq -c --argjson add "$(printf '%s\n' "${entries[@]}" | jq -s .)" '{packs: ((.packs // []) + $add)}' <<<"$rec")" \
+    || { echo "BLOCKER: the run's record could not take $pack; its tools and notes are in the run, and the seats were not told." >&2; exit 1; }
+  # The operator's act is on the operator's record and the trace; the harness's own (by catalogue) is on the run's
+  # record and the trace as the harness's line, with the hub's own token when the run has a hub.
+  if [[ "$by" == operator ]]; then
+    operator_audit pack-add "$id" "$pack" ${why:+--why "$why"} || true
+    operator_trace "$sandbox" pack-add "$id" "$pack"
+  elif [[ -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null; then
+    local hub_now="" token="${SWARM_TRACE_TOKEN:-}" line
+    if [[ -z "$token" ]] && hub_now="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+      token="$(jq -r '.tokens.system // empty' "$hub_now/hub-input.json" 2>/dev/null || true)"
+    fi
+    line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg pack "$pack" --arg why "$why" \
+      --argjson added "$(printf '%s\n' "${entries[@]}" | jq -s -c 'map({id, version, tools: .added.tools})')" \
+      '{ts: $ts, agent: "system", tool: "pack_added", args: {pack: $pack, by: "catalogue", why: (if $why == "" then null else $why end)}, result: {ok: true, added: $added}}')"
+    SWARM_TRACE_TOKEN="$token" trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
+  fi
+  post="PACK ADDED: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g')$([[ -n "$why" ]] && printf ', %s' "$why")$([[ "$by" == catalogue ]] && printf ' (the harness adds the memory pack on its own when a catalogue lists a dump)' || printf ', by the operator'). The tools are in tools/: $(printf '%s\n' ${names[@]+"${names[@]}"} | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'). $(pack_add_how "$rec" "$pack" "$(grep -m1 "/$pack\$" <<<"$resolved")") The notes are files, read-only, under notes/<pack>/ (start with notes/${pack}/INDEX.md; a note id area/name is notes/<pack>/area/name.md): skill() does not reach them in this run, read them with read.$([[ "$pack" == memory-forensics ]] && printf ' Read the note for the dump'"'"'s kind (a process dump, a crash dump, a memory image) before you parse one yourself.')"
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, key, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "result", to: "all", key, body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$sandbox" "pack-added:$pack" "$post" >/dev/null 2>&1 \
+    || echo "WARN: the seats could not be told on the board that $pack was added: tell them (swarm.sh say $id ...)." >&2
+  echo "Packs:        added to $id: $(IFS=';'; printf '%s' "${said[*]}" | sed 's/;/; /g'); the record and the board say so"
 }
 
 # Change a running swarm's caps: raise the spend or the token cap, give it
@@ -10830,6 +11533,11 @@ PY
   pkg_copy "$sandbox/ledger/disputes.jsonl" "$out/ledger-disputes.jsonl" non-empty
   # What the store sweeps found for each coverage record's strings: a chain of its own.
   pkg_copy "$sandbox/ledger/sweeps.jsonl" "$out/ledger-sweeps.jsonl" non-empty
+  # Its side lists (what a sweep did not search, what it found, where either is longer than its line): each line names one by its
+  # sha256, and the package's verify holds it to that; carried as ledger-sweeps/<name>, regular files only, never the kept results.
+  if [[ -s "$out/ledger-sweeps.jsonl" ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" sweep-lists "$sandbox" "$out" >/dev/null || echo "WARN: the store sweeps' side lists could not all be copied; swarm.sh verify names any that is missing." >&2
+  fi
   # The finish register (the coordinator's lease, readiness, the checks, the report's reviews): chained, sealed by custody.
   pkg_copy "$sandbox/leads/finish.jsonl" "$out/finish.jsonl" non-empty
   # The lead register (how the investigation proceeded): its chained events,
@@ -11875,10 +12583,15 @@ cmd_help() {
                                            quick and unreviewed negatives, coverage, under-claiming (partial answers
                                            whose asked parts are all established), offers, done calls and refusals,
                                            the tail to the end, acquisition gaps, interpretations, reversals by cause,
-                                           tokens per question, duplicates, the network
+                                           tokens per question, duplicates, the network; the harness measures; and the
+                                           improvement plan's section 8 table, each of its 14 measures a figure or why not
   metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
                                            other run established, a shared negative on partial coverage, and a partial
                                            answer whose asked parts are all established, flagged
+  metrics --arms <id>... [--json]          the runs of the notes experiment by --skill-cards arm, inject against on:
+                                           cards given, wrong formats in the first tool call after a card and in the
+                                           others, refusals per accepted record, the section 8 rows on the notes; and
+                                           whether the arms differ, judged on two runs or more of each
 Every metric's definition is in docs/usage.md (Metrics).
 EOF
       ;;
@@ -12315,8 +13028,23 @@ Then images/recipe.py build reads the store (--symbols-from, by default this one
 files with no network. Each fetch is a line of the store's fetched.jsonl. images/README.md, "Symbol tables".
 EOF
       ;;
+    pack-add) cat <<'EOF'
+  pack-add <id> <pack> [--why TEXT] [--by catalogue|operator]
+                                                  bring a pack into a running run: its tools into tools/ (the seats
+                                                  run them with job_run(tool: <name>), in the run's default job image
+                                                  unless they name a profile; with tool forging on they also join the
+                                                  seats' tool lists), its notes as files under notes/<pack>/, the run's
+                                                  record, the trace and a post to every seat. The run's images and
+                                                  skill index stay as they were started. Only a run that has packs;
+                                                  never a pack its kickoff excluded (--no-pack), one this host has not
+                                                  installed or that does not verify against its checksums, or one that
+                                                  declares secrets: those exit 3, said. The harness runs it itself
+                                                  (--by catalogue) for memory-forensics when a catalogue lists a dump
+                                                  inside an image, which the kickoff could not see.
+EOF
+      ;;
     tool-supply) cat <<'EOF'
-  tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+  tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--provides CAP[,CAP]] [--for R-n|L-n]... [--as ID]
                                                   a program no image holds, for a running (or stopped) run: a file or a
                                                   directory (a program and the libraries it loads), copied and held
                                                   to its source's sha256, sealed as import:mat-<n>, on the ledger as
@@ -12341,6 +13069,10 @@ directory inside the job. A job that tried to run one in place says so in its re
 material are kept: every preset admits it; one that says operator_supplied=none for material refuses it,
 because nothing recorded on its output could be kept. What rests on it is flagged with its class. The reply
 tells you if the run's hub, started by an older harness, took it as plain material. docs/adr/0014.
+--provides CAP[,CAP] (qr-decode, image-convert, video-decode) tests the program against a known answer in a
+worker job once it is sealed: a capability the case requires (toolbox.json) is then met by it, and the seats
+are told what works. One that fails exits 3. A program supplied without --provides, or to a run with no hub
+whose job service could test it, is recorded as untested and the seats are told so; the second exits 4.
 EOF
       ;;
     *) die_usage "no help for '$topic'" ;;
@@ -12400,6 +13132,7 @@ main() {
     evidence) cmd_evidence "$@" ;;
     material) cmd_material "$@" ;;
     tool-supply) cmd_tool_supply "$@" ;;
+    pack-add) cmd_pack_add "$@" ;;
     symbols) python3 "$ROOT/scripts/symbols.py" "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
@@ -12421,4 +13154,6 @@ main() {
   esac
 }
 
-main "$@"
+# One line, so bash has read the exit before main runs: with the exit on a line of its own, a file edited while a long
+# command ran was read on from the old offset afterwards, and a start that had worked ended "line 12500: syntax error", exit 2.
+main "$@"; exit "$?"

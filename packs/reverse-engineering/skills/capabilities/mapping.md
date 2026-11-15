@@ -3,6 +3,7 @@ id: capabilities/mapping
 title: Static capabilities and the evidence behind them
 when: You must assess what a sample could do without claiming it ran.
 needs: [triage/quarantine]
+card: Read first what pe_info ({"path": "<sample>"}) did not read: an unsupported input is not a clean file. A capa match is a capability hypothesis, not that it ran: keep the whole capa -j output with version and rule set in a secret_output job, citing rules and addresses, not strings. No matches is "none under this tool, rule set and scope", not harmless or packed. Does not show: execution or intent.
 tools: [pe_info]
 requires_host: [capa, r2]
 ---

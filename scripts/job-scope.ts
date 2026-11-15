@@ -36,10 +36,11 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants, statfsSync } from "node:fs";
+import { constants, lstatSync, readdirSync, statfsSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { readManifest, storePaths, type Manifest } from "./evidence-store.ts";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { manifestFile, manifestOf, readManifest, storePaths } from "./evidence-store.ts";
+import { elsewhereWords } from "./store-find.ts";
 import type { Mount } from "./vm.ts";
 
 /** declared: the worker sees what the job named; all: everything, said; default-all: everything, because nothing was said. */
@@ -357,7 +358,9 @@ async function resolveObjects(S: string, declared: string[], o: { collections?: 
       }
       const kind = segs[1] as "jobs" | "imports";
       const id = segs[2];
-      const found = await readManifest(join(kind === "jobs" ? P.jobs : P.imports, id, "manifest.json"));
+      // Asked of the manifest's head and index (manifest-index.ts), never the manifest whole.
+      const manifestPath = join(kind === "jobs" ? P.jobs : P.imports, id, "manifest.json");
+      const found = await manifestOf(manifestPath);
       if (!found) throw new ScopeError(`${at.ref}: ${kind === "jobs" ? "job" : "import"} ${id} has no sealed output${kind === "jobs" ? " (not committed yet)" : ""}`);
       const base = `store/${kind}/${id}`;
       if (segs.length === 4 && segs[3] !== "out") {
@@ -369,19 +372,22 @@ async function resolveObjects(S: string, declared: string[], o: { collections?: 
       if (segs[3] !== "out") throw new ScopeError(`${at.ref}: a job's files are under ${base}/out/`);
       const rel = segs.slice(4).join("/");
       if (!rel) {
-        add({ ref: at.ref, path: `${base}/out`, area: "store", shape: "dir", from: w.from, files: found.manifest.totals.files, bytes: found.manifest.totals.bytes });
+        add({ ref: at.ref, path: `${base}/out`, area: "store", shape: "dir", from: w.from, files: found.head.totals.files, bytes: found.head.totals.bytes });
         continue;
       }
-      const name = (f: Manifest["files"][number]) => [f.path, Buffer.from(f.path_b64, "base64").toString("utf8")];
-      const file = at.dir ? undefined : found.manifest.files.find((f) => name(f).includes(rel));
+      const file = at.dir ? null : await manifestFile(manifestPath, found, [rel]);
       if (file) {
         const utf8 = Buffer.from(file.path_b64, "base64").toString("utf8") === file.path;
         add({ ref: at.ref, path: `${base}/out/${file.path}`, ...(utf8 ? {} : { path_b64: Buffer.concat([Buffer.from(`${base}/out/`), Buffer.from(file.path_b64, "base64")]).toString("base64") }), area: "store", shape: "file", from: w.from, sha256: file.sha256, bytes: file.bytes });
         continue;
       }
-      const inside = found.manifest.files.filter((f) => f.path.startsWith(`${rel}/`));
-      if (!inside.length) throw new ScopeError(`${at.ref}: ${rel} is not in ${kind === "jobs" ? "job" : "import"} ${id}'s manifest`);
-      add({ ref: at.ref, path: `${base}/out/${rel}`, area: "store", shape: "dir", from: w.from, files: inside.length, bytes: inside.reduce((a, f) => a + f.bytes, 0) });
+      const inside = await found.dir(rel);
+      if (!inside) {
+        // Which job holds it, if one does, the nearest names in this one, and store_find (D1).
+        const more = await elsewhereWords(S, kind === "jobs" ? "job" : "import", id, rel).catch(() => "");
+        throw new ScopeError(`${at.ref}: ${rel} is not in ${kind === "jobs" ? "job" : "import"} ${id}'s manifest${more ? `; ${more}` : ""}`);
+      }
+      add({ ref: at.ref, path: `${base}/out/${rel}`, area: "store", shape: "dir", from: w.from, files: inside.files, bytes: inside.bytes });
       continue;
     }
     // The catalogue and the agents' work: what is there now, by lstat, a link neither followed nor taken.
@@ -424,8 +430,8 @@ async function catalogSha(S: string, rel: string): Promise<{ sha256?: string }> 
   if (!m) return {};
   try {
     const g = JSON.parse(await readFile(join(S, "catalog", "gen", m[1], "generation.json"), "utf8")) as { job?: string };
-    const found = g.job ? await readManifest(join(storePaths(S).jobs, g.job, "manifest.json")) : null;
-    const f = found?.manifest.files.find((x) => x.path === m[2]);
+    const found = g.job ? await manifestOf(join(storePaths(S).jobs, g.job, "manifest.json")) : null;
+    const f = await found?.file([m[2]]);
     return f ? { sha256: f.sha256 } : {};
   } catch {
     return {};
@@ -470,6 +476,105 @@ export type ViewOptions = {
   /** Files the hub writes into the view itself (a trace line being sealed): run-relative path and bytes. */
   extra?: Array<{ path: string; bytes: Buffer; ref: string }>;
 };
+
+/**
+ * A tool manifest's rule for the files a file it is given needs beside it
+ * (IMPROVEMENT-PLAN-2 E11), read by the job service when it builds a
+ * declared scope: `suffixes`, the names the file's own name takes with each
+ * ending (a hive's .LOG1 and .LOG2, a SQLite database's -wal, -shm and
+ * -journal), matched whatever their letter case; `directory_of`, name
+ * patterns (`*` any run of characters) of a file that is one part of a store
+ * kept as a whole directory (a LevelDB's CURRENT, MANIFEST-*, *.ldb): the
+ * directory that holds it. A seat declared the hive and the job read it
+ * without its logs, as clean.
+ */
+export type CompanionRule = { param: string; suffixes?: string[]; directory_of?: string[]; why?: string };
+/** What a rule brought into a job's scope: the parameter, the file it was given, and each companion as a declared reference. */
+export type Companions = { param: string; of: string; add: string[]; why: string };
+
+/** The most entries of a directory listed for a file's companions. */
+export const COMPANION_LIST_MAX = 20_000;
+
+/** A run-relative path as a declared reference: input:, job:, import:, or the agent's own path; null for anything else. */
+export function refOfPath(rel: string, dir = false): string | null {
+  const tail = dir ? "/" : "";
+  if (rel.startsWith("inputs/") && rel.length > 7) return `input:${rel.slice(7)}${tail}`;
+  const job = /^store\/jobs\/(j\d{6})\/out\/(.+)$/.exec(rel);
+  if (job) return `job:${job[1]}/${job[2]}`;
+  const imp = /^store\/imports\/([a-z0-9-]{1,64})\/out\/(.+)$/.exec(rel);
+  if (imp) return `import:${imp[1]}/${imp[2]}`;
+  if (/^(work|tool-output|catalog)\/./.test(rel)) return rel;
+  return null;
+}
+
+/**
+ * The companions of what a tool job is given, by its manifest's `companions`
+ * rules: for each rule, each run-relative path its parameter holds (after
+ * references are resolved), the companion files that are there (or the
+ * directory), as declared references. What is not there is not named; a
+ * rule that is not one is passed over.
+ */
+export function companionsOf(S: string, man: { companions?: unknown }, args: Record<string, unknown>): Companions[] {
+  const root = resolve(S);
+  const rules = Array.isArray(man.companions) ? (man.companions as unknown[]) : [];
+  const out: Companions[] = [];
+  for (const raw of rules) {
+    if (!raw || typeof raw !== "object") continue;
+    const rule = raw as CompanionRule;
+    if (typeof rule.param !== "string") continue;
+    const suffixes = Array.isArray(rule.suffixes) ? rule.suffixes.filter((x): x is string => typeof x === "string" && x.length > 0 && !x.includes("/")) : [];
+    const patterns = Array.isArray(rule.directory_of) ? rule.directory_of.filter((x): x is string => typeof x === "string" && x.length > 0 && !x.includes("/")) : [];
+    const given = args[rule.param];
+    for (const v of Array.isArray(given) ? given : [given]) {
+      if (typeof v !== "string" || !v.trim() || v.includes("{OUT}") || v.includes("\0")) continue;
+      const abs = resolve(root, v);
+      if (!abs.startsWith(`${root}/`)) continue;
+      let st;
+      try {
+        st = lstatSync(abs);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const add: string[] = [];
+      const name = basename(abs);
+      if (suffixes.length) {
+        let names: string[] = [];
+        try {
+          names = readdirSync(dirname(abs));
+        } catch {
+          names = [];
+        }
+        if (names.length <= COMPANION_LIST_MAX) {
+          const wanted = new Set(suffixes.map((x) => `${name}${x}`.toLowerCase()));
+          for (const n of names.sort()) {
+            if (!wanted.has(n.toLowerCase()) || n === name) continue;
+            try {
+              if (!lstatSync(join(dirname(abs), n)).isFile()) continue;
+            } catch {
+              continue;
+            }
+            const ref = refOfPath(relative(root, join(dirname(abs), n)));
+            if (ref) add.push(ref);
+          }
+        }
+      }
+      if (patterns.some((g) => new RegExp(`^${g.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(name))) {
+        const ref = refOfPath(relative(root, dirname(abs)), true);
+        if (ref && dirname(abs) !== root) add.push(ref);
+      }
+      if (add.length) out.push({ param: rule.param, of: v, add, why: typeof rule.why === "string" && rule.why.trim() ? rule.why.trim().slice(0, 200) : "the files it needs beside it" });
+    }
+  }
+  return out;
+}
+
+/** What a job's answer says of the companions its scope was given, in one sentence; "" when none. */
+export function companionsWords(list: readonly Companions[]): string {
+  if (!list.length) return "";
+  const shown = list.slice(0, 4).map((c) => `${c.add.map((r) => r.replace(/^(input|job|import):/, "")).join(", ")} beside ${c.of} (${c.why})`);
+  return `Its scope also holds what its tool's manifest says a file it was given needs: ${shown.join("; ")}${list.length > 4 ? `; and ${list.length - 4} more` : ""}.`;
+}
 
 /** Free megabytes on the file system holding `dir`, or its nearest parent that exists. */
 export function freeMb(dir: string): number | null {

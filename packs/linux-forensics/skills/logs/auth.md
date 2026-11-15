@@ -3,6 +3,7 @@ id: logs/auth
 title: Authentication and privilege-use records
 when: Reading retained auth logs, their timestamp assumptions and attribution limits.
 needs: []
+card: auth_log {"path": "<auth.log, secure or their directory>"}: read order_basis, status (the parse, not coverage), unparsed, read_errors; a missing rotation is a gap. Read year_basis and time_zone before dating lines; utmp_parse disagreeing is a question, not alteration. Commands and typed names need write_text in a secret_output job. Does not show: a person, or that an absent line never happened.
 tools: [auth_log, utmp_parse]
 requires_host: []
 ---

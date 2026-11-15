@@ -3,6 +3,7 @@ id: browser/downloads
 title: Download provenance
 when: Source of a file; did it finish?
 needs: [browser/artefacts]
+card: browser_history {"path": "<History>", "query": "chrome_downloads"}: tab_url is where the download started, not necessarily its source; read state, referrer and URL chain with {"sql": "<SELECT>"}. Received below total bytes is no completed transfer. Record, URL chain, file and Zone.Identifier must agree before a provenance claim. Does not show: that it is the file on disk now, or that it ran.
 tools: [browser_history]
 requires_host: []
 ---

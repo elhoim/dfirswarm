@@ -3,6 +3,7 @@ id: filesystem/timestamp-anomalies
 title: ext4, XFS and Btrfs time fields
 when: A file time looks wrong, or you must say what produced it.
 needs: [timeline/clocks]
+card: Name the file system, features and reading tool first; timestamp_decode {"value": "<raw>"} gives candidates: choose by format, not plausibility. Nanoseconds are precision, not accuracy; target-fs and icat copies carry extraction times. A forged-looking time has competing explanations, each needing evidence; mtime after ctime is a lead. Does not show: which program wrote a time, intent or truth.
 tools: [timestamp_decode]
 requires_host: [debugfs, istat, xfs_db, btrfs, target-fs, icat]
 ---

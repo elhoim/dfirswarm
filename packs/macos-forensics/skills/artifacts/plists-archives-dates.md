@@ -3,6 +3,7 @@ id: artifacts/plists-archives-dates
 title: Keyed archives, plist dates, recent items
 when: A plist is a keyed archive, holds a date-like number, or lists recent items.
 needs: []
+card: safari_history visit_time_raw is Apple absolute seconds; a partial read goes on with after_visit_id from resume. A plain secret in a URL is printed: run a job with secret_output: true. plist_read leaves a keyed archive's UID references unresolved; timestamp_decode lists candidate epochs, and a plausible date proves none. Does not show: what a reference meant, or that a recent item was opened.
 tools: [plist_read, safari_history, timestamp_decode]
 requires_host: []
 ---

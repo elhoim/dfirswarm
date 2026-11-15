@@ -1,0 +1,352 @@
+/**
+ * A tool a kind, beside `record` (the review of the Batman III runs, S-01 and
+ * S-04): record_finding, record_answer, record_coverage, record_limitation
+ * and record_absence each carry that kind's fields, its required list as the
+ * check has it and its rules only, where `record` carries 60 properties and
+ * every kind's rules in one description. They go through the same check and
+ * write the same row on the trace (tool "record", so custody and the metrics
+ * read one name). A field left out or misspelt is answered by the check, in
+ * a line, never by Pi's echo of the whole call.
+ */
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { test } from "node:test";
+import extension from "../extensions/agent-swarm.ts";
+import { EVENTS_REL, readLedger } from "../extensions/protocol.ts";
+import { A, F, planned, run } from "./negative-bar-fixture.ts";
+
+type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+type Tool = {
+  name: string;
+  description: string;
+  promptGuidelines?: string[];
+  parameters: { required?: string[]; properties: Record<string, Json> };
+  prepareArguments?: (args: unknown) => Json;
+  execute: (id: string, params: Json, signal: undefined, update: undefined, ctx: { cwd: string }) => Promise<{ content: Array<{ text: string }>; details: Json; isError?: boolean }>;
+};
+
+const ROOT = join(import.meta.dirname, "..");
+const KINDS = ["finding", "answer", "coverage", "limitation", "absence"] as const;
+
+/** The extension loaded against a stand-in for Pi that only records the tools it registers. */
+function load(agentId: string): Map<string, Tool> {
+  const tools = new Map<string, Tool>();
+  const base: Record<string, unknown> = { registerTool: (t: Tool) => tools.set(t.name, t) };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  process.env.AGENT_ID = agentId;
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_ID;
+    else process.env.AGENT_ID = saved;
+  }
+  return tools;
+}
+
+/** A call as Pi makes it: the arguments through the tool's prepareArguments, then execute. */
+const call = (t: Tool, args: Json, cwd: string) => t.execute("c", t.prepareArguments ? t.prepareArguments(args) : args, undefined, undefined, { cwd });
+const text = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
+
+async function traceRows(S: string): Promise<Json[]> {
+  return (await readFile(join(S, EVENTS_REL), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Json);
+}
+
+test("each kind's tool is registered with that kind's required list and its rules only, beside record", () => {
+  const tools = load("a0");
+  const record = tools.get("record")!;
+  assert.ok(record, "record stays");
+  assert.deepEqual(record.parameters.required, ["kind", "value"]);
+  assert.ok(Object.keys(record.parameters.properties).length >= 60, "record takes every kind's fields");
+  const required: Record<(typeof KINDS)[number], string[]> = {
+    finding: ["value", "source", "evidence", "basis", "confidence", "confidence_why", "indicates"],
+    answer: ["section", "value", "reasoning", "result", "confidence", "confidence_why", "alternatives_open", "would_change"],
+    coverage: ["value", "refs", "answers", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "alternatives", "detection_opportunity"],
+    limitation: ["value", "source", "evidence", "reason"],
+    absence: ["value", "source", "evidence"],
+  };
+  for (const k of KINDS) {
+    const t = tools.get(`record_${k}`)!;
+    assert.ok(t, `record_${k} is registered`);
+    assert.deepEqual(t.parameters.required, required[k], `record_${k}'s required list is the check's`);
+    assert.equal("kind" in t.parameters.properties, false, `record_${k} takes no kind`);
+    assert.ok(Object.keys(t.parameters.properties).length <= 31, `record_${k} carries its own fields (${Object.keys(t.parameters.properties).length}), not record's ${Object.keys(record.parameters.properties).length}`);
+    assert.ok(t.description.length < record.description.length * 0.5, `record_${k}'s description (${t.description.length}) holds its kind's rules, under half of record's ${record.description.length}`);
+    assert.match(t.description, /A refusal names every defect of the entry at once/);
+    // The schema is plain JSON Schema: nothing of the builder leaks into what the model is shown.
+    assert.doesNotMatch(JSON.stringify(t.parameters), /~kind|~optional/);
+    assert.equal(typeof t.prepareArguments, "function");
+  }
+  // Another kind's rules are not in a kind's tool.
+  assert.doesNotMatch(tools.get("record_limitation")!.description, /detection_opportunity|alternatives_open|looked_for|basis observed/);
+  assert.doesNotMatch(tools.get("record_finding")!.description, /time_range|question_rev|would_change/);
+  for (const f of ["section", "reasoning", "result", "time_range", "result_refs"]) assert.equal(f in tools.get("record_finding")!.parameters.properties, false, `record_finding has no ${f}`);
+  for (const f of ["refs", "basis", "indicates", "answers"]) assert.equal(f in tools.get("record_answer")!.parameters.properties, false, `record_answer has no ${f}`);
+  // What each kind's tool says of the rules that are its own.
+  assert.match(tools.get("record_answer")!.description, /value is the asked string alone, in the format the question asks \(its Format line\): the first line of value is what is graded/);
+  assert.match(tools.get("record_answer")!.description, /A revision that lowers confidence or result keeps value/);
+  assert.match(tools.get("record_absence")!.description, /names its control: control \{ref, found\}, a job in which the same scanner, with the same pattern and layout, found a planted or known value/);
+  assert.match(tools.get("record_finding")!.description, /carriers \[\{carrier, state: decoded \| undecodable \| not_examined, why\}\]/);
+  // The answer's own fields are on record too, and the review form carries its link.
+  for (const f of ["qualifier", "value_changed_because", "control", "images_read", "carriers"]) assert.ok(f in record.parameters.properties, `record takes ${f}`);
+  const attest = tools.get("attest")!;
+  assert.deepEqual(attest.parameters.properties.answer_review!.required, ["reproduced", "read", "link", "parts", "inference", "alternatives", "other_family"]);
+  assert.ok(attest.promptGuidelines!.some((g) => /compare the first line of its value with the question's Format line/.test(g)), "the critic's list says to hold value to the Format line");
+  assert.match(tools.get("dispute")!.description, /A dispute about a reading \(a transcription, a glyph, a look-alike character\) adds a candidate/);
+});
+
+test("a kind's tool records through the same check and writes the trace row record writes; a field left out is named by the check, with every other defect, and nothing is echoed", async () => {
+  const c = await run();
+  const tools = load("a0");
+  const finding = tools.get("record_finding")!;
+  const ok = await call(finding, { ...F, value: "alice logged on at 09:14", source: "the log", evidence: "line 12", refs: ["store/jobs/j000001/out/hits.txt"], answers: ["question:1"] }, c.S);
+  assert.equal(ok.isError, undefined, text(ok));
+  assert.equal(ok.details.seq, 1);
+  const [entry] = await readLedger(c.S);
+  assert.equal(entry!.kind, "finding");
+  assert.deepEqual(entry!.refs, ["job:j000001/hits.txt"]);
+  let rows = (await traceRows(c.S)).filter((r) => r.tool === "record" || String(r.tool).startsWith("record_"));
+  assert.equal(rows.length, 1, "one row, under record's name");
+  assert.equal(rows[0]!.tool, "record");
+  assert.equal(rows[0]!.args.kind, "finding");
+  assert.equal(rows[0]!.result.via, "record_finding");
+  assert.equal(rows[0]!.result.hash, entry!.hash, "the entry's hash is on the trace, as custody reads it");
+  // Four required fields left out, a confidence its schema would not take, a ref that does not resolve: Pi would refuse this and echo it; the check names all of it.
+  const sent = { value: "bob logged on at 09:20", source: "the log", confidence: "certain", refs: ["job:j000001/hitz.txt"], padding: "x".repeat(4000) };
+  const prepared = finding.prepareArguments!(sent);
+  for (const k of finding.parameters.required!) assert.ok(k in prepared, `${k} is there for Pi's check`);
+  const r = await call(finding, sent, c.S);
+  assert.equal(r.isError, true);
+  assert.match(text(r), /^record_finding refused: 6 things to fix, every one named here, so one more call is enough \(fix them all, then record once\)\. A finding also needs evidence, basis, indicates, confidence_why\./);
+  for (const must of [/confidence must be one of high, medium, low/, /evidence is required/, /basis observed or inferred/, /indicates is required on a finding/, /confidence_why is required on a finding/, /ref "job:j000001\/hitz\.txt" does not resolve.*nearest: job:j000001\/hits\.txt/]) assert.match(text(r), must);
+  assert.ok(text(r).length < 2500, `the refusal is ${text(r).length} characters: no echo of the ${JSON.stringify(sent).length} sent`);
+  assert.doesNotMatch(text(r), /Received arguments|xxxxxxxxxx/);
+  rows = (await traceRows(c.S)).filter((x) => x.tool === "record");
+  assert.equal(rows.at(-1)!.result.ok, false);
+  assert.equal(rows.at(-1)!.result.defects, 6);
+  assert.equal(rows.at(-1)!.args.confidence, "certain", "the trace holds what was sent, not the placeholder");
+  assert.equal("basis" in rows.at(-1)!.args, false);
+  // record itself, with kind left out: the kind its fields allow, said in the reply.
+  const lim = await call(tools.get("record")!, { value: "The second volume was not opened", source: "the disk", evidence: "no recovery key", reason: "unavailable" }, c.S);
+  assert.equal(lim.isError, undefined, text(lim));
+  assert.match(String(lim.details.note), /kind was left out: taken as limitation, the one kind these fields allow/);
+  assert.equal((await readLedger(c.S)).at(-1)!.kind, "limitation");
+  // Each of the other tools records its kind.
+  const l2 = await call(tools.get("record_limitation")!, { value: "The pagefile was not carved", source: "the disk", evidence: "no carver in the image", reason: "not_examined" }, c.S);
+  assert.equal(l2.isError, undefined, text(l2));
+  const abs = await call(tools.get("record_absence")!, { value: "a remote tool", source: "inputs/disk.E01", evidence: "a keyword search", refs: ["job:j000001/hits.txt"] }, c.S);
+  assert.match(text(abs), /^record_absence refused: this absence rests on your own scanner \(job:j000001\/hits\.txt: the output of a command job/);
+  const abs2 = await call(tools.get("record_absence")!, { value: "a remote tool", source: "inputs/disk.E01", evidence: "a keyword search", refs: ["job:j000001/hits.txt"], control: { ref: "job:j000002/hits.txt", found: "the same search finds the planted name in the log" } }, c.S);
+  assert.equal(abs2.isError, undefined, text(abs2));
+  assert.deepEqual((await readLedger(c.S)).map((e) => e.kind), ["finding", "limitation", "limitation", "absence"]);
+});
+
+test("the new tools are the extension's own on the trace, and a pack's tool says whose it is", async () => {
+  const src = await readFile(join(ROOT, "extensions", "agent-swarm.ts"), "utf8");
+  const owned = /const SWARM_TOOLS = new Set\(\[([\s\S]*?)\]\);/.exec(src)![1]!;
+  for (const k of KINDS) assert.match(owned, new RegExp(`"record_${k}"`), `record_${k} writes its own trace row: the generic hook leaves it alone`);
+  // A pack's tool is described as the pack's: seats took "forged by <id>" for a peer's untested script.
+  assert.match(src, /\$\{manifest\.pack \? `a tool of the pack \$\{manifest\.pack\}` : `forged by \$\{manifest\.by\}`\}, v\$\{manifest\.version\}/);
+});
+
+test("scripts/swarm.sh names the kind tools for Pi, so that a seat is offered them", async () => {
+  const sh = await readFile(join(ROOT, "scripts", "swarm.sh"), "utf8");
+  const named = new Set((sh.match(/local PI_TOOLS="([a-z_,]+)"/)?.[1] ?? "").split(","));
+  assert.deepEqual(KINDS.map((k) => `record_${k}`).filter((t) => !named.has(t)), []);
+});
+
+test("a candidate in one call (question, value, ref): on the ledger as a hypothesis about that question, named in every header, counted by nothing at the finish (B5)", async () => {
+  const c = await run();
+  const tools = load("a0");
+  const cand = tools.get("record_candidate")!;
+  assert.ok(cand, "record_candidate is registered");
+  assert.deepEqual(cand.parameters.required, ["question", "value", "ref"]);
+  const ok = await call(cand, { question: "question:1", value: "alice", ref: "store/jobs/j000001/out/hits.txt", why: "one log line; the account could be a service's" }, c.S);
+  assert.equal(ok.isError, undefined, text(ok));
+  const [entry] = (await readLedger(c.S)) as Array<Json>;
+  assert.equal(entry!.kind, "hypothesis");
+  assert.equal(entry!.status, "open");
+  assert.equal(entry!.candidate, true);
+  assert.equal(entry!.value, "alice");
+  assert.deepEqual(entry!.refs, ["job:j000001/hits.txt"]);
+  assert.equal(entry!.answers.length, 1);
+  assert.match(entry!.evidence, /a candidate value for question:1, as read at job:j000001\/hits\.txt|a candidate value for question:1, as read at store\/jobs\/j000001\/out\/hits\.txt/);
+  // Named in every header, with the question, the value, its entry, who holds it and where it was read.
+  const FIN = await import("../extensions/finish.ts");
+  const header = (await FIN.finishHeader(c.S, "a1")) ?? "";
+  assert.match(header, /Candidates \(values held and not verified: not answers, and the finish counts none; verify one and record the answer\): question:1 "alice" \(E-1 by a0, read at job:j000001\/hits\.txt\)\./);
+  // Counted by nothing at the finish: the question still has no answer.
+  const r = await FIN.readiness(c.S);
+  assert.ok((r.held ?? []).some((h) => h.section === "question:1" && h.code === "no_answer"), JSON.stringify(r.held));
+  // A candidate names one question and the object it was read from; the mark is a hypothesis's.
+  const P = await import("../extensions/protocol.ts");
+  const no = await P.recordEntry(c.a0, { kind: "hypothesis", status: "open", candidate: true, value: "bob", source: "s", evidence: "e", answers: ["1", "2"] } as never);
+  assert.equal(no.ok, false);
+  assert.match((no as { reason: string }).reason, /a candidate is a value for one question: answers names that one question/);
+  assert.match((no as { reason: string }).reason, /a candidate names the object its value was read from in refs/);
+  const notHyp = await P.recordEntry(c.a0, { kind: "finding", ...F, candidate: true, value: "bob", source: "s", evidence: "e", refs: ["job:j000001/hits.txt"] } as never);
+  assert.equal(notHyp.ok, false);
+  assert.match((notHyp as { reason: string }).reason, /candidate marks a hypothesis/);
+  // Once the answer gives that value, the header no longer names the candidate.
+  assert.equal(FIN.candidatesLine([entry as never, { seq: 2, kind: "answer", section: "question:1", value: "**alice**", by: "a1", authors: ["a1"], at: "x" } as never]), null);
+});
+
+test("the kinds' tools are offered to the weak model class only; the rest are declared record alone (B2)", async () => {
+  const { recordKindToolsFor, KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  for (const [provider, id] of [["azure-foundry", "DeepSeek-V4-Pro"], ["deepseek", "deepseek-v4-flash"], ["z-ai", "glm-5.3"], ["ollama", "qwen3:8b"], ["lmstudio", "some-local-model"], ["groq", "llama-3.3-70b-versatile"], ["openrouter", "moonshotai/kimi-k2"], ["localmock", "gpt-oss:20b"]] as const) {
+    assert.equal(recordKindToolsFor({ provider, id }, {}).offer, true, `${provider}/${id} is of the weak class`);
+  }
+  for (const [provider, id] of [["openai", "gpt-5.4"], ["anthropic", "claude-opus-4-5"], ["google", "gemini-2.5-pro"], ["openai-codex", "gpt-5.1-codex"]] as const) {
+    const d = recordKindToolsFor({ provider, id }, {});
+    assert.equal(d.offer, false, `${provider}/${id} is not`);
+    assert.match(d.why, /not of the weak class: record alone, whose description carries every kind's rules/);
+  }
+  assert.equal(recordKindToolsFor(undefined, {}).offer, true, "a session that names no model keeps them");
+  assert.equal(recordKindToolsFor({ provider: "openai", id: "gpt-5.4" }, { SWARM_RECORD_KIND_TOOLS: "all" }).offer, true);
+  assert.equal(recordKindToolsFor({ provider: "z-ai", id: "glm-5.3" }, { SWARM_RECORD_KIND_TOOLS: "none" }).offer, false);
+
+  // Through the extension: the active set at session start, and again when the model changes.
+  const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
+  let active = ["read", "bash", "record", ...KIND_TOOL_NAMES, "ledger", "attest", "done"];
+  const base: Record<string, unknown> = {
+    registerTool: () => undefined,
+    on: (event: string, fn: (e: unknown, c: unknown) => unknown) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
+    getActiveTools: () => [...active],
+    setActiveTools: (names: string[]) => {
+      active = [...names];
+    },
+  };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  delete process.env.AGENT_ID;
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved !== undefined) process.env.AGENT_ID = saved;
+  }
+  const fire = async (event: string, e: Json, ctx: Json) => {
+    for (const fn of handlers.get(event) ?? []) await fn({ type: event, ...e }, ctx);
+  };
+  const c = await run();
+  await fire("session_start", {}, { cwd: c.S, hasUI: false, ui: {}, sessionManager: { getEntries: () => [], buildContextEntries: () => [], getBranch: () => [] }, model: { provider: "openai", id: "gpt-5.4" } });
+  assert.deepEqual(active, ["read", "bash", "record", "ledger", "attest", "done"], "a strong seat is declared record alone");
+  await fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  for (const n of KIND_TOOL_NAMES) assert.ok(active.includes(n), `${n} is back for the weak class`);
+  await fire("model_select", { model: { provider: "anthropic", id: "claude-opus-4-5" } }, { cwd: c.S });
+  assert.ok(!active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
+});
+
+/**
+ * A seat's active tools once its session started on a model, and what the extension registered. As Pi does, the
+ * configured tools (getAllTools) are those the allowlist (--tools) keeps, and the session starts with `restored` active
+ * when it is a relaunch whose tool set Pi restored, else with the allowlist.
+ */
+async function seat(model: { provider: string; id: string }, cwd: string, allowed: string[], restored?: string[]): Promise<{ active: string[]; tools: Map<string, Tool>; fire: (event: string, e: Json, ctx: Json) => Promise<void>; set: (names: string[]) => void }> {
+  const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
+  const tools = new Map<string, Tool>();
+  const state = { active: [...(restored ?? allowed)] };
+  const base: Record<string, unknown> = {
+    registerTool: (t: Tool) => tools.set(t.name, t),
+    on: (event: string, fn: (e: unknown, c: unknown) => unknown) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
+    getActiveTools: () => [...state.active],
+    getAllTools: () => [...tools.values()].filter((t) => allowed.includes(t.name)).map((t) => ({ name: t.name, description: t.description })),
+    setActiveTools: (names: string[]) => {
+      state.active = [...names];
+    },
+  };
+  const pi = new Proxy(base, { get: (target, key) => (key in target ? target[key as string] : () => undefined) });
+  const saved = process.env.AGENT_ID;
+  delete process.env.AGENT_ID;
+  try {
+    extension(pi as never);
+  } finally {
+    if (saved !== undefined) process.env.AGENT_ID = saved;
+  }
+  const fire = async (event: string, e: Json, ctx: Json) => {
+    for (const fn of handlers.get(event) ?? []) await fn({ type: event, ...e }, ctx);
+  };
+  await fire("session_start", {}, { cwd, hasUI: false, ui: {}, sessionManager: { getEntries: () => [], buildContextEntries: () => [], getBranch: () => [] }, model });
+  return {
+    get active() {
+      return state.active;
+    },
+    tools,
+    fire,
+    set: (names: string[]) => {
+      state.active = [...names];
+    },
+  };
+}
+
+/** The record tools a text tells a seat to call: every record_<name> outside a clause that says "when your tool list has". */
+function toldToCall(text: string): string[] {
+  return text
+    .split(/[.;]\s/)
+    .filter((clause) => !/when your tool list (also )?has/i.test(clause))
+    .flatMap((clause) => clause.match(/\brecord_[a-z]+\b/g) ?? []);
+}
+
+test("what record's description and an answer's refusals tell a seat to call is a tool that seat has, strong or weak", async () => {
+  const { KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  const { KIND_TOOL_KINDS } = await import("../extensions/ledger-rules.ts");
+  assert.deepEqual([...KIND_TOOL_KINDS].map((k) => `record_${k}`), [...KIND_TOOL_NAMES], "the refusals' kinds are the tools' kinds");
+  const c = await run();
+  await planned(c.a0, "1");
+  const P = await import("../extensions/protocol.ts");
+  const refusals: string[] = [];
+  for (const extra of [{ refs: ["job:j000001/hits.txt"], basis: "observed", indicates: "alice was at the console" }, { ts: "2024-01-01T09:14:00Z" }, { time_range: "all of it" }]) {
+    const r = await P.recordEntry(c.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: "the log shows it", ...A, result: "established", ...extra } as never);
+    assert.equal(r.ok, false);
+    refusals.push((r as { reason: string }).reason);
+  }
+  assert.match(refusals[0]!, /record it first \(record with kind: "finding" and answers: \["1"\]; record_finding takes the same when your tool list has it\)/);
+  assert.match(refusals[0]!, /\(1\) record with kind=finding \(or record_finding, when your tool list has it\) with the fact/);
+  assert.match(refusals[1]!, /\(1\) record with kind=event with the fact/, "no record_event: there is no such tool");
+  assert.match(refusals[2]!, /\(1\) record with kind=coverage \(or record_coverage, when your tool list has it\)/);
+  const allowed = ["read", "bash", "record", ...KIND_TOOL_NAMES, "record_candidate", "ledger", "attest", "done"];
+  for (const model of [{ provider: "openai", id: "gpt-5.4" }, { provider: "z-ai", id: "glm-5.3" }]) {
+    const s = await seat(model, c.S, allowed);
+    const weak = s.active.includes("record_finding");
+    assert.equal(weak, model.provider === "z-ai", `${model.provider}/${model.id}: the kinds' tools are the weak class's`);
+    for (const [what, text] of [["record's description", s.tools.get("record")!.description], ...refusals.map((r, i) => [`refusal ${i + 1}`, r] as const)] as const) {
+      const told = toldToCall(text);
+      for (const name of told) assert.ok(s.active.includes(name), `${model.id}: ${what} tells it to call ${name}, which it does not have`);
+      assert.match(text, /\brecord with kind|Every kind is recorded here, with kind/, `${what} names record with the kind as the way`);
+    }
+  }
+});
+
+test("a strong seat relaunched with its tool set restored gets the kinds' tools back when it switches to a weak model, and only those the allowlist keeps", async () => {
+  const { KIND_TOOL_NAMES } = await import("../extensions/agent-swarm.ts");
+  const c = await run();
+  const allowed = ["read", "bash", "record", ...KIND_TOOL_NAMES, "record_candidate", "ledger", "attest", "done"];
+  // Pi restored the relaunched session's tools as the strong seat had them: record alone.
+  const restored = allowed.filter((n) => !(KIND_TOOL_NAMES as readonly string[]).includes(n));
+  const s = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, allowed, restored);
+  assert.deepEqual(s.active, restored, "still record alone");
+  await s.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(KIND_TOOL_NAMES.filter((n) => !s.active.includes(n)), [], "every kind's tool is back for the weak class");
+  await s.fire("model_select", { model: { provider: "anthropic", id: "claude-opus-4-5" } }, { cwd: c.S });
+  assert.ok(!s.active.some((n) => (KIND_TOOL_NAMES as readonly string[]).includes(n)));
+  // An allowlist that keeps only some of them: only those are put back.
+  const some = ["read", "record", "record_finding", "record_answer", "done"];
+  const t = await seat({ provider: "openai", id: "gpt-5.4" }, c.S, some, ["read", "record", "done"]);
+  await t.fire("model_select", { model: { provider: "z-ai", id: "glm-5.3" } }, { cwd: c.S });
+  assert.deepEqual(t.active.filter((n) => n.startsWith("record_")).sort(), ["record_answer", "record_finding"]);
+});
+
+test("the kinds' rules are in the tools, not in the worker prompt (B2)", async () => {
+  const prompt = await readFile(join(ROOT, "prompts", "worker-system.md"), "utf8");
+  assert.ok(prompt.length < 75_053, `the prompt is ${prompt.length} bytes: under the 75,053 it had before the kinds' tools`);
+  for (const gone of ["A negative needs a positive control", "`kind=coverage` says what a negative was searched over", "A finding is an observation and what you make of it, recorded while the artefact is open", "Other readings go in `candidates [{value, state, why,"]) assert.ok(!prompt.includes(gone), `the prompt still says: ${gone}`);
+  assert.match(prompt.replace(/\s+/g, " "), /Each kind's fields and rules are in its tool's description, not here: `record` takes every kind/);
+  const tools = load("a0");
+  const record = tools.get("record")!.description;
+  for (const rule of [/names its control: control \{ref, found\}/, /carriers \[\{carrier, state: decoded \| undecodable \| not_examined, why\}\]/, /decoy_check names the machine check/, /value changes only with value_changed_because/, /a sweep its budget left partial holds it too/, /answers a question only when the goal says the question asks whether something exists/, /record_candidate's \(question, value, ref\)/]) {
+    assert.match(record, rule, `record's description carries ${rule}`);
+  }
+  assert.match(tools.get("record_coverage")!.description, /naming the object in refs alone does not clear it, and a sweep its budget left partial holds it too/);
+  assert.match(tools.get("record_absence")!.description, /An absence answers a question only when the goal says the question asks whether something exists/);
+  assert.match(tools.get("record_finding")!.description, /To add refs to a finding recorded without them, record it again with its refs/);
+});

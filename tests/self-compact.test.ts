@@ -27,9 +27,10 @@ import {
   specsFromEnv,
   validateSpecs,
 } from "../extensions/context-ceiling.ts";
-import { editAfterLastUsage, handoffHeader, HANDOFF_TYPE, latestAssistantUsage, nowPrompt, recoverState, renderTemplate, STATE_TYPE } from "../extensions/self-compact.ts";
+import { editAfterLastUsage, handoffHeader, HANDOFF_HEADER_MAX, HANDOFF_TYPE, latestAssistantUsage, nowPrompt, recoverState, renderTemplate, STATE_TYPE } from "../extensions/self-compact.ts";
 import { agentDonePath, EVENTS_REL, initSandbox, SENTINEL_REL, TOOL_RESERVED_NAMES } from "../extensions/protocol.ts";
 import { normalizeShellCommand, repeatHintMinMs, repeatHintText, REPEAT_HINT_MIN_MS } from "../extensions/agent-swarm.ts";
+import * as PiCore from "@earendil-works/pi-coding-agent";
 
 const REPO = resolve(import.meta.dirname, "..");
 
@@ -77,7 +78,9 @@ test("defaults resolve to 40 / 50 / 60 percent of the ceiling with room to the w
   const grok = resolveThresholds(DEFAULT_SPECS, "azure-foundry/grok-4.6", 500_000, { fromDefaults: true });
   assert.ok(grok.ok && grok.thresholds.compactTokens === 120_000, "every grok call stays in the cheap tier");
   const big = resolveThresholds(DEFAULT_SPECS, "deepseek/deepseek-v4-pro", 1_000_000, { fromDefaults: true });
-  assert.ok(big.ok && big.thresholds.compactTokens === 180_000);
+  // A million-token model: the hand-off (warning) line at 200k, the hard line at 240k, so a seat has about 123k to work in
+  // after a 77k hand-off, not 73k (41 to 138 compactions a run at the old 150k line).
+  assert.ok(big.ok && big.thresholds.warnTokens === 200_000 && big.thresholds.compactTokens === 240_000, JSON.stringify(big));
 });
 
 test("a default compact line raised to an explicit warning or notice line lands above it, so the warning still fires first", () => {
@@ -485,3 +488,327 @@ test("Pi loader: a long command over the evidence, in a run with tool jobs, is t
     }
   }
 });
+
+test("a hand-off's header is at most 2,000 characters beside the note, its skills line included, whatever the registers hold", () => {
+  const leads = ["Leads: 40 open, 12 yours.", `Yours: ${Array.from({ length: 60 }, (_, i) => `L-${i} (working; a long title that says what the lead is about, number ${i})`).join("; ")}`, `Blocked on you: ${"L-900 waits for your reading of job j000123; ".repeat(40)}`, "Finish: not ready (31, 9 of them yours): a list of everything that holds it"].join("\n");
+  // The skills line as skills.ts writes it: whole lines, the most needed first.
+  const skillLines = ["Skill bodies a compaction took out of your context: a/one. Load again (skill(id)) the ones you still need.", "Rules of the notes and tools you worked with (shown once in the run; the whole note: skill(id)):", ...Array.from({ length: 6 }, (_, i) => `- area/note-${i}: ${"r".repeat(180)}`)];
+  const skills = skillLines.join("\n");
+  const facts = { name: "n", doing: "d", claims: Array.from({ length: 80 }, (_, i) => `work/a/file-${i}.md`), unread: { main: 3 }, ledgerTotal: 400, ledgerMine: 90, sentinel: false, spentUsd: 1, capUsd: 6, leads, skills, capHit: "c".repeat(400), forged: "f".repeat(900) };
+  const h = handoffHeader("s1", 3, facts, true, "threshold");
+  assert.ok(h.length <= HANDOFF_HEADER_MAX, `${h.length} characters beside the note`);
+  // What is kept of the skills line is its first lines, whole; the rest is dropped, never cut inside a line.
+  const kept = skillLines.filter((l) => h.includes(l));
+  assert.deepEqual(kept, skillLines.slice(0, kept.length));
+  assert.ok(!h.includes("rrrr\u2026"));
+  assert.match(h, /80 claims, claims lists them/);
+  assert.ok(h.endsWith(":\n---"));
+  // A small register and a skills line that fit are carried whole.
+  const small = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, leads: "Leads: 2 open, 1 yours.\nYours: L-1 (working)\nFinish: READY by the registers", skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
+  assert.match(small, /Yours: L-1 \(working\)\nFinish: READY by the registers; finish status lists what holds it\./);
+  assert.ok(small.includes(skillLines.slice(0, 4).join("\n")) && small.length <= HANDOFF_HEADER_MAX);
+  // A large register goes ahead of the skills line: the seat's own leads and the finish first, whole lines or none.
+  const both = handoffHeader("s1", 3, { ...facts, claims: ["work/a.md"], capHit: undefined, forged: undefined, skills: skillLines.slice(0, 4).join("\n") }, true, "threshold");
+  assert.ok(both.length <= HANDOFF_HEADER_MAX, `${both.length}`);
+  assert.match(both, /\nYours: L-0 \(working/);
+  assert.match(both, /\nFinish: not ready \(31, 9 of them yours\); finish status lists what holds it\./);
+  for (const l of both.split("\n")) assert.ok(!/\u2026/.test(l) || /; \u2026 \(cut: leads gives it whole\)$/.test(l), `a line cut inside an item: ${l}`);
+});
+
+test("a hand-off keeps the seat's own jobs, its leads and the finish count ahead of a long skills line and a cap rule (C2)", () => {
+  // A realistic skills line (638 characters: the account and two cards) and a register of the seat's own work.
+  const skills = [
+    "Skill bodies a compaction took out of your context: windows-forensics:registry/clock (2,310 tokens, done), accounts/logons (1,900 tokens). Load again (skill(id)) the ones you still need.",
+    "Rules you worked with (shown once in the run; whole note: skill(id)):",
+    '- registry/clock: regkv {"hive": "<SYSTEM>", "key": "ControlSet001\\\\Control\\\\TimeZoneInformation"}: Bias is minutes west of UTC; a DST rule is the hive\'s, not the clock\'s. Does not show: the clock was right.',
+    '- accounts/logons: regkv {"hive": "<SAM>", "key": "SAM\\\\Domains\\\\Account\\\\Users"}: subkey names are RIDs in hex; ProfileList maps full SIDs to profiles. Record the full SID.',
+  ].join("\n");
+  const leads = [
+    "Leads: 14 open, 3 yours.",
+    "Yours: L-12 (working; USB device attached before the wipe), L-15 (working; timezone of the host), L-19 (ready; SAM accounts created in March)",
+    "Blocked on you: L-21 waits for your reading of job j000143",
+    "Awaiting your interpretation: j000143 (regkv SYSTEM), j000150 (evtx_query Security)",
+    "Questions nobody holds: Q-4 (who logged on), Q-7 (what was exfiltrated)",
+    "Your running jobs: j000151 (evtx_query), j000152 (mft_parse)",
+    "Finish: not ready (9, 3 of them yours)",
+  ].join("\n");
+  const base = { name: "regreader", doing: "windows registry and accounts", claims: ["work/agent03/reg.md", "work/agent03/usb.md"], unread: { main: 4, agent03: 1 }, ledgerTotal: 84, ledgerMine: 21, sentinel: false, spentUsd: 3.21, capUsd: 6, leads, skills };
+  for (const extra of [{}, { capHit: "c".repeat(300) }, { capHit: "c".repeat(300), forged: `Forged this run: ${"tool_x (by a1), ".repeat(30)}` }]) {
+    for (const form of ["string", "built"] as const) {
+      const facts = form === "string" ? { ...base, ...extra } : { ...base, ...extra, skills: undefined };
+      // The built form gives the skills line for the room left, as skills.ts handoffLine does: whole lines from its start.
+      const built = (max: number) => {
+        const out: string[] = [];
+        for (const l of skills.split("\n")) if ([...out, l].join("\n").length <= max) out.push(l);
+        return out.join("\n");
+      };
+      const h = handoffHeader("agent03", 4, facts, true, "threshold", form === "built" ? built : undefined);
+      const what = `${form} ${JSON.stringify(Object.keys(extra))}`;
+      assert.ok(h.length <= HANDOFF_HEADER_MAX, `${what}: ${h.length}`);
+      assert.ok(!h.includes("call leads (no room for it here)"), `${what}: the register is carried, not pointed at`);
+      assert.match(h, /\nYour running jobs: j000151 \(evtx_query\), j000152 \(mft_parse\)\n/, what);
+      assert.match(h, /\nFinish: not ready \(9, 3 of them yours\); finish status lists what holds it\.\n/, what);
+      assert.match(h, /\nYours: L-12 \(working; USB device attached before the wipe\), L-15 [^\n]*March\)\n/, what);
+      // No line is cut: each register line is whole or named as left out.
+      for (const l of leads.split("\n").slice(1, 6)) {
+        const label = l.split(":")[0]!;
+        assert.ok(h.includes(`\n${l}\n`) || new RegExp(`Left out here for room \\(leads gives them\\): [^\\n]*${label}`).test(h), `${what}: ${label} neither whole nor named`);
+      }
+      for (const l of h.split("\n")) assert.ok(!l.includes("\u2026") || /; \u2026 \(cut: [^)]*\)$/.test(l), `${what}: a line cut inside an item: ${l}`);
+      // The skills line takes what is left, by whole lines from its start.
+      const kept = skills.split("\n").filter((l) => h.includes(l));
+      assert.deepEqual(kept, skills.split("\n").slice(0, kept.length), what);
+      if (!("forged" in extra)) assert.ok(kept.length >= 1, `${what}: the skills line keeps what room is left`);
+    }
+  }
+  // With room to spare everything is carried, the register before the skills line.
+  const roomy = handoffHeader("agent03", 4, base, true, "threshold");
+  assert.ok(roomy.indexOf("Finish: not ready") < roomy.indexOf("Skill bodies a compaction"));
+});
+
+/** A stand-in for Pi: the hooks registerSelfCompact adds, the messages it sends, and a provider whose summaries are scripted. */
+async function rig(o: { facts: () => Promise<import("../extensions/self-compact.ts").HandoffFacts>; factsMs?: number; graceMs?: number; summaries?: string[]; tokens?: number; dir?: string; skills?: (max: number) => string }) {
+  const { registerSelfCompact, STATE_TYPE: STATE } = await import("../extensions/self-compact.ts");
+  const { specsFromEnv } = await import("../extensions/context-ceiling.ts");
+  const handlers = new Map<string, Array<(e: unknown, c: unknown) => Promise<unknown>>>();
+  const sent: Array<{ at: number; customType: string; content: string; options: Record<string, unknown> | undefined }> = [];
+  const prompts: string[] = [];
+  const appended: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  const replies = [...(o.summaries ?? [])];
+  const pi = {
+    on: (e: string, h: (e: unknown, c: unknown) => Promise<unknown>) => handlers.set(e, [...(handlers.get(e) ?? []), h]),
+    registerTool: () => undefined,
+    appendEntry: (customType: string, data: unknown) => void appended.push({ type: "custom", customType, data }),
+    sendMessage: (m: { customType: string; content: string }, options?: Record<string, unknown>) => sent.push({ at: Date.now(), customType: m.customType, content: m.content, options }),
+  };
+  const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
+  const ctx = {
+    cwd: o.dir ?? REPO,
+    hasUI: false,
+    ui: {},
+    isIdle: () => true,
+    abort: () => undefined,
+    model: { provider: "p", id: "m", maxTokens: 4000, contextWindow: 100_000 },
+    getContextUsage: () => ({ tokens: o.tokens ?? 1_000, contextWindow: 100_000 }),
+    sessionManager: { getBranch: () => branch, getEntries: () => branch },
+    modelRegistry: {
+      find: () => undefined,
+      stream: (_model: unknown, context: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+        prompts.push(context.messages[0]!.content[0]!.text);
+        const text = replies.shift() ?? "SUMMARY";
+        return {
+          async *[Symbol.asyncIterator]() {
+            await new Promise((r) => setTimeout(r, 20));
+            yield { type: "text_delta", delta: text };
+          },
+          result: async () => ({ stopReason: "stop", content: [{ type: "text", text }], usage }),
+        };
+      },
+    },
+  };
+  let branch: unknown[] = [];
+  registerSelfCompact(pi as never, {
+    agentId: () => "a0",
+    trace: async () => undefined,
+    handoffFacts: async () => o.facts(),
+    handoffFactsMs: o.factsMs,
+    handoffFactsGraceMs: o.graceMs,
+    ...(o.skills ? { handoffSkills: o.skills } : {}),
+    promptsDir: join(REPO, "prompts"),
+    ...specsFromEnv({}),
+  });
+  const fire = async (name: string, event: unknown) => {
+    let out: unknown;
+    for (const h of handlers.get(name) ?? []) out = (await h(event, ctx)) ?? out;
+    return out;
+  };
+  const withReadyNote = (note: string) => {
+    branch = [{ type: "custom", customType: STATE, data: { version: 1, cycle: 1, locked: false, handoff: { id: "h1", note, status: "ready", attempts: 0, savedAt: 0 } } }];
+  };
+  return { fire, sent, prompts, ctx, withReadyNote, usage, appended };
+}
+
+const known = { claims: ["work/a0/x.md"], unread: { main: 2 }, ledgerTotal: 9, ledgerMine: 3, sentinel: false, spentUsd: 1.5 };
+
+test("a hand-off note goes at once: with the hub held, the facts follow in a message of their own when they come, or as unknown at five seconds", async () => {
+  const { HANDOFF_FACTS_TYPE, HANDOFF_FACTS_MS } = await import("../extensions/self-compact.ts");
+  assert.equal(HANDOFF_FACTS_MS, 5000);
+  // The hub answers at once: one message, the facts in its header.
+  const quick = await rig({ facts: async () => known });
+  quick.withReadyNote("NEXT ACTION: go on");
+  await quick.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(quick.sent.length, 1);
+  assert.match(quick.sent[0]!.content, /Live claims: work\/a0\/x\.md\.\nUnread posts: 2 in main/);
+  assert.ok(quick.sent[0]!.content.endsWith("---\nNEXT ACTION: go on"));
+  // The hub answers in 1.5 s: the note goes within the grace, the facts when they come.
+  let answer!: (f: typeof known) => void;
+  const held = await rig({ facts: () => new Promise((r) => (answer = r)), graceMs: 200 });
+  held.withReadyNote("NEXT ACTION: read the inbox");
+  const t0 = Date.now();
+  const delivered = held.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(held.sent.length, 1, "the note went without waiting for the hub");
+  assert.ok(held.sent[0]!.at - t0 < 400, `the note went ${held.sent[0]!.at - t0} ms after the hand-off began`);
+  assert.match(held.sent[0]!.content, /being read from the hub; they follow in a message of their own within 5 seconds/);
+  assert.ok(held.sent[0]!.content.endsWith("---\nNEXT ACTION: read the inbox"), "the note whole, last");
+  setTimeout(() => answer(known), 1100);
+  await delivered;
+  await new Promise((r) => setTimeout(r, 1300));
+  assert.equal(held.sent.length, 2);
+  assert.equal(held.sent[1]!.customType, HANDOFF_FACTS_TYPE);
+  assert.match(held.sent[1]!.content, /^\[self-compact · handoff facts\] cycle 1 · a0/);
+  assert.match(held.sent[1]!.content, /Live claims: work\/a0\/x\.md\.\nUnread posts: 2 in main\. Call inbox before acting\.\nLedger: 9 entries, 3 yours\./);
+  // The hub never answers: the facts follow as unknown when the bound runs out.
+  const dead = await rig({ facts: () => new Promise(() => undefined), graceMs: 100, factsMs: 600 });
+  dead.withReadyNote("NEXT ACTION: x");
+  await dead.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(dead.sent.length, 2);
+  assert.match(dead.sent[1]!.content, /unknown \(the hub could not be reached when this was written\)/);
+  // Stopping: the facts' message says so instead of "go on".
+  const stop = await rig({ facts: () => new Promise((r) => setTimeout(() => r({ ...known, sentinel: true, stopping: true }), 300)), graceMs: 100 });
+  stop.withReadyNote("NEXT ACTION: x");
+  await stop.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.match(stop.sent[1]!.content, /Sentinel: PRESENT[\s\S]*The swarm is ending, as the lines above say/);
+});
+
+test("the skills line goes with the note when the hub is late or does not answer: the seat builds it, not the hub (D6)", async () => {
+  const { HANDOFF_FACTS_TYPE } = await import("../extensions/self-compact.ts");
+  const SKILLS = "Rules you worked with (shown once in the run; whole note: skill(id)):\n- registry/clock: regkv: Bias is minutes west of UTC.";
+  const rooms: number[] = [];
+  const skills = (max: number) => {
+    rooms.push(max);
+    return SKILLS.length <= max ? SKILLS : "";
+  };
+  // The hub never answers: the note carries the cards, and the facts follow as unknown without them.
+  const dead = await rig({ facts: () => new Promise(() => undefined), graceMs: 100, factsMs: 600, skills });
+  dead.withReadyNote("NEXT ACTION: x");
+  await dead.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(dead.sent.length, 2);
+  assert.ok(dead.sent[0]!.content.includes(SKILLS), dead.sent[0]!.content);
+  assert.ok(dead.sent[0]!.content.length - "\nNEXT ACTION: x".length <= 2000);
+  assert.equal(dead.sent[1]!.customType, HANDOFF_FACTS_TYPE);
+  assert.ok(!dead.sent[1]!.content.includes(SKILLS), "said once, with the note");
+  // The hub fails at once: the header says unknown, and the cards are there.
+  const failed = await rig({ facts: () => Promise.reject(new Error("down")), skills });
+  failed.withReadyNote("NEXT ACTION: y");
+  await failed.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.match(failed.sent[0]!.content, /unknown \(the hub could not be reached/);
+  assert.ok(failed.sent[0]!.content.includes(SKILLS));
+  // The hub answers: the register goes first and the skills line is asked for the room it leaves.
+  const quick = await rig({ facts: async () => ({ ...known, leads: "Yours: L-1 active.\nFinish: not ready (2)" }), skills });
+  quick.withReadyNote("NEXT ACTION: z");
+  await quick.fire("session_start", { type: "session_start", reason: "startup" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(quick.sent.length, 1);
+  assert.match(quick.sent[0]!.content, /\nYours: L-1 active\.\nFinish: not ready \(2\); finish status lists what holds it\.\nRules you worked with/);
+  assert.ok(rooms.every((r) => r > 0 && r < 2000), JSON.stringify(rooms));
+});
+
+test("the summary starts on a copy at the notice line, and the compaction summarizes only what came after it", async () => {
+  const { messageKey, summaryCopy, afterCopy } = await import("../extensions/self-compact.ts");
+  const msg = (role: string, i: number, text = `m${i} ${"x".repeat(400)}`) => ({ role, timestamp: 1000 + i, content: [{ type: "text", text }], ...(role === "toolResult" ? { toolCallId: `c${i}`, toolName: "bash" } : {}) });
+  const convo = [{ role: "compactionSummary", summary: "OLD", tokensBefore: 1, timestamp: 1 }, ...Array.from({ length: 30 }, (_, i) => msg(i % 3 === 0 ? "user" : i % 3 === 1 ? "assistant" : "toolResult", i))];
+  const estimate = (m: never) => JSON.stringify(m).length / 4;
+  const copy = summaryCopy(convo, 1_000, estimate)!;
+  assert.ok(copy, "something lies past the kept tail");
+  assert.equal(copy.previousSummary, "OLD");
+  assert.equal(messageKey(copy.messages[0]), "user|1000|");
+  assert.notEqual((copy.messages.at(-1) as { role: string }).role, undefined);
+  assert.ok(copy.messages.length < 30 && copy.messages.length > 10, `${copy.messages.length} of 30 in the copy`);
+  assert.equal(summaryCopy(convo.slice(0, 3), 1_000_000, estimate), null, "nothing past the kept tail");
+  // At the compaction the history runs on past the copy; the rest is what came after.
+  const history = convo.slice(1, 26);
+  const rest = afterCopy(copy.keys, history, [])!;
+  assert.deepEqual(rest.history.map(messageKey), history.slice(copy.messages.length).map(messageKey));
+  assert.equal(afterCopy(copy.keys, history.slice(1), []), null, "a compaction that does not begin with the copy");
+  assert.deepEqual(afterCopy(copy.keys, history.slice(0, 5), history.slice(5)), { history: [], prefix: history.slice(copy.messages.length) }, "the copy may end inside the turn prefix");
+
+  // Through the hooks: the seat crosses the notice line (40% of a 100k window), the copy is summarized in the background,
+  // and the compaction is asked only for the rest, on top of the copy's summary.
+  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "presum-"));
+  await mkdir(join(dir, ".pi"), { recursive: true });
+  await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 1000 } }));
+  const r = await rig({ facts: async () => known, tokens: 45_000, summaries: ["COPY SUMMARY", "WHOLE SUMMARY"], dir });
+  await r.fire("session_start", { type: "session_start", reason: "startup" });
+  await r.fire("context", { type: "context", messages: convo.slice(0, 22) });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(r.prompts.length, 1, "the copy's summary was asked for at the notice line");
+  assert.match(r.prompts[0]!, /<previous-summary>\nOLD\n<\/previous-summary>/);
+  const covered = summaryCopy(convo.slice(0, 22), 1000, estimateFor)!;
+  const preparation = { messagesToSummarize: convo.slice(1, 28), turnPrefixMessages: [], previousSummary: "OLD", fileOps: { read: new Set(), written: new Set(), edited: new Set() }, firstKeptEntryId: "e28", tokensBefore: 60_000 };
+  const out = (await r.fire("session_before_compact", { type: "session_before_compact", reason: "threshold", preparation, signal: new AbortController().signal })) as { compaction: { summary: string; usage: { totalTokens: number }; details: { selfCompact: { preSummary: { used: boolean; covered: number; after: number } } } } };
+  assert.equal(r.prompts.length, 2);
+  assert.match(r.prompts[1]!, /<previous-summary>\nCOPY SUMMARY\n<\/previous-summary>/, "the rest is summarized on top of the copy's summary");
+  const after = convo.slice(1 + covered.messages.length, 28) as Array<{ content: Array<{ text: string }> }>;
+  assert.ok(after.length > 0 && after.every((m) => r.prompts[1]!.includes(m.content[0]!.text.slice(0, 6))), "what came after the copy is in it");
+  assert.ok(!r.prompts[1]!.includes(`m0 ${"x".repeat(20)}`), "what the copy covered is not sent again");
+  assert.equal(out.compaction.summary, "WHOLE SUMMARY");
+  assert.deepEqual([out.compaction.details.selfCompact.preSummary.used, out.compaction.details.selfCompact.preSummary.covered, out.compaction.details.selfCompact.preSummary.after], [true, covered.messages.length, after.length]);
+  // The copy's summary was recorded when its call ended, once; the compaction carries only its own call.
+  const { PRESUMMARY_USAGE_TYPE } = await import("../extensions/self-compact.ts");
+  const { usageFromSessionEntries } = await import("../extensions/protocol-core.ts");
+  const records = r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE);
+  assert.equal(records.length, 1);
+  assert.equal((records[0]!.data as { usage: { totalTokens: number } }).usage.totalTokens, r.usage.totalTokens);
+  assert.equal(out.compaction.usage.totalTokens, r.usage.totalTokens, "the compaction does not count the copy's summary again");
+  const counted = usageFromSessionEntries([...r.appended, { type: "compaction", usage: out.compaction.usage }]);
+  assert.equal(counted.compaction_usd, 2 * r.usage.cost.total, "both calls are compaction cost, each once");
+  assert.equal(counted.spent_usd, 2 * r.usage.cost.total);
+  assert.equal(counted.compactions, 1);
+
+  // Nothing came after the copy: its summary is the compaction's, with no call at all.
+  const again = await rig({ facts: async () => known, tokens: 45_000, summaries: ["ONLY SUMMARY"], dir });
+  await again.fire("session_start", { type: "session_start", reason: "startup" });
+  await again.fire("context", { type: "context", messages: convo.slice(0, 22) });
+  await new Promise((res) => setTimeout(res, 200));
+  const same = { ...preparation, messagesToSummarize: covered.messages };
+  const t0 = Date.now();
+  const direct = (await again.fire("session_before_compact", { type: "session_before_compact", reason: "manual", preparation: same, signal: new AbortController().signal })) as { compaction: { summary: string } };
+  assert.equal(direct.compaction.summary, "ONLY SUMMARY");
+  assert.equal(again.prompts.length, 1, "no second call");
+  assert.ok(Date.now() - t0 < 100, "and no wait");
+});
+
+test("the copy's summary is counted when its call ends: a run that ends before the compaction, or a cancelled compaction, still pays for it (D4)", async () => {
+  const { PRESUMMARY_USAGE_TYPE } = await import("../extensions/self-compact.ts");
+  const { usageFromSessionEntries } = await import("../extensions/protocol-core.ts");
+  const msg = (role: string, i: number) => ({ role, timestamp: 1000 + i, content: [{ type: "text", text: `m${i} ${"x".repeat(400)}` }], ...(role === "toolResult" ? { toolCallId: `c${i}`, toolName: "bash" } : {}) });
+  const convo = Array.from({ length: 30 }, (_, i) => msg(i % 3 === 0 ? "user" : i % 3 === 1 ? "assistant" : "toolResult", i));
+  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "presum-usage-"));
+  await mkdir(join(dir, ".pi"), { recursive: true });
+  await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 1000 } }));
+  // The seat crosses the notice line and the copy is summarized; the run ends there, before any compaction.
+  const r = await rig({ facts: async () => known, tokens: 45_000, summaries: ["COPY SUMMARY"], dir });
+  await r.fire("session_start", { type: "session_start", reason: "startup" });
+  await r.fire("context", { type: "context", messages: convo.slice(0, 22) });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(r.prompts.length, 1);
+  const records = r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE);
+  assert.equal(records.length, 1, "recorded once, when the call ended");
+  const ended = usageFromSessionEntries(r.appended);
+  assert.equal(ended.compaction_usd, r.usage.cost.total, "the budget counts it with no compaction entry");
+  assert.equal(ended.spent_usd, r.usage.cost.total);
+  assert.equal(ended.compactions ?? 0, 0, "it is not a compaction");
+  // A compaction that is cancelled leaves no entry: the copy's cost stands, counted once.
+  const stop = new AbortController();
+  stop.abort();
+  const preparation = { messagesToSummarize: convo.slice(0, 28), turnPrefixMessages: [], previousSummary: undefined, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, firstKeptEntryId: "e28", tokensBefore: 60_000 };
+  const out = (await r.fire("session_before_compact", { type: "session_before_compact", reason: "threshold", preparation, signal: stop.signal })) as { cancel?: boolean } | undefined;
+  assert.ok(!out || out.cancel, JSON.stringify(out));
+  assert.equal(r.appended.filter((e) => e.customType === PRESUMMARY_USAGE_TYPE).length, 1, "not recorded again");
+  assert.equal(usageFromSessionEntries(r.appended).compaction_usd, r.usage.cost.total);
+});
+
+const estimateFor = (m: never) => {
+  const { estimateTokens } = PiCore;
+  return estimateTokens(m);
+};

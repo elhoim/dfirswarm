@@ -13,7 +13,7 @@ import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ROOT, withCwd } from "./tool-library-harness.ts";
-import { FEW, HOLDERS, VARIANTS, exec, sh, stubDir } from "./network-process-harness.ts";
+import { FEW, HOLDERS, VARIANTS, alive, exec, pids, sh, stubDir } from "./network-process-harness.ts";
 import { register } from "./process-apply-cases.ts";
 import type { Case } from "./process-apply-cases.ts";
 import { NO_ADOPTION } from "./host-gates.ts";
@@ -194,7 +194,8 @@ for (const host of ["darwin", "refused"] as const) {
         assert.equal(answer.status, "partial", JSON.stringify(answer.status_basis));
         assert.equal(answer.verdict, "unknown");
         assert.equal(answer.table, undefined, "no table is described as kept");
-        assert.equal(answer.program_group.left_behind, 0, "nothing was found: the flood alone says the pipe was mixed");
+        // (the processes the tool saw below the converter may still hold the leftover: then it is ended and counted, and nothing it counted is left)
+        if (answer.program_group.left_behind > 0) for (const pid of await pids(cwd)) assert.equal(alive(pid), false, `leftover ${pid} was counted and is gone`);
         const kept = await readdir(join(cwd, "work", "s1", "symbols")).catch(() => []);
         assert.deepEqual(kept, [], "nothing is left in the symbols directory");
       });

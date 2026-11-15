@@ -3,6 +3,7 @@ id: media/provenance
 title: Media originals, derivatives and capture time
 when: A photo or video is cited, and you must say whether you hold the original and when it was made.
 needs: []
+card: heic_inspect {"path": "<original>"} previews a HEIC or HEIF original: cite the original (path, size, digest), never the preview. Metadata is presence and counts; values need write_values in a job with secret_output: true. Capture, date added, file time and send time are four clocks: keep raw values. Does not show: who took the picture, that the capture time is true, or that it was not edited.
 tools: [heic_inspect, sqlite_query]
 requires_host: [exiftool, heif-convert]
 ---

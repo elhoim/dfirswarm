@@ -3,6 +3,7 @@ id: filesystem/timestamps
 title: NTFS time sets
 when: Two sets disagree, or you quote an NTFS time.
 needs: [filesystem/mft]
+card: mft_records {"path": "<$MFT>", "entry": 1234} returns both time sets with raw FILETIME; {"timestomp_only": true} filters on its flags, indicators only. Neither set is a clock to trust or exclude: write the strongest benign explanation and check usn_journal {"path": "<$J>"}. An access time is not evidence of an access. Does not show: manipulation, or which set is true.
 tools: [mft_records, usn_journal]
 requires_host: []
 ---

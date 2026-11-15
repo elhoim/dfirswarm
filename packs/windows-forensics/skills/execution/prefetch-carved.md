@@ -3,6 +3,7 @@ id: execution/prefetch-carved
 title: Carved Prefetch
 when: No .pf; image or pagefile may hold records.
 needs: [execution/prefetch]
+card: mam_scan {"path": "<raw source>", "start": 0, "length": 2000000, "max_hits": 20}: read the accounting first (status is partial when any candidate failed). A hit is a Prefetch structure at an offset of this file: no file name, path or address. It finds MAM\x04 records only, so a negative covers those in the range scanned. Does not show: that the file existed on disk, was deleted or ran.
 tools: [mam_scan]
 requires_host: []
 ---

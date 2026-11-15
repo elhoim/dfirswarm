@@ -3,6 +3,7 @@ id: logs/journal-clocks-verify
 title: Journal clocks, identity fields and verify
 when: Ordering journal entries across clocks and boots, or judging journal integrity.
 needs: []
+card: journal_export {"path": "<the evidence's journal>", "mode": "verify"} runs journalctl --verify alone: a structural check, and partial (program_group) if journalctl left a process. Within a boot order by monotonic_us, not realtime_us; a sequence break alone is no deletion. _EXE and _CMDLINE are attribution at logging time. Does not show: authenticity, completeness, or the true time across boots.
 tools: [journal_export]
 requires_host: [journalctl]
 ---

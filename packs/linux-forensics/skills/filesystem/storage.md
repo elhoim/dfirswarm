@@ -3,6 +3,7 @@ id: filesystem/storage
 title: Linux storage layers and parser coverage
 when: Identifying volume dependencies and parser coverage before examining a filesystem.
 needs: []
+card: image_layout {"image": "<image>"} first: identify the layer at an offset before calling a partition damaged; table: false is no proof there is none. If it names LVM, run linux_triage {"source": "<complete image set>", "out_dir": "work/<your id>/<name>"} as a secret_output job and read each function's status. Does not show: an intact file system from a readable superblock.
 tools: [image_layout, linux_triage]
 requires_host: [target-query]
 ---

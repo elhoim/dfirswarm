@@ -46,6 +46,7 @@ const ESTABLISHED = {
   answer_review: {
     reproduced: "re-derived the cited finding from its sealed ref",
     read: "nothing beyond the cited entries",
+    link: "the cited record is the host's own log of the event the question asks about",
     parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }],
     inference: "the finding is the answer",
     alternatives: [{ explanation: "a copy of the record left by another process", why: "the record's own metadata ties it to the event", evidence: ["E-1"] }],
@@ -437,4 +438,131 @@ test("the metric: a run whose only first-done refusal would have been late items
   assert.match((await import("../scripts/metrics.ts")).metricsText(ma), /the first done refused: late posts \(a0\), on late items; 1 done\(s\) refused on late items/);
   // What the trace keeps of the finish acts is read back from the register too.
   assert.match(await readFile(join(b.S, "leads", "finish.jsonl"), "utf8"), /"ev":"prepare"/);
+});
+
+test("what holds the finish is given by code, and the trace keeps the codes and counts: an answer with no critic act holds it as no_critic_act", async () => {
+  const r = await run("fp-held");
+  const f = await P.recordEntry(r.a0, { kind: "finding", ...FINDING, value: "a logon at 09:14 by the first account", source: "the log", evidence: "line 12", refs: ["job:j000001/hits.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(f.ok, JSON.stringify(f));
+  const seq = (f as { entry: P.LedgerEntry }).entry.seq;
+  const a = await P.recordEntry(r.a1, { kind: "answer", section: "question:1", value: "The first account, at 09:14", reasoning: `E-${seq}`, confidence: "high", confidence_why: "direct", alternatives_open: "none open", would_change: "a second source", result: "established" } as unknown as P.LedgerInput);
+  assert.ok(a.ok, JSON.stringify(a));
+  const st = (await F.finishStatus(r.a0)) as { ready: boolean; items: string[]; held?: Array<{ section: string; code: string }> };
+  assert.equal(st.ready, false);
+  assert.ok(st.held?.some((h) => h.section === "question:1" && h.code === "no_critic_act"), JSON.stringify(st.held));
+  const counts = F.readinessCounts(st as unknown as Record<string, unknown>);
+  assert.equal(counts.ready, false);
+  assert.equal(counts.items, st.items.length);
+  assert.ok((counts.held?.no_critic_act ?? 0) >= 1, JSON.stringify(counts));
+  // No words of an item reach the counts.
+  assert.ok(!JSON.stringify(counts).includes("question:1"), JSON.stringify(counts));
+  await publish(r.S, "a0", "# Report\n\n## 1\n\nThe first account.\n");
+  const p = await prepare(r.a0, REPORT);
+  assert.ok(p.ok, JSON.stringify(p));
+  assert.ok(((p.readiness as { held?: unknown[] }).held ?? []).length >= 1, JSON.stringify(p.readiness));
+  assert.deepEqual(F.heldCodes([{ code: "sweep_hits" }, { code: "sweep_hits" }, { code: "no_critic_act" }, {}]), { sweep_hits: 2, no_critic_act: 1 });
+});
+
+test("a seat at work whose evidence job ended after its last record holds the finish; one that recorded since, is done, or is silent does not", async () => {
+  const r = await run("fp-unrec");
+  await established(r); // a0 records a finding and a coverage record, a1 an answer
+  const later = new Date(Date.now() + 60_000).toISOString();
+  // a1's command job ended after its answer; a0's tool job ended before its records; a2's is a recipe, not a seat's evidence job.
+  await job(r.S, "j000002", "out.txt", { requester: { agent: "a1" }, spec: { kind: "command", command: "decode" }, finished_at: later });
+  await job(r.S, "j000003", "o.txt", { requester: { agent: "a0" }, spec: { kind: "tool", tool: "t" }, finished_at: "2026-01-01T00:00:00.000Z" });
+  await job(r.S, "j000004", "r.txt", { requester: { agent: "a2" }, spec: { kind: "recipe" }, finished_at: later });
+  const held = await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now());
+  assert.equal(held.length, 1, JSON.stringify(held));
+  assert.match(held[0]!, /^a1 is at work and its job j000002 ended after its last record \(20\d\d-.*\): what that job showed is on no record yet: ask it to record what it holds, or wait for it$/);
+  // Silent past the stale limit: not at work, not held.
+  assert.deepEqual(await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now() + 2 * L.leadStaleMs()), []);
+  // Done: not held.
+  await mkdir(join(r.S, "done", "agents"), { recursive: true });
+  await writeFile(join(r.S, "done", "agents", "a1.done"), "");
+  assert.deepEqual(await F.unrecordedWork(r.S, await L.leadsSnapshot(r.S), Date.now()), []);
+});
+
+test("a job the record already names holds nothing, whoever recorded it; the coordinator is not asked on the board by itself", async () => {
+  const r = await run("fp-unrec-named");
+  await established(r);
+  await new Promise((res) => setTimeout(res, 5));
+  const later = new Date(Date.now() + 60_000).toISOString();
+  // a1's job ended after its last record, and a2 recorded what it showed: (b) a peer recorded it.
+  await job(r.S, "j000002", "out.txt", { requester: { agent: "a1" }, spec: { kind: "command", command: "decode" }, finished_at: later });
+  const peer = await P.recordEntry(r.a2, { kind: "finding", ...FINDING, value: "the decoded block holds the second account", source: "the decode job", evidence: "out.txt line 1", refs: ["job:j000002/out.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(peer.ok, JSON.stringify(peer));
+  // a0's job ended after its records too, and its own finding named it from a page of its stdout before it finished: (c).
+  await job(r.S, "j000003", "o.txt", { requester: { agent: "a0" }, spec: { kind: "tool", tool: "t" }, finished_at: later });
+  const own = await P.recordEntry(r.a0, { kind: "finding", ...FINDING, value: "the first page of the listing names the tool", source: "job j000003's stdout, first page, read while it ran", evidence: "stdout lines 1-40", refs: ["job:j000001/hits.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(own.ok, JSON.stringify(own));
+  const snap = await L.leadsSnapshot(r.S);
+  assert.deepEqual(await F.unrecordedHolds(r.S, snap), [], "both jobs are on the record");
+  assert.ok(F.recordedJobs(snap).has("j000002") && F.recordedJobs(snap).has("j000003"));
+  // A job nobody names still holds, and (a) the seat whose done it is is told by its own refusal, not asked by itself on the board.
+  await job(r.S, "j000004", "x.txt", { requester: { agent: "a0" }, spec: { kind: "command", command: "carve" }, finished_at: later });
+  const gate = await finishGate(r.S, { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] });
+  const held = gate.defects.filter((x) => x.code === "unrecorded_work") as Array<{ code: string; seat: string; job: string }>;
+  assert.deepEqual(held.map((x) => [x.seat, x.job]), [["a0", "j000004"]]);
+  const post = (a: { tag: string; body: string; to: string; key: string; via: string }) => P.systemPost(r.S, a);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), [], "a0 is not asked by its own done");
+  assert.deepEqual(await F.askUnrecorded(r.S, "a1", gate.defects, post), ["a0"], "another seat's done asks it");
+});
+
+test("unrecorded work holds the coordinator's done by seat and job, the seat is asked once, and the hold ends when it records or a grace after it was asked (B5)", async () => {
+  const r = await run("fp-unrec-done");
+  await established(r);
+  await new Promise((res) => setTimeout(res, 5));
+  const later = new Date().toISOString();
+  await job(r.S, "j000002", "out.txt", { requester: { agent: "a1" }, spec: { kind: "command", command: "decode" }, finished_at: later });
+  // The gate holds the done: one defect, naming the seat and its job, with how it ends.
+  const run1 = { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  const gate = await finishGate(r.S, run1);
+  const d = gate.defects.find((x) => x.code === "unrecorded_work") as { code: string; seat: string; job: string; since: string; what: string; fix: string } | undefined;
+  assert.ok(d, JSON.stringify(gate.defects));
+  assert.equal(d!.seat, "a1");
+  assert.equal(d!.job, "j000002");
+  assert.match(d!.what, /^a1 is at work and its job j000002 ended after its last record/);
+  assert.match(d!.fix, /anything it records ends the hold, as its done or its going does, and a hold a done named lapses 10 minute\(s\) after it/);
+  const verdict = P.finishLineVerdict({ ...run1, gate }, false);
+  assert.equal(verdict.proceed, false);
+  assert.equal((verdict as { failing: string }).failing, "unrecorded_work j000002");
+  assert.match((verdict as { reason: string }).reason, /a1 is at work and its job j000002 ended after its last record/);
+  // The done asks the seat, once a hold: a done refused again posts nothing new.
+  const post = (a: { tag: string; body: string; to: string; key: string; via: string }) => P.systemPost(r.S, a);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), ["a1"]);
+  assert.deepEqual(await F.askUnrecorded(r.S, "a0", gate.defects, post), []);
+  const asks = (await P.readInbox({ sandboxRoot: r.S, agentId: "a1" }, {})).posts.filter((p) => p.tag === "ask" && /a0 called done, and the finish waits for you/.test(p.body));
+  assert.equal(asks.length, 1, JSON.stringify(asks));
+  assert.equal(asks[0]!.to, "a1");
+  assert.match(asks[0]!.body, /Record now every value you hold and have not recorded: .*as a candidate \(record_candidate: question, value, ref\)/);
+  // A check held on unrecorded work is not taken again for its revision: what ends the hold moves no part of it.
+  const revision = (await P.stateRevision(r.S)).revision;
+  await F.recordCheck(r.S, "a0", revision, { proceed: false, reason: "held" }, { ...run1, gate });
+  assert.equal(await F.checkAt(r.S, revision), null);
+  // The check that named the hold is when the seat was asked: past the grace, the hold lapses and is a warning.
+  const snap = await L.leadsSnapshot(r.S);
+  const [h] = await F.unrecordedHolds(r.S, snap);
+  assert.ok(h?.asked && h.lapsed === false, JSON.stringify(h));
+  // A seat that stays at work past the grace (the stale limit set longer than the grace): lapsed, not released.
+  process.env.SWARM_LEAD_STALE_SEC = "3600";
+  try {
+    const [gone] = await F.unrecordedHolds(r.S, snap, Date.now() + F.unrecordedGraceMs() + 1000);
+    assert.equal(gone?.lapsed, true, JSON.stringify(gone));
+  } finally {
+    delete process.env.SWARM_LEAD_STALE_SEC;
+  }
+  process.env.SWARM_UNRECORDED_GRACE_SEC = "0";
+  try {
+    const lapsed = await finishGate(r.S, run1);
+    assert.ok(!lapsed.defects.some((x) => x.code === "unrecorded_work"), JSON.stringify(lapsed.defects));
+    assert.ok((lapsed.warnings ?? []).some((w) => /^a1 was asked at .* to record what its job j000002 showed and has recorded nothing since: the finish went on without it$/.test(w)), JSON.stringify(lapsed.warnings));
+  } finally {
+    delete process.env.SWARM_UNRECORDED_GRACE_SEC;
+  }
+  // The seat records: the hold is released.
+  await new Promise((res) => setTimeout(res, 10));
+  const f = await P.recordEntry(r.a1, { kind: "finding", ...FINDING, value: "the decoded block holds the second account", source: "the decode job", evidence: "out.txt line 1", refs: ["job:j000002/out.txt"], answers: ["1"] } as unknown as P.LedgerInput);
+  assert.ok(f.ok, JSON.stringify(f));
+  const after = await finishGate(r.S, run1);
+  assert.ok(!after.defects.some((x) => x.code === "unrecorded_work"), JSON.stringify(after.defects));
 });

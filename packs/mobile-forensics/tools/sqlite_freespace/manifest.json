@@ -34,8 +34,18 @@
   "example": "{\"db\": \"work/extracted/sms.db\", \"limit\": 50}",
   "by": "maintainer",
   "at": "2026-09-22T20:00:00.000Z",
-  "version": 6,
-  "sha256": "ab40e260cfb15ff78ccb0e5bc07e5aff3aef851a99b7bafc35899036724d940a",
+  "not_for": [
+    {
+      "what": "the live rows of a database, by table and column",
+      "use": "sqlite_query"
+    },
+    {
+      "what": "committed changes held only in the -wal beside the database",
+      "use": "sqlite_snapshot"
+    }
+  ],
+  "version": 7,
+  "sha256": "1b7209ad81d125b38b1f32d7ab9a97e71c0a134aa40d9d117ff6c5bf224ec716",
   "use": {
     "magic": [
       {
@@ -48,5 +58,16 @@
     "when_args": [
       "write_values"
     ]
-  }
+  },
+  "companions": [
+    {
+      "param": "db",
+      "suffixes": [
+        "-wal",
+        "-shm",
+        "-journal"
+      ],
+      "why": "the write-ahead log, its index and the rollback journal beside the database, where its last writes may be"
+    }
+  ]
 }

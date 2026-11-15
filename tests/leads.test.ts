@@ -8,6 +8,7 @@
  * a lead, pagination, an uninterpreted job at done, and partial coverage.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -491,4 +492,179 @@ test("needs_operator writes the request for the operator; the operator's note re
   // Reopened after the operator's note, it is offered to its previous holder first.
   assert.ok(told.notices.some((n) => n.kind === "offer" && /was reopened after the operator's note and is offered to you first, its previous holder/.test(n.text)), JSON.stringify(told.notices));
   assert.ok(told.notices.some((n) => n.kind === "operator_note" && /paste\.example\.org/.test(n.text)), JSON.stringify(told.notices));
+});
+
+// --- D5: a holder stuck in one call, a silent seat, the weak model class -------------------------
+
+/** A seat waiting since `min` minutes ago (protocol.ts marks it as its wait starts). */
+async function waitingFor(S: string, agent: string, min: number): Promise<void> {
+  const at = new Date(Date.now() - min * 60_000).toISOString();
+  await mkdir(join(S, "inbox", agent), { recursive: true });
+  await writeFile(join(S, "inbox", agent, "waiting.json"), JSON.stringify({ since: at, started_at: at }));
+}
+
+/** team.json with a model for each seat. */
+async function models(S: string, byAgent: Record<string, string>): Promise<void> {
+  const team = JSON.parse(await readFile(join(S, "team.json"), "utf8")) as P.TeamRecord;
+  for (const a of team.agents) if (byAgent[a.id]) a.model = byAgent[a.id];
+  await writeFile(join(S, "team.json"), JSON.stringify(team));
+}
+
+test("D5: a holder 15 minutes in one call has its lead marked and offered to the seat waiting longest, whose claim takes it over; never past a job of its own", async () => {
+  const { S, a0, a1, a2 } = await run(["a0", "a1", "a2"]);
+  ok(await L.openLead(a0, { title: "Carve the volume", why: "question 2 rests on it", answers: ["2"], take: true }));
+  await L.leadsDigest(a0, { mark: true });
+  await waitingFor(S, "a1", 6);
+  await waitingFor(S, "a2", 2);
+  refused(await L.seatStallLeads(S, "a0", "call", 14 * 60_000), /under the 900 s that frees or offers/);
+  const first = ok(await L.seatStallLeads(S, "a0", "call", 16 * 60_000));
+  assert.deepEqual([first.held, first.marked, first.offered], [1, ["L-1"], [{ lead: "L-1", to: "a1" }]]);
+  // While the offer holds, nothing more is made.
+  const again = ok(await L.seatStallLeads(S, "a0", "call", 17 * 60_000));
+  assert.deepEqual([again.marked, again.offered, again.waiting], [[], [], ["L-1"]]);
+  const offered = (await L.leadsDigest(a1, { mark: false })).notices.find((n) => n.kind === "offer");
+  assert.match(offered?.text ?? "", /^L-1 \("Carve the volume"\) is held by a0, who has been in one call for 16\+ min with nothing on its session or the trace .*lead_claim L-1 takes it over unless a0 acts on it first/);
+  const holder = await L.leadsDigest(a0, { mark: false });
+  assert.ok(holder.notices.some((n) => n.kind === "parked" && /was offered to a1, who has first claim .*while you sat in one call for 16\+ min with nothing on your session/.test(n.text)), JSON.stringify(holder.notices));
+  assert.ok(holder.notices.some((n) => n.kind === "stale_marked" && /the harness found you in one call for 16\+ min/.test(n.text)), JSON.stringify(holder.notices));
+  refused(await L.claimLead(a2, "L-1"), /offered to a1 \(its holder a0 has been in one call for 16\+ min/);
+  const taken = ok(await L.claimLead(a1, "L-1"));
+  assert.deepEqual([taken.lead.holder, taken.reclaimed_from], ["a1", "a0"]);
+  const claim = (await L.leadsSnapshot(S)).state.events.at(-1)!;
+  assert.deepEqual([claim.ev, claim.cause, claim.from], ["claim", "stuck_call", "a0"]);
+  // A holder whose own job still runs is waiting on it, not stuck.
+  ok(await L.openLead(a2, { title: "Hash the share", why: "question 3", answers: ["3"], take: true }));
+  await mkdir(join(S, "store", "jobs", "j000009"), { recursive: true });
+  await writeFile(join(S, "store", "jobs", "j000009", "job.json"), JSON.stringify({ id: "j000009", state: "running", requester: { agent: "a2" }, spec: { kind: "command", command: "x" } }));
+  const busy = ok(await L.seatStallLeads(S, "a2", "call", 30 * 60_000));
+  assert.deepEqual([busy.held, busy.marked, busy.offered, busy.why], [1, [], [], "a2 has a job of its own, or one it joined, still to finish"]);
+});
+
+test("D5: a seat waiting on a job it was joined to (the same call as a peer's) keeps its leads, as with a job of its own", async () => {
+  const { S, a0 } = await run(["a0", "a1", "a2"]);
+  ok(await L.openLead(a0, { title: "Extract the share", why: "question 3", answers: ["3"], take: true }));
+  // a1's job runs; a0 asked for the same call and was joined to it: the job service wrote job_deduplicated, and a0 has no job of its own.
+  await mkdir(join(S, "store", "jobs", "j000011"), { recursive: true });
+  await writeFile(join(S, "store", "jobs", "j000011", "job.json"), JSON.stringify({ id: "j000011", state: "running", requester: { agent: "a1" }, spec: { kind: "tool", tool: "extract" } }));
+  await writeFile(join(S, "store", "journal.jsonl"), `${JSON.stringify({ type: "job_accepted", job: "j000011", requester: { agent: "a1" } })}\n${JSON.stringify({ type: "job_deduplicated", job: "j000011", by: { agent: "a0" }, kind: "tool", tool: "extract", notify: true })}\n`);
+  const jobs = await L.readJobs(S);
+  assert.deepEqual(jobs.find((j) => j.id === "j000011")?.joined, ["a0"]);
+  assert.equal(L.seatJobOpen(jobs[0]!, "a0"), true);
+  assert.equal(L.seatJobOpen(jobs[0]!, "a2"), false);
+  const kept = ok(await L.seatStallLeads(S, "a0", "silent", 30 * 60_000));
+  assert.deepEqual([kept.held, kept.released, kept.why], [1, [], "a0 has a job of its own, or one it joined, still to finish"]);
+  assert.equal((await L.holderLiveness(S, "a0", jobs, new Map(), Date.now())).stale, false, "a joined job keeps its holder live");
+  assert.equal((await L.holderLiveness(S, "a2", jobs, new Map(), Date.now())).stale, true, "a seat that asked for nothing is not");
+  // Once the job is committed, the seat's silence counts again.
+  await writeFile(join(S, "store", "jobs", "j000011", "job.json"), JSON.stringify({ id: "j000011", state: "committed", status: "ok", requester: { agent: "a1" }, spec: { kind: "tool", tool: "extract" } }));
+  assert.deepEqual(ok(await L.seatStallLeads(S, "a0", "silent", 30 * 60_000)).released, ["L-1"]);
+});
+
+test("D5: a holder silent 15 minutes has its leads freed and is told when it is back; a dead seat's are freed at once, its jobs or not", async () => {
+  const { S, a0, a1, a3 } = await run();
+  ok(await L.openLead(a0, { title: "Read the registry", why: "q1", answers: ["1"], take: true }));
+  ok(await L.openLead(a0, { title: "Read the logs", why: "q2", answers: ["2"], take: true }));
+  await L.leadsDigest(a0, { mark: true });
+  const freed = ok(await L.seatStallLeads(S, "a0", "silent", 16 * 60_000));
+  assert.deepEqual(freed.released, ["L-1", "L-2"]);
+  const snap = await L.leadsSnapshot(S);
+  assert.deepEqual([...snap.state.leads.values()].map((l) => l.holder), [null, null]);
+  assert.ok(snap.state.events.slice(-2).every((e) => e.ev === "release" && e.by === "system" && e.cause === "silent_seat"));
+  assert.equal(ok(await L.seatStallLeads(S, "a0", "silent", 20 * 60_000)).held, 0, "nothing left to free");
+  const back = await L.leadsDigest(a0, { mark: false });
+  assert.deepEqual(back.notices.filter((n) => n.kind === "freed").map((n) => n.lead), ["L-1", "L-2"]);
+  assert.match(back.notices[0]!.text, /^L-1 \("Read the registry"\) was freed while you were away: a0 was silent 16 min .*lead_claim L-1 takes it back/);
+  // Free: any seat claims it, no stale grace.
+  assert.equal(ok(await L.claimLead(a1, "L-1")).lead.holder, "a1");
+  // A dead seat: its leads go back at once, whatever its jobs.
+  ok(await L.openLead(a3, { title: "Mount the image", why: "q3", answers: ["3"], take: true }));
+  await mkdir(join(S, "store", "jobs", "j000004"), { recursive: true });
+  await writeFile(join(S, "store", "jobs", "j000004", "job.json"), JSON.stringify({ id: "j000004", state: "running", requester: { agent: "a3" }, spec: { kind: "command", command: "x" } }));
+  assert.deepEqual(ok(await L.seatStallLeads(S, "a3", "silent", 16 * 60_000)).released, [], "a silent seat with a job running keeps its lead");
+  const dead = ok(await L.seatStallLeads(S, "a3", "dead", 60_000));
+  assert.deepEqual(dead.released, ["L-3"]);
+  assert.match(dead.why, /a3 was recorded dead/);
+});
+
+test("D5: the weak model class: a lead of its seat names at most three questions unless the run sets its own; seeded leads are its default; a seeded lead whose question a seat holds is not offered", async () => {
+  assert.deepEqual(
+    ["deepseek/deepseek-v4-pro", "openrouter/qwen/qwen3-coder", "openai/gpt-oss-120b", "lmstudio/anything", "zai-org/glm-4.6", "google/gemma-3-27b", "openai/gpt-5.4", "anthropic/claude-opus-4", "google/gemini-3-pro", "xai/grok-4", "", null].map((m) => L.modelClass(m)),
+    ["weak", "weak", "weak", "weak", "weak", "weak", "strong", "strong", "strong", "strong", null, null],
+  );
+  assert.equal(L.leadMaxAnswers({}, "weak"), 3);
+  assert.equal(L.leadMaxAnswers({}, "strong"), 8);
+  assert.equal(L.leadMaxAnswers({ SWARM_LEAD_MAX_QUESTIONS: "5" }, "weak"), 5, "the run's own setting is for every seat");
+  const goal = ["## Goal", "", "Examine the host.", "", "### Questions", "", "1. What is the host name?", "2. When did it run?", "3. Which file?", "4. Who logged in?", "", "## Definition of done", "", "d", "", "## Checks", "", '- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4`', ""].join("\n");
+  const { S, a0, a1, a2, a3 } = await run(["a0", "a1", "a2", "a3"]);
+  await writeFile(join(S, "SWARM.md"), goal);
+  const cli = (args: string[]) => {
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "leads-cli.ts"), ...args], { encoding: "utf8", env: { ...process.env, SWARM_RUNS_DIR: join(S, "..", "no-runs") } });
+    return JSON.parse(r.stdout) as { opened: string[]; skipped?: string };
+  };
+  // A team of the strong class: nothing is seeded by default.
+  await models(S, { a0: "openai/gpt-5.4", a1: "openai/gpt-5.4", a2: "anthropic/claude-opus-4", a3: "openai/gpt-5.4" });
+  assert.equal(await L.teamHasWeakSeat(S), false);
+  assert.deepEqual(cli(["seed", S, "--weak-only"]), { opened: [], had: 0, skipped: "no seat of the weak model class" });
+  ok(await L.openLead(a1, { title: "Five at once", why: "x", answers: ["1", "2", "3", "4"] }));
+  // One seat of the weak class: seeded, and its own leads are narrow.
+  await models(S, { a0: "deepseek/deepseek-v4-pro" });
+  assert.equal(await L.teamHasWeakSeat(S), true);
+  assert.equal(await L.seatModelClass(S, "a0"), "weak");
+  refused(await L.openLead(a0, { title: "Four at once", why: "x", answers: ["1", "2", "3", "4"] }), /a lead names at most 3 questions for a seat of your model's class: open one lead for each part of the work/);
+  ok(await L.openLead(a0, { title: "Three at once", why: "x", answers: ["1", "2", "3"] }));
+  process.env.SWARM_LEAD_MAX_QUESTIONS = "8";
+  try {
+    ok(await L.openLead(a0, { title: "Four, the run allows it", why: "x", answers: ["1", "2", "3", "4"] }));
+  } finally {
+    delete process.env.SWARM_LEAD_MAX_QUESTIONS;
+  }
+  // Leads that answer every question already, unheld: seeding opens none; a fresh run of the weak class gets one per question.
+  const fresh = await run(["b0", "b1", "b2"]);
+  await writeFile(join(fresh.S, "SWARM.md"), goal);
+  await models(fresh.S, { b0: "qwen/qwen3-max", b1: "openai/gpt-5.4", b2: "openai/gpt-5.4" });
+  ok(await L.openLead(fresh.ctx("b1"), { title: "The host name", why: "q1", answers: ["1"], take: true }));
+  const seeded = cli(["seed", fresh.S, "--weak-only"]);
+  assert.deepEqual(seeded.opened, ["L-2", "L-3", "L-4"]);
+  // A seeded lead for question 2, and b0 now holds its own lead on question 2: the seeded one is not offered to an idle seat.
+  ok(await L.openLead(fresh.ctx("b0"), { title: "When it ran", why: "q2", answers: ["2"], take: true }));
+  await waitingFor(fresh.S, "b2", 5);
+  const woke = await L.leadsWaitCheck(fresh.ctx("b2"))();
+  assert.match(woke ?? "", /^L-3 \("Answer question 3/, `the seeded lead of a question nobody holds is offered, not L-2: ${woke}`);
+  void a2;
+  void a3;
+});
+
+test("A5: a seat started again is handed what the records hold of it (its leads, newest entries, jobs), within the 2,000 characters of a compaction's hand-off", async () => {
+  const { HANDOFF_HEADER_MAX } = await import("../extensions/self-compact.ts");
+  assert.equal(L.RELAUNCH_HANDOFF_MAX, HANDOFF_HEADER_MAX);
+  const { S, a0, a1 } = await run();
+  ok(await L.openLead(a0, { title: "Open the container", why: "q3", answers: ["3"], take: true }));
+  const f = await P.recordEntry(a0, { kind: "finding", ...F, value: "The container's header names AES-XTS", source: "a job", evidence: "the header", answers: ["3"] });
+  assert.ok(f.ok);
+  await P.recordEntry(a1, { kind: "finding", ...F, value: "Another seat's finding", source: "x", evidence: "y" });
+  await job(S, "j000001", "a0", { state: "running" });
+  await job(S, "j000002", "a0", { state: "finished" });
+  await job(S, "j000003", "a0", { state: "failed", status: "failed" });
+  await job(S, "j000004", "a1", { state: "running" });
+  const text = await L.relaunchHandoff(S, "a0", { fresh: true });
+  assert.ok(text.length <= L.RELAUNCH_HANDOFF_MAX, `${text.length}`);
+  assert.match(text, /^The harness started you again: your process had ended\. Your earlier conversation was set aside/);
+  assert.match(text, /Leads you hold: L-1 "Open the container" \(active, question 3\)\./);
+  assert.match(text, /Your newest standing entries \(1 of 1\): E-1 finding \(answers 3\): "The container's header names AES-XTS"\./);
+  assert.match(text, /Your jobs: running: j000001 running; finished and waiting for their seal: j000002; failed: j000003\./);
+  assert.doesNotMatch(text, /Another seat's finding|j000004/, "another seat's work is not in it");
+  assert.match(text, /This message is the harness, not a person/);
+  // A seat with much on record: every part is cut, and the whole stays within the bound.
+  for (let i = 0; i < 30; i++) ok(await L.openLead(a1, { title: `A long title for part ${i} of the work, ${"x".repeat(120)}`, why: "w", take: true }));
+  for (let i = 0; i < 12; i++) await P.recordEntry(a1, { kind: "finding", ...F, value: `Finding ${i}: ${"y".repeat(300)}`, source: "x", evidence: "y" });
+  for (let i = 10; i < 40; i++) await job(S, `j0000${i}`, "a1", { state: "running" });
+  const big = await L.relaunchHandoff(S, "a1");
+  assert.ok(big.length <= L.RELAUNCH_HANDOFF_MAX, `${big.length}`);
+  assert.match(big, /\(active\) and 24 more\./);
+  assert.match(big, /Your newest standing entries \(5 of 13\)/);
+  assert.match(big, /This message is the harness, not a person: do not answer it with a status\.$/);
+  // Under a tighter bound the records are cut whole, the head and the closing words kept.
+  const tight = await L.relaunchHandoff(S, "a1", { max: 700 });
+  assert.ok(tight.length <= 700, `${tight.length}`);
+  assert.match(tight, /\(cut: leads, the ledger and job_status give the rest\)\nYour own files are in work\/a1\//);
 });

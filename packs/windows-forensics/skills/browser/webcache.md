@@ -3,6 +3,7 @@ id: browser/webcache
 title: WebCache, index.dat
 when: WebCacheV01.dat or index.dat files.
 needs: [browser/artefacts]
+card: esedb_query {"path": "<WebCacheV01.dat>"} lists the tables; read {"path": "<WebCacheV01.dat>", "table": "Containers"} first and map the table's container id before reading a URL. Name container and record type before calling a host browsing: a row is not a visit; a dirty database may lack its newest rows. Run it as a secret_output: true job. Does not show: a visit by a person, or a download.
 tools: [esedb_query]
 requires_host: [esedbexport, msiecfexport]
 ---

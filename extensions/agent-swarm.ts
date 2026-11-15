@@ -78,6 +78,7 @@ import {
   toolText,
   usageFromSessionEntries,
   runForgedTool,
+  validateToolSpec,
   lacksProgram,
   ownPathsToOut,
   heldOwnPaths,
@@ -97,6 +98,9 @@ import {
   agentPressure,
   modelPressure,
   LEDGER_AGENT_KINDS,
+  CARRIER_STATES,
+  argsAsSent,
+  argsForValidator,
   LEDGER_CONFIDENCE,
   LEDGER_REL_KINDS,
   LEDGER_ANSWER_RESULTS,
@@ -130,6 +134,7 @@ import {
   useHarnessTrace,
   SENSITIVE_READ_NOTE,
   couldNameOutput,
+  notForWords,
 } from "./protocol.ts";
 // The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
 import {
@@ -178,6 +183,8 @@ import {
   jobSubmit,
   jobStatus,
   catalogRequest,
+  storeFind,
+  jobsList,
   runFinishLine,
   leadOpen,
   leadClaim,
@@ -205,12 +212,22 @@ import {
 } from "./board.ts";
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
+import { weakClassReason } from "./model-class.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, recordCheck } from "./finish.ts";
+import { askUnrecorded, checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, readinessCounts, recordCheck } from "./finish.ts";
 import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
+import { toolsListing } from "./tools-view.ts";
+import { lastKnown } from "./last-known.ts";
+import { cropPng, scaleReadImages } from "./png-scale.ts";
+import { PUBLISH_MAX_BYTES } from "./board.ts";
+import { coerceArgs, coercedWords, selfTestCandidate, selfTestProblem, type SelfTest } from "./forged-args.ts";
+import { sightedFormats, sightedLine, sightingDigest, type OpenQuestion } from "./sighting.ts";
+
+/** How long a read made before a model call may take before the call goes out on the last known value. */
+export const PRECALL_DEADLINE_MS = 1500;
 
 type ToolCtx = { cwd: string };
 
@@ -222,6 +239,23 @@ let lastInputsSweepAt = 0;
 /** How often a pane re-reads what is installed. An install is a rare event. */
 const TOOLCHAIN_INTERVAL_MS = 30_000;
 let lastToolchainAt = 0;
+
+/** The record tools of one kind each (B2): offered to the weak model class only (recordKindToolsFor). */
+export const KIND_TOOL_NAMES = ["record_finding", "record_answer", "record_coverage", "record_limitation", "record_absence"] as const;
+
+/**
+ * Whether a seat is offered the kinds' own record tools (B2): the weak class (model-class.ts) is, the rest are declared
+ * `record` alone. SWARM_RECORD_KIND_TOOLS says otherwise for every seat (all, none); a session that names no model keeps them.
+ */
+export function recordKindToolsFor(model: { provider?: string; id?: string } | undefined, env: NodeJS.ProcessEnv = process.env): { offer: boolean; why: string } {
+  const set = env.SWARM_RECORD_KIND_TOOLS?.trim().toLowerCase();
+  if (set === "all" || set === "none") return { offer: set === "all", why: `SWARM_RECORD_KIND_TOOLS=${set}` };
+  if (!model?.id) return { offer: true, why: "the session names no model, so the kinds' tools stay" };
+  const name = `${model.provider ?? ""}/${model.id}`;
+  const weak = weakClassReason(name);
+  if (weak) return { offer: true, why: `${name} is ${weak}: the weak class` };
+  return { offer: false, why: `${name} is not of the weak class: record alone, whose description carries every kind's rules` };
+}
 
 /** Tools this extension owns. Everything else is a Pi built-in we only trace. */
 export const SWARM_TOOLS = new Set([
@@ -250,6 +284,12 @@ export const SWARM_TOOLS = new Set([
   "inputs_check",
   "record_violation",
   "record",
+  "record_finding",
+  "record_answer",
+  "record_coverage",
+  "record_limitation",
+  "record_absence",
+  "record_candidate",
   "ledger",
   "attest",
   "dispute",
@@ -266,6 +306,9 @@ export const SWARM_TOOLS = new Set([
   "self_compact",
   "job_run",
   "job_status",
+  "store_find",
+  "jobs",
+  "image_crop",
   "catalog_request",
   "lead_open",
   "lead_claim",
@@ -284,6 +327,168 @@ export const SWARM_TOOLS = new Set([
   "question_ask",
   "premise_propose",
 ]);
+
+/**
+ * The limit of one shell call in a seat's own VM, in seconds: a call that names
+ * none gets SWARM_SHELL_TIMEOUT_S (120; it was 900, and the open-weight seats,
+ * which name a timeout on 1 to 10% of their calls where the GPT seats name
+ * one on every call, spent 50 to 347 seat-minutes a run inside shell calls of
+ * up to 25 minutes), and one that names more than
+ * SWARM_SHELL_TIMEOUT_MAX_S (1800) gets that. A job (job_run) is where longer
+ * work goes: it has a limit of its own and the seat goes on working meanwhile.
+ */
+export const SHELL_TIMEOUT_DEFAULT_S = 120;
+
+/** After this many waits in a row that nothing woke, a wait's answer leads with the work nobody holds. */
+export const IDLE_WAITS = 3;
+
+/**
+ * What a wait's answer leads with after IDLE_WAITS unwoken waits: the open lead nobody holds, or the question nobody
+ * holds a lead for, taken from the header the answer already carries (leads.ts: "Open, unheld, by priority" and
+ * "Questions nobody holds a lead for"). Null when there is neither: a seat with nothing to take is waiting rightly.
+ * In eight runs seats waited through 110 to 427 calls while a question had no lead; the header said so on its fifth line.
+ */
+export function idleWaitHint(header: string, waits: number): string | null {
+  const line = (head: string) => header.split("\n").find((l) => l.startsWith(head))?.slice(head.length).trim().replace(/\.$/, "") ?? "";
+  const open = line("Open, unheld, by priority:");
+  const questions = line("Questions nobody holds a lead for, with no answer yet:");
+  const cut = (t: string) => (t.length > 300 ? `${t.slice(0, 280)}\u2026` : t);
+  const parts: string[] = [];
+  if (open && open !== "none") parts.push(`open and held by nobody: ${cut(open)} (lead_claim takes one)`);
+  if (questions && questions !== "none") parts.push(`with no lead and no answer: ${cut(questions)} (lead_open with answers: [the question] takes one)`);
+  if (!parts.length) return null;
+  return `You have waited ${waits} times in a row and nothing woke you, while there is work nobody holds: ${parts.join("; ")}. Take one before you wait again.`;
+}
+export const SHELL_TIMEOUT_MAX_S = 1800;
+export type ShellLimit = { seconds: number; why: "default" | "capped" | null; asked?: number };
+export function shellTimeout(asked: unknown, env: NodeJS.ProcessEnv = process.env): ShellLimit {
+  const num = (v: string | undefined, d: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : d;
+  };
+  const max = num(env.SWARM_SHELL_TIMEOUT_MAX_S, SHELL_TIMEOUT_MAX_S);
+  const dflt = Math.min(num(env.SWARM_SHELL_TIMEOUT_S, SHELL_TIMEOUT_DEFAULT_S), max);
+  if (typeof asked !== "number" || !Number.isFinite(asked) || asked <= 0) return { seconds: dflt, why: "default" };
+  if (asked > max) return { seconds: max, why: "capped", asked };
+  return { seconds: asked, why: null };
+}
+/**
+ * Which of job_run's three forms a call is: a command, a tool with its args, or an import. The open-weight seats sent
+ * a placeholder command beside a tool call ("true", "echo run", the tool's own name) or args with no tool 27 times in
+ * five runs, each refused with "one of them" and no word on which. A placeholder beside a tool is dropped and the call
+ * runs as the tool call it plainly is; the other mixes are refused with the form to send.
+ */
+export function jobRunShape(p: { command?: unknown; tool?: unknown; args?: unknown; import?: unknown }): { ok: true; dropped?: "command" } | { ok: false; reason: string } {
+  const command = typeof p.command === "string" ? p.command.trim() : "";
+  const tool = typeof p.tool === "string" ? p.tool.trim() : "";
+  const imp = typeof p.import === "string" ? p.import.trim() : "";
+  const hasArgs = p.args !== undefined && p.args !== null && typeof p.args === "object" && Object.keys(p.args as object).length > 0;
+  const forms = [command, tool, imp].filter(Boolean).length;
+  if (forms === 1) {
+    if (hasArgs && !tool) return { ok: false, reason: `args are a tool's parameters, and this call names no tool: send job_run(tool: "<name>", args: {...}) with no command (tools lists the names; a command takes its arguments on its own line, with no args)` };
+    return { ok: true };
+  }
+  if (forms === 0) {
+    if (hasArgs) return { ok: false, reason: `args with no tool: name the tool the args are for, job_run(tool: "<name>", args: {...}) (tools lists the names)` };
+    return { ok: false, reason: `nothing to run: send exactly one of command (a shell command line), tool (a tool's name, with its parameters in args) or import (a file to seal)` };
+  }
+  if (tool && command && !imp) {
+    const placeholder = /^(true|:|#.*|echo(\s.*)?|exit 0)?$/i.test(command) || command === tool || command === `${tool} --help`;
+    if (placeholder && hasArgs) return { ok: true, dropped: "command" };
+    if (command.split(/\s+/)[0] === tool) return { ok: false, reason: `${tool} is a pack tool: it takes its parameters in args, not on a command line. Send job_run(tool: "${tool}", args: {...}) with no command (tools(name: "${tool}") gives its parameters)` };
+    return { ok: false, reason: `a job is one thing: either the tool ${tool} with its args, or the command. Send job_run(tool: "${tool}", args: {...}) with no command to run the tool, or job_run(command: "...") with no tool to run the command` };
+  }
+  return { ok: false, reason: `a job is one of command, tool (with its args) or import, and this call gives ${[command && "command", tool && "tool", imp && "import"].filter(Boolean).join(" and ")}: send one, and the other as a job of its own` };
+}
+
+/**
+ * A shell command that waits on a job by sleeping in a loop over the store or a job's files: 42 such loops cost one run
+ * 117 seat-minutes. `wait` sleeps at no cost and wakes on the job's result post, which goes to the seat that ran the job
+ * and to each seat that joined it; job_status says where a job stands now and does not wait. Returns why it is refused,
+ * with the wait call to send instead and the job_status call for each job the loop names (at most three), or null.
+ */
+export function sleepLoopOverJobs(command: unknown): string | null {
+  const c = typeof command === "string" ? command : "";
+  if (!/\b(while|until|for)\b[\s\S]*\bsleep\s+\d/.test(c)) return null;
+  if (!/store\/jobs\/|job_status|\bj\d{6}\b/.test(c)) return null;
+  const ids = [...new Set(c.match(/\bj\d{6,}\b/g) ?? [])].slice(0, 3);
+  const status = (ids.length ? ids : ["<the job's id>"]).map((id) => `job_status(${JSON.stringify({ job_id: id })})`);
+  const many = ids.length > 1;
+  return `this command sleeps in a loop to wait on a job. Do not poll from the shell: send wait(${JSON.stringify({ seconds: WAIT_MAX_SECONDS })}) instead. It sleeps at no cost and wakes on the post tagged result that says a job is done, which comes to the seat that ran the job and to each seat that joined it, or on any other post for you. ${status.join(" and ")} ${many ? "say" : "says"} where ${many ? "each job stands" : "it stands"} now (queued behind what, or finished and being sealed), without waiting. Or take other work meanwhile: the post comes to you then too`;
+}
+
+/** The most of a command a ready job_run call carries whole; a longer one is named by its length. */
+export const READY_COMMAND_MAX = 4000;
+/** A job's own limit, as job_run takes it (default 900, at most 14400). */
+const JOB_TIMEOUT_DEFAULT_S = 900;
+const JOB_TIMEOUT_MAX_S = 14_400;
+
+/**
+ * The job_run call that runs a shell call stopped at its limit as a job: the same command, and a limit of its own (the
+ * time the call asked for when that was over the shell's most, else a job's default). A command longer than
+ * READY_COMMAND_MAX is named by its length rather than repeated.
+ */
+export function readyJobRun(command: unknown, l: ShellLimit): string {
+  const c = typeof command === "string" ? command.trim() : "";
+  const timeout = l.why === "capped" && l.asked ? Math.min(Math.ceil(l.asked), JOB_TIMEOUT_MAX_S) : JOB_TIMEOUT_DEFAULT_S;
+  if (!c) return `job_run(${JSON.stringify({ command: "<the same command>", timeout_seconds: timeout })})`;
+  if (c.length > READY_COMMAND_MAX) return `job_run({"command": <the same command, ${c.length} characters>, "timeout_seconds": ${timeout}})`;
+  return `job_run(${JSON.stringify({ command: c, timeout_seconds: timeout })})`;
+}
+
+export function shellTimeoutNote(l: ShellLimit, command?: unknown): string {
+  const was = l.why === "capped" ? `the ${l.asked} s it asked for is over the harness's limit of ${l.seconds} s for one shell call in your VM` : `a shell call in your VM that names no timeout has the harness's limit of ${l.seconds} s`;
+  return `The call was stopped at its limit: ${was}. Run longer work as a job (job_run with the same command, and timeout_seconds for what it needs): it has a limit of its own, its output is kept in the store and can be cited, and you go on working while it runs (job_status, or wait for its post). Ready to send: ${readyJobRun(command, l)}. A job runs from the run's directory and writes only under $OUT: point the command's outputs there, and list what it reads in inputs to give it only that. A call that must run in your own VM for longer names its own timeout, up to ${SHELL_TIMEOUT_MAX_S} s.`;
+}
+
+/**
+ * Images a model call carries, at most (SWARM_MAX_IMAGES; 0 for no limit). A
+ * provider refuses a request over its own limit, and the context is the same
+ * on the next turn, so every turn after is refused too: a seat of the run
+ * sf4406b read 71 images with `read`, its provider took 32, and it was refused
+ * six times and lost for the last 74 minutes. Past the limit the oldest images
+ * are left out of what the model is sent (the session keeps them), each as a
+ * line that names it; a provider's own number in a refusal lowers the limit.
+ */
+export const MAX_IMAGES_DEFAULT = 24;
+export function imageLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_MAX_IMAGES);
+  return env.SWARM_MAX_IMAGES !== undefined && env.SWARM_MAX_IMAGES.trim() !== "" && Number.isInteger(n) && n >= 0 ? n : MAX_IMAGES_DEFAULT;
+}
+/** The provider's own limit, from its refusal ("at most 32 images per request"), or null. */
+export function providerImageLimit(reason: string): number | null {
+  const m = /at most (\d+) images?\b/i.exec(reason) ?? /\btoo[_ ]many[_ ]images\b.*?\b(\d+)\b/i.exec(reason);
+  if (m) return Number(m[1]);
+  return /\btoo[_ ]many[_ ]images\b/i.test(reason) ? 0 : null;
+}
+export const IMAGE_LEFT_OUT = "[an image left out of this call: the call carries the newest {cap} images only, the provider's limit. The session keeps it; read the file again if you need to see it.]";
+/**
+ * The messages with the oldest images replaced by a line; how many were left
+ * out. Past `cap` the oldest go until half of it is left, and the same number
+ * goes on later calls (`before`, the last call's) until the cap is passed
+ * again: the history the model is sent changes at one place, now and then,
+ * not at every new image (a provider's prompt cache keeps what comes before).
+ * A cap of 0 leaves all in.
+ */
+export function capImages<M>(messages: readonly M[], cap: number, before = 0): { messages: M[]; dropped: number; images: number } {
+  type Block = { type?: string };
+  const at: Array<[number, number]> = [];
+  messages.forEach((m, i) => {
+    const content = (m as { content?: unknown }).content;
+    if (Array.isArray(content)) content.forEach((b, j) => (b as Block)?.type === "image" && at.push([i, j]));
+  });
+  if (cap <= 0 || at.length <= cap) return { messages: [...messages], dropped: 0, images: at.length };
+  const count = before >= at.length - cap && before < at.length ? before : at.length - Math.max(1, Math.floor(cap / 2));
+  const drop = at.slice(0, count);
+  const out = messages.map((m) => m);
+  const byMessage = new Map<number, Set<number>>();
+  for (const [i, j] of drop) byMessage.set(i, (byMessage.get(i) ?? new Set()).add(j));
+  for (const [i, js] of byMessage) {
+    const m = out[i] as { content: unknown[] };
+    out[i] = { ...m, content: m.content.map((b, j) => (js.has(j) ? { type: "text", text: IMAGE_LEFT_OUT.replace("{cap}", String(cap)) } : b)) } as M;
+  }
+  return { messages: out, dropped: drop.length, images: at.length };
+}
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
 const FORGE_HINT_AT = 8;
@@ -497,6 +702,12 @@ export default function (pi: ExtensionAPI) {
   useHarnessTrace((root, line) => logEvent(root, agentId, line.tool, line.args, line.result));
   /** Start times per tool call, so every trace row can carry its duration. */
   const toolStarts = new Map<string, number>();
+  /** The limit the harness gave a shell call that named none, or named more than the most: said with its result when it is stopped there. */
+  const shellLimits = new Map<string, ShellLimit>();
+  /** Images a model call carries at most, and where that number came from: the run's setting, or a provider's refusal. */
+  let imageCap = imageLimit();
+  let imageCapFrom: "setting" | "provider" = "setting";
+  let imagesDropped = 0;
   /** Watched-path snapshot taken before a bash call, keyed by tool call id. */
   const bashSnapshots = new Map<string, { at: number; snapshot: WatchSnapshot; command: string }>();
   /** Limits this process has already steered on; the clock itself is shared. */
@@ -533,6 +744,18 @@ export default function (pi: ExtensionAPI) {
   const jobHinted = new Set<string>();
   /** The sensitive jobs this seat was told about already (docs/adr/0018): the note on a read is once per seat and job. */
   const toldSensitive = new Set<string>();
+  /** When this seat was last told that a result held an open question's asked format, by question (B5): again only after FORMAT_TOLD_MS. */
+  const toldFormat = new Map<string, number>();
+  const FORMAT_TOLD_MS = 30 * 60_000;
+  /** The open questions (in scope, not withdrawn, no standing answer) and their words, read at most once a minute. */
+  let openQuestionsRead: { at: number; list: OpenQuestion[] } | null = null;
+  async function openQuestionsNow(cwd: string): Promise<OpenQuestion[]> {
+    if (openQuestionsRead && Date.now() - openQuestionsRead.at < 60_000) return openQuestionsRead.list;
+    const v = (await questionsView(ctxFrom(cwd, agentId), { view: "list" })) as { questions?: Array<{ section?: unknown; text?: unknown; scope?: unknown; answer?: unknown; withdrawn?: unknown }> };
+    const list = (v.questions ?? []).filter((q) => q.scope === "in_scope" && !q.withdrawn && !q.answer && typeof q.text === "string" && typeof q.section === "string").map((q) => ({ section: q.section as string, text: q.text as string }));
+    openQuestionsRead = { at: Date.now(), list };
+    return list;
+  }
   let jobsOffered: boolean | undefined;
   /** When this agent was steered for its own cap, if it was. */
   let agentCapSteeredAt: number | null = null;
@@ -1215,14 +1438,23 @@ export default function (pi: ExtensionAPI) {
       ? `Your assigned id is ${agentId}. Use it on every post and claim.`
       : "AGENT_ID is unset. Refuse to claim or post until the spawner sets it.";
     // Independent reads of the sandbox: issue them together.
+    // A read the hub link lost (a hub restart) leaves its line unknown and says so, never the whole prompt lost (the run s082123: a seat
+    // ran a turn on Pi's base prompt when the sentinel read was refused).
+    const unread: string[] = [];
     const [done, status, mine, inputs, onDisk] = await Promise.all([
-      swarmDoneExists(cwd),
+      swarmDoneExists(cwd).catch(() => {
+        unread.push("whether done/SWARM_DONE exists");
+        return false;
+      }),
       readBudgetStatus(ctxFrom(cwd, agentId || "agent00")).catch(() => null),
       agentId ? nameOf(cwd, agentId).catch(() => undefined) : undefined,
-      readInputsManifest(cwd),
+      readInputsManifest(cwd).catch(() => {
+        unread.push("the inputs manifest");
+        return null;
+      }),
       forging ? listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]) : ([] as ForgedToolManifest[]),
     ]);
-    const capLine = status?.over_budget ? `\n\n${capHitLine(status)}` : "";
+    const capLine = (status?.over_budget ? `\n\n${capHitLine(status)}` : "") + (unread.length ? `\n\nThe harness could not read ${unread.join(" or ")} for this turn (the hub link was down): it is unknown, not absent. Check it before you act on it (inbox, or the file).` : "");
     // The prompt files the kickoff passes: Pi takes the path of one that is not there as the text of the prompt.
     await reportMissingPromptFiles(cwd, event.systemPrompt);
     // What holds for the whole run is in Pi's own prompt (the kickoff's .pi/APPEND_SYSTEM.md and .pi/seat-<id>.md),
@@ -1326,6 +1558,24 @@ export default function (pi: ExtensionAPI) {
   let pauseHeld = "";
   /** The turn in flight was ended by a pause: Pi files that abort as an error, and it is not the provider's. */
   let pauseAborted = false;
+  // The newest images only, within the provider's limit (capImages): what the model is sent, not what the session keeps.
+  pi.on("context", async (event, ctx) => {
+    const messages = event.messages;
+    if (!Array.isArray(messages) || imageCap <= 0) return undefined;
+    const capped = capImages(messages, imageCap, imagesDropped);
+    if (!capped.dropped) {
+      imagesDropped = 0;
+      return undefined;
+    }
+    if (agentId && capped.dropped !== imagesDropped) {
+      imagesDropped = capped.dropped;
+      await logEvent(ctx.cwd, agentId, "images_left_out", { cap: imageCap }, { ok: true, images: capped.images, dropped: capped.dropped, from: imageCapFrom }).catch(() => undefined);
+    }
+    return { messages: capped.messages };
+  });
+
+  const precallBudget = lastKnown<Awaited<ReturnType<typeof readBudgetLive>>>(PRECALL_DEADLINE_MS);
+  const precallSentinel = lastKnown<boolean>(PRECALL_DEADLINE_MS);
   pi.on("context", async (_event, ctx) => {
     if (!agentId || precallStopped) return;
     // A VM whose hub is down has no budget or sentinel to read; the lost-hub
@@ -1334,18 +1584,25 @@ export default function (pi: ExtensionAPI) {
     if (boardSocket() && hubLost.since) return;
     const cwd = ctx.cwd;
     // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
-    const before = await readBudgetLive(cwd).catch(() => null);
+    // The reads before this call share one deadline, PRECALL_DEADLINE_MS from now: the sentinel is read beside the
+    // budget, not after it, and each read waits only what is left. Past it the call goes out on the last value the hub
+    // gave (last-known.ts), and the read goes on for the next call; a read already past a deadline is not waited on
+    // again. Three reads one after another, each with its own deadline, held a call 4.5 s while the hub was held.
+    const until = Date.now() + PRECALL_DEADLINE_MS;
+    const left = () => Math.max(0, until - Date.now());
+    const sentinelRead = precallSentinel.read(() => swarmDoneExists(cwd), left()).catch(() => false);
+    const before = await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => null);
     if (before) await enforceAllCaps(cwd, before, ctx).catch(() => undefined);
     // Read again after the caps were enforced: the check that writes the
     // pause holds the call it was made for too.
-    const budget = before ? await readBudgetLive(cwd).catch(() => before) : null;
+    const budget = before ? await precallBudget.read(() => readBudgetLive(cwd), left()).catch(() => before) : null;
     // A paused run (the stop policy): this call does not go out. The turn
     // ends here and the seat stays, idle, with everything it held; the
     // operator's extension wakes it (the watchdog's prompt). In a VM this is
     // advisory: the hub prompts no paused seat, and the model gateway
     // refuses the call on the host.
     const paused = budget?.paused;
-    if (paused && !stoppedByHarness && !(await swarmDoneExists(cwd).catch(() => false))) {
+    if (paused && !stoppedByHarness && !(await sentinelRead)) {
       if (pauseHeld !== paused.at) {
         pauseHeld = paused.at;
         await logEvent(cwd, agentId, "pause_hold", { reason: paused.reason, since: paused.at }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub and the model gateway hold the brake)" : "host" }).catch(() => undefined);
@@ -1354,7 +1611,7 @@ export default function (pi: ExtensionAPI) {
       ctx.abort();
       return;
     }
-    const sentinel = !stoppedByHarness && (await swarmDoneExists(cwd).catch(() => false));
+    const sentinel = !stoppedByHarness && (await sentinelRead);
     if (!stoppedByHarness && !sentinel) return;
     precallStopped = true;
     if (sentinel) {
@@ -1409,12 +1666,25 @@ export default function (pi: ExtensionAPI) {
     if (providerErrorEntry === entryKey) return;
     providerErrorEntry = entryKey;
     await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
+    // A refusal for too many images comes again on every turn, the context being the same: the limit is lowered to the provider's, with room for
+    // the images a turn adds, and the next call carries fewer.
+    const said0 = providerImageLimit(reason);
+    let imageWords: string | undefined;
+    if (said0 !== null) {
+      const next = Math.max(1, Math.min(imageCap > 0 ? imageCap : Infinity, said0 > 0 ? Math.floor(said0 * 0.75) : Math.floor((imageCap > 0 ? imageCap : MAX_IMAGES_DEFAULT) / 2)));
+      if (next !== imageCap) {
+        imageCap = next;
+        imageCapFrom = "provider";
+        await logEvent(ctx.cwd, agentId, "image_cap", { cap: next }, { ok: true, from: "provider", provider_limit: said0 || null }).catch(() => undefined);
+      }
+      imageWords = `The request carried more images than the provider takes. From the next turn the harness sends ${agentId}'s newest ${imageCap} images only (the session keeps the rest), so the next turn should go through.`;
+    }
     const said = normalizeProviderError(reason);
     const tell = !providerErrorSpell && providerErrorTold !== said;
     providerErrorSpell = true;
     if (!tell) return;
     providerErrorTold = said;
-    await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason) }).catch(() => undefined);
+    await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason, imageWords) }).catch(() => undefined);
   }
 
   /**
@@ -1461,6 +1731,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const callId = (event as { toolCallId?: string }).toolCallId;
     if (callId) toolStarts.set(callId, Date.now());
+    // A shell call in the seat's own VM has a limit (Pi's bash has none unless the model gives one). A seat of the run s082123 waited 178 minutes on
+    // one that never returned, and nothing saw it: the nudger leaves a seat that is working alone. Longer work is a job, which has its own limit.
+    if ((event.toolName === "bash" || event.toolName === "powershell") && event.input && typeof event.input === "object") {
+      const limited = shellTimeout((event.input as { timeout?: unknown }).timeout);
+      (event.input as { timeout?: number }).timeout = limited.seconds;
+      if (callId && limited.why) shellLimits.set(callId, limited);
+      const loop = sleepLoopOverJobs((event.input as { command?: unknown }).command);
+      if (loop) {
+        if (agentId) await logEvent(ctx.cwd, agentId, "shell_timeout", { tool: event.toolName, kind: "sleep_loop" }, { ok: false, refused: true }).catch(() => undefined);
+        return { block: true, reason: loop };
+      }
+    }
 
     // Once the sentinel exists the run is over by definition, and the only
     // tool left to call is `done`. An agent that keeps going anyway — a model
@@ -1939,6 +2221,28 @@ export default function (pi: ExtensionAPI) {
     let fullOutputError: string | undefined;
     let content = (event as unknown as { content?: Array<Record<string, unknown>> }).content;
     let contentChanged = false;
+    const limit = callId ? shellLimits.get(callId) : undefined;
+    if (callId) shellLimits.delete(callId);
+    if (limit && isError && /timeout|timed out/i.test(JSON.stringify(content ?? ""))) {
+      content = [...(Array.isArray(content) ? content : []), { type: "text", text: shellTimeoutNote(limit, input?.command) }];
+      contentChanged = true;
+      if (agentId) await logEvent(ctx.cwd, agentId, "shell_timeout", { tool: name }, { ok: true, seconds: limit.seconds, why: limit.why }).catch(() => undefined);
+    }
+    // Every image a seat reads goes to the model at a size worth looking at (png-scale.ts): at most 1,568 pixels on its
+    // long side and 300 KB, whatever its format, under the file's own name, and the seat is told from what and where the
+    // original is. Pi's own resize stops at 2,000 pixels and 4.5 MB.
+    if (name === "read" && Array.isArray(content) && process.env.SWARM_IMAGE_SCALE !== "off" && content.some((part) => part?.type === "image")) {
+      const path = typeof input?.path === "string" ? input.path : undefined;
+      const { stat: statFile } = await import("node:fs/promises");
+      const { resolve: resolvePath } = await import("node:path");
+      const fileBytes = path ? await statFile(resolvePath(ctx.cwd, path)).then((st) => st.size).catch(() => undefined) : undefined;
+      const read = await scaleReadImages(content, { path, fileBytes }).catch(() => null);
+      if (read) {
+        content = read.content;
+        contentChanged = true;
+        if (agentId) await logEvent(ctx.cwd, agentId, "image_scaled", { path }, { ok: read.unscaled.length === 0, scaled: read.scaled.map((x) => `${x.from.width}x${x.from.height} to ${x.to.width}x${x.to.height} (${x.to.bytes} bytes, ${x.mimeType}, ${x.via})`), ...(read.unscaled.length ? { unscaled: read.unscaled } : {}) }).catch(() => undefined);
+      }
+    }
     const hostSpill = details?.fullOutputPath;
     if ((name === "bash" || name === "powershell") && hostSpill && agentId) {
       try {
@@ -1954,6 +2258,11 @@ export default function (pi: ExtensionAPI) {
               ? { ...block, text: block.text.split(hostSpill).join(fullOutput!.path) }
               : block,
           );
+          contentChanged = true;
+        }
+        // An output past the keep bound is kept as its first and last part: the seat is told, since the file reads as whole otherwise.
+        if (fullOutput.cut) {
+          content = [...(Array.isArray(content) ? content : []), { type: "text", text: `This command wrote ${fullOutput.cut.whole_bytes} bytes; ${fullOutput.path} holds its first ${fullOutput.cut.head_bytes} and its last ${fullOutput.cut.tail_bytes}, with a line between them that says so. To keep an output of that size whole, run the command as a job (job_run): a job's output is sealed whole and citable.` }];
           contentChanged = true;
         }
       } catch (error) {
@@ -2001,6 +2310,22 @@ export default function (pi: ExtensionAPI) {
         for (const job of fresh) toldSensitive.add(job);
         content = [...(Array.isArray(content) ? content : []), { type: "text", text: SENSITIVE_READ_NOTE }];
         contentChanged = true;
+      }
+    }
+    // A result read from the evidence (a job's answer, a file, a shell's output, a pack or forged tool's) that holds a
+    // string in an open question's asked format (B5): the seat is told in one line which question it may answer, once a
+    // question in FORMAT_TOLD_MS. The line names the question and its format, never the value, and so does the trace row.
+    if (agentId && !isError && Array.isArray(content) && (["job_run", "job_status", "read", "bash", "powershell", "grep"].includes(name) || loadedTools.has(name))) {
+      const text = content.map((p) => (p?.type === "text" && typeof p.text === "string" ? p.text : "")).join("\n");
+      const now = Date.now();
+      const open = text ? await openQuestionsNow(ctx.cwd).catch(() => [] as OpenQuestion[]) : [];
+      const hits = sightedFormats(text, open).filter((h) => now - (toldFormat.get(h.section) ?? 0) >= FORMAT_TOLD_MS);
+      const line = sightedLine(hits);
+      if (line) {
+        for (const h of hits) toldFormat.set(h.section, now);
+        content = [...content, { type: "text", text: line }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "format_sighted", { tool: name }, { ok: true, questions: hits.map((h) => h.section) }).catch(() => undefined);
       }
     }
     // Pi takes a tool's failure only from a throw: an `isError: true` in what
@@ -2156,6 +2481,9 @@ export default function (pi: ExtensionAPI) {
    * awaiting an interpretation, the questions nobody covers, and each notice
    * since the last delivery. Whole; a register that cannot be read says so.
    */
+  /** How many of this seat's waits in a row ended with nothing having woken them. */
+  let waitsUnwoken = 0;
+
   async function leadsHeader(cwd: string): Promise<{ leads?: string }> {
     try {
       const d = await leadsDigest(ctxFrom(cwd, agentId), { mark: true });
@@ -2478,7 +2806,12 @@ export default function (pi: ExtensionAPI) {
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
       const remaining = box?.remaining ?? 0;
+      // Three waits in a row that nothing woke: the answer leads with the work nobody holds, when there is any.
+      waitsUnwoken = result.reason === "timeout" ? waitsUnwoken + 1 : 0;
+      const header = await leadsHeader(toolCtx.cwd);
+      const idle = waitsUnwoken >= IDLE_WAITS ? idleWaitHint(header.leads ?? "", waitsUnwoken) : null;
       const payload = {
+        ...(idle ? { first: idle } : {}),
         ...result,
         swarm_done: box?.swarm_done ?? (await swarmDoneExists(toolCtx.cwd)),
         posts:
@@ -2493,7 +2826,7 @@ export default function (pi: ExtensionAPI) {
           })) ?? [],
         remaining,
         ...(box && remaining > 0 ? { note: pageNote(remaining, box.page_chars) } : {}),
-        ...(await leadsHeader(toolCtx.cwd)),
+        ...header,
       };
       await logEvent(
         toolCtx.cwd,
@@ -2552,7 +2885,8 @@ export default function (pi: ExtensionAPI) {
     name: "publish_file",
     label: "Publish file",
     description:
-      "Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same.",
+      `Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same. ` +
+      `From a microVM a file of up to ${PUBLISH_MAX_BYTES / (1024 * 1024)} MiB (${PUBLISH_MAX_BYTES.toLocaleString("en-US")} bytes) is published; a larger one is refused: leave it in your own directory and name its path in the report.`,
     promptSnippet: "Publish a file of your own into the shared work/ (claimed and recorded for you)",
     promptGuidelines: ["Write a shared deliverable under work/<your id>/ first, then publish_file it. To change a shared file, copy it into your directory, edit, publish."],
     parameters: Type.Object({
@@ -2606,7 +2940,7 @@ export default function (pi: ExtensionAPI) {
       const job = (last.job ?? {}) as Record<string, unknown>;
       return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote, ...reuse } };
     }
-    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote, ...reuse } };
+    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: typeof (last.job as { waiting?: unknown } | undefined)?.waiting === "string" ? String((last.job as { waiting?: unknown }).waiting) : `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote, ...reuse } };
   }
   pi.registerTool({
     name: "job_run",
@@ -2616,7 +2950,7 @@ export default function (pi: ExtensionAPI) {
       "Where the run declares job images (SWARM.md, Job images), your own VM is the base image and the forensic programs are in them: name the one the work needs with profile (disk, memory, mobile, …); a pack tool or a recipe picks its own; a command with none runs in the smallest image whose own record holds every program it runs, and in the image that holds every pack of the run whenever that is not sure (a heredoc, a script of yours, an import). " +
       "Declare what it reads in inputs and it is given that and nothing else, read-only, at the paths you see: input:<path> (a directory as input:<dir>/; a segment set comes whole with its first segment), job:<id> (its whole output) or job:<id>/<path>, member:<gen>#<n>, sha256:<hex>, and a file or directory of yours as work/<you>/<path> or tool-output/<you>/<path> (copied as it is when the job starts, and hashed: it reads that copy while yours goes on changing). A declaration that does not resolve refuses the job; [] gives it nothing. Left out, or inputs=[\"all\"], it sees what you see: inputs/, store/ (earlier jobs' outputs), catalog/, tools/, tool-output/ and all of work/, yours and your peers', live; the record says which. (SQLite: open with ?mode=ro&immutable=1 or copy into $OUT.) It has the image's programs, nothing installed in an agent's VM, no network unless network=allowlist, and writes only to $OUT. " +
       "What it writes there is sealed into store/jobs/<id>/out/ (read-only, hashed) and outlives the VM: any job or agent reads it there, and you cite it as job:<id>/<path>. An archive or disk image it writes is offered to the catalogue's recipes and, when catalogued, announced. " +
-      "Give command (bash, run from the run's directory; $OUT is also the OUT environment variable, for a script in another language or a quoted heredoc) or tool with args (a pack or forged tool; write {OUT}/<name> where it takes an output path), or import: a file or directory you made under work/ or tool-output/, sealed as it is now (the hub copies it at the job's start and hashes it; cite it as job:<id>/<name>). A whole output the harness kept under tool-output/ needs no import: cite it in a record as tool:<you>/<file>, and the record is sealed against the trace. " +
+      "Give command (bash, run from the run's directory; $OUT is also the OUT environment variable, for a script in another language or a quoted heredoc) or tool with args (a pack or forged tool; write {OUT}/<name> where it takes an output path; a directory given where it reads one file runs it once per file there it reads, at most 64, each in each/<n>/), or import: a file or directory you made under work/ or tool-output/, sealed as it is now (the hub copies it at the job's start and hashes it; cite it as job:<id>/<name>). A whole output the harness kept under tool-output/ needs no import: cite it in a record as tool:<you>/<file>, and the record is sealed against the trace. " +
       "A short job answers here; a longer one returns its id, and a post tagged result wakes your wait when it is done: do not poll job_status. A failed or timed-out job keeps what it wrote. " +
       "Give a job that needs two minutes or less (a quick look with an image's programs) timeout_seconds of 120 or less: from three workers one is kept for such jobs, so it does not wait behind long parses (it is stopped at that limit; leave a long parse at the default). " +
       "stdout comes back a page at a time; all of it is store/jobs/<id>/stdout.log. " +
@@ -2629,20 +2963,23 @@ export default function (pi: ExtensionAPI) {
       inputs: Type.Optional(Type.Array(Type.String(), { description: "What it reads, and all it is given: input:<path> (input:<dir>/ for a directory), job:<id>[/<path>], import:<id>[/<path>], member:<gen>#<n>, sha256:<hex>, work/<you>/<path>, tool-output/<you>/<path>; [] for nothing. Left out, or [\"all\"]: everything you see" })),
       timeout_seconds: Type.Optional(Type.Integer({ description: "Stop it after this long (default 900, at most 14400); 120 or less takes the worker kept for short jobs" })),
       network: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("allowlist")], { description: "off (default) or the run's allowlist" })),
-      profile: Type.Optional(Type.String({ description: "The job image to run in, by profile, as SWARM.md's Job images lists them (disk, memory, mobile, …); left out, the smallest job image whose record holds what the command runs, else the one that holds every pack" })),
+      profile: Type.Optional(Type.String({ description: "The job image to run in, by profile, as SWARM.md's Job images lists them (SWARM.md names the ones this run has; a name it does not list is refused); left out, the smallest job image whose record holds what the command runs, else the one that holds every pack" })),
       wait_seconds: Type.Optional(Type.Integer({ description: "How long to wait here for it (default 12, at most 100)" })),
       lead: Type.Optional(Type.String({ description: "The lead (L-<n>, one you hold) this job is run under; left out, the one active lead you hold, if you hold exactly one. A lead's jobs wait for an interpretation (record with interprets) before the run may end." })),
       net_grants: Type.Optional(Type.Array(Type.String(), { description: "Network grants (N-<k>) you asked for a job (net_request for: \"job\"): bound to this job, which makes each one's exact request with python3 /job/net_fetch.py N-<k> --out \"$OUT/<name>\"; its worker reaches the fetch service on the host and nothing else of it" })),
       independent: Type.Optional(Type.Boolean({ description: "true: an intended reproduction of work another seat did (a second check), recorded as such; similar jobs are still named" })),
+      programs: Type.Optional(Type.Array(Type.String(), { description: "Programs the operator supplied that the command or tool runs, as import:mat-<n> (SWARM.md, Supplied programs): each is copied into an executable directory in the worker before it starts, its bin/ on PATH and its lib/ on LD_LIBRARY_PATH ($PROGRAMS names the directory). Nothing runs where it stands in store/ or $OUT" })),
       secret_output: Type.Optional(Type.Boolean({ description: "true for a job whose output may hold a secret (a key, a credential or a decrypted value the evidence holds): every output it seals is sensitive, a job reading them seals sensitive output too, an entry citing them is recorded sensitive, and a redacted package withholds them" })),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      if ([params.command, params.tool, params.import].filter(Boolean).length !== 1) {
-        const refused = { ok: false as const, reason: "give command, tool (with its args) or import, one of them" };
+      const shape = jobRunShape(params);
+      if (!shape.ok) {
+        const refused = { ok: false as const, reason: shape.reason };
         await logEvent(toolCtx.cwd, agentId, "job_run", params, refused, Date.now() - started);
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
+      if (shape.dropped) delete (params as { command?: string }).command;
       // A tool's output path in the agent's own directories (work/<id>/x, as
       // its manifest asks for) becomes a place under {OUT}, as it does when a
       // direct call is run again as a job: a worker writes only its $OUT. The
@@ -2664,6 +3001,7 @@ export default function (pi: ExtensionAPI) {
         ...(params.net_grants?.length ? { net_grants: params.net_grants } : {}),
         ...(params.independent === true ? { independent: true } : {}),
         ...(params.secret_output === true ? { secret_output: true } : {}),
+        ...(params.programs?.length ? { programs: params.programs } : {}),
       };
       const wait = Math.min(Math.max(params.wait_seconds ?? 12, 0), 100);
       const res = await submitAndWait(toolCtx.cwd, spec, wait, signal as AbortSignal | undefined);
@@ -2682,7 +3020,10 @@ export default function (pi: ExtensionAPI) {
       // Where each output path the agent gave went instead: the job's sealed output, read and cited from there, when it holds something.
       const placed = toolArgs ? placedOutputs(toolCtx.cwd, writtenToOf(params.args ?? {}, toolArgs, res.job), res.result, { emptyDirs }) : {};
       const result = { ok: true, ...placed, ...res.result, ...(code ? { evidence_code: { ...code, note: evidenceCodeNote(code, "job") } } : {}) };
-      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...placed, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}), ...(code ? { evidence_code: code } : {}) }, Date.now() - started);
+      // How much of the answer the hints at admission take (metrics: the library hint was three quarters of job_run's text in two runs).
+      const answerChars = JSON.stringify(result).length;
+      const hintChars = (["library", "similar", "similar_more", "similar_note", "coverage"] as const).reduce((n, k) => n + ((res.result as Record<string, unknown>)[k] === undefined ? 0 : JSON.stringify((res.result as Record<string, unknown>)[k]).length), 0);
+      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, answer_chars: answerChars, hint_chars: hintChars, library_chars: (res.result as Record<string, unknown>).library === undefined ? 0 : JSON.stringify((res.result as Record<string, unknown>).library).length, sighted: sightingDigest(result), ...placed, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}), ...(code ? { evidence_code: code } : {}) }, Date.now() - started);
       return okResult(result);
     },
   });
@@ -2700,9 +3041,85 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const st = await jobStatus(toolCtx.cwd, { job_id: params.job_id, ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.cancel ? { cancel: true } : {}), limit: 16384 });
-      await logEvent(toolCtx.cwd, agentId, "job_status", params, { ok: st.ok, state: st.job?.state, ...(st.ok ? {} : { reason: st.reason }) }, Date.now() - started);
-      if (!st.ok) return { content: [{ type: "text" as const, text: st.reason ?? "no answer" }], details: st, isError: true };
-      return okResult({ ok: true, ...st.job, ...(st.stdout ? stdoutWithNote(params.job_id, st.stdout) : {}) });
+      // The answer's size and sighting digest (extensions/sighting.ts) go on the trace: its text does not.
+      const answer = st.ok ? { ok: true, ...st.job, ...(st.stdout ? stdoutWithNote(params.job_id, st.stdout) : {}) } : null;
+      await logEvent(toolCtx.cwd, agentId, "job_status", params, { ok: st.ok, state: st.job?.state, ...(answer ? { answer_chars: JSON.stringify(answer).length, sighted: sightingDigest(answer) } : { reason: st.reason }) }, Date.now() - started);
+      if (!answer) return { content: [{ type: "text" as const, text: st.reason ?? "no answer" }], details: st, isError: true };
+      return okResult(answer);
+    },
+  });
+
+  pi.registerTool({
+    name: "image_crop",
+    label: "Crop an image",
+    description:
+      "A region of a PNG at its own resolution: `read` shows a picture at most 1,568 pixels on its long side and 300 KB, which loses small text, a code or single pixels. path is a PNG you can read (a job's output under store/jobs/<id>/out/, or your own under work/); x, y, width and height are in the original's pixels (read says the original's size when it scaled it). A region past the image is clipped to it; one larger than 1,568 x 1,568 pixels is scaled to fit, and the answer says so. Any PNG (every depth, palette or not, interlaced or not); other formats are cropped in a job.",
+    parameters: Type.Object({
+      path: Type.String({ description: "The PNG, relative to the run's directory" }),
+      x: Type.Integer({ description: "Left edge, in the original's pixels" }),
+      y: Type.Integer({ description: "Top edge, in the original's pixels" }),
+      width: Type.Integer({ description: "Width, in pixels" }),
+      height: Type.Integer({ description: "Height, in pixels" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const refuse = async (reason: string) => {
+        await logEvent(toolCtx.cwd, agentId, "image_crop", params, { ok: false, reason }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason }, isError: true };
+      };
+      const { resolve: res, relative } = await import("node:path");
+      const { lstat, readFile: rf } = await import("node:fs/promises");
+      const abs = res(toolCtx.cwd, String(params.path ?? ""));
+      const rel = relative(res(toolCtx.cwd), abs);
+      if (!rel || rel.startsWith("..")) return refuse(`${params.path} is not under the run's directory`);
+      const st = await lstat(abs).catch(() => null);
+      if (!st?.isFile()) return refuse(`${params.path} is not a regular file (a link is not followed)`);
+      if (st.size > 64 * 1024 * 1024) return refuse(`${params.path} is ${st.size} bytes, more than the 64 MiB this crops in place: crop it in a job`);
+      if (![params.x, params.y, params.width, params.height].every((n) => Number.isInteger(n)) || params.width < 1 || params.height < 1) return refuse("x, y, width and height are whole numbers, width and height at least 1");
+      const out = cropPng(await rf(abs), { x: params.x, y: params.y, width: params.width, height: params.height });
+      if ("error" in out) return refuse(`${params.path}: ${out.error}`);
+      const words = `${params.path}: the region at (${out.region.x}, ${out.region.y}), ${out.region.width} x ${out.region.height} pixels, of an image of ${out.from.width} x ${out.from.height}${out.scaled_to ? `, scaled to ${out.scaled_to.width} x ${out.scaled_to.height} to fit` : ", at its own resolution"}.`;
+      await logEvent(toolCtx.cwd, agentId, "image_crop", params, { ok: true, region: out.region, from: out.from, ...(out.scaled_to ? { scaled_to: out.scaled_to } : {}), bytes: out.png.length }, Date.now() - started);
+      return { content: [{ type: "text" as const, text: words }, { type: "image" as const, data: out.png.toString("base64"), mimeType: "image/png" }], details: { ok: true, region: out.region, from: out.from } };
+    },
+  });
+
+  pi.registerTool({
+    name: "store_find",
+    label: "Find a file in the store",
+    description:
+      "Which job or import holds a file: by a part of its name (name: \"ntuser.dat\", case-insensitive, of the path as the manifest has it) or by its content (sha256, 64 hex). Read from the sealed manifests' indexes across every job and import, in a second: use it before you extract something again or search the store with a shell. Each hit is a reference (job:<id>/<path>) to cite or to give a tool as its path. job limits it to one job; limit is 50 by default, 200 at most; the answer says how many matched in all.",
+    parameters: Type.Object({
+      name: Type.Optional(Type.String({ description: "A part of the file's path or name" })),
+      sha256: Type.Optional(Type.String({ description: "The content's sha256 (64 hex)" })),
+      job: Type.Optional(Type.String({ description: "Only this job or import: j000123, mat-4" })),
+      limit: Type.Optional(Type.Integer({ description: "How many hits to return (default 50, at most 200)" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await storeFind(toolCtx.cwd, { ...params })) as { ok: boolean; reason?: string; matched?: number; returned?: number };
+      await logEvent(toolCtx.cwd, agentId, "store_find", params, { ok: r.ok, ...(r.ok ? { matched: r.matched, returned: r.returned, sighted: sightingDigest(r) } : { reason: r.reason }) }, Date.now() - started);
+      if (!r.ok) return { content: [{ type: "text" as const, text: r.reason ?? "no answer" }], details: r, isError: true };
+      return okResult(r);
+    },
+  });
+
+  pi.registerTool({
+    name: "jobs",
+    label: "The run's jobs",
+    description:
+      "The run's jobs in one list: yours by default (scope: \"mine\"), a lead's (scope: \"lead\", lead: \"L-7\") or everyone's (scope: \"all\"). The ones still open come first, each with why it waits (queued behind N, running, finished and waiting to be sealed), then the finished ones with their file counts. Use it instead of calling job_status in a loop, and before you run something a peer may already have run.",
+    parameters: Type.Object({
+      scope: Type.Optional(Type.String({ description: "mine (default), lead or all" })),
+      lead: Type.Optional(Type.String({ description: "With scope lead: L-<n>" })),
+      limit: Type.Optional(Type.Integer({ description: "How many jobs to return (default 40, at most 100)" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await jobsList(toolCtx.cwd, { ...params })) as { ok: boolean; reason?: string; jobs?: unknown[] };
+      await logEvent(toolCtx.cwd, agentId, "jobs", params, { ok: r.ok, ...(r.ok ? { jobs: r.jobs?.length } : { reason: r.reason }) }, Date.now() - started);
+      if (!r.ok) return { content: [{ type: "text" as const, text: r.reason ?? "no answer" }], details: r, isError: true };
+      return okResult(r);
     },
   });
 
@@ -2862,7 +3279,8 @@ export default function (pi: ExtensionAPI) {
   // every prompt on every turn. extensions/skills.ts is the whole of it: the
   // index section, the `skill` and `skill_done` tools, what each seat holds.
   const packDirs = packDirsFromEnv();
-  if (packDirs.length) {
+  // --pack-skills off (docs/usage.md): the packs' tools only; no skill tool, index or card (the arm of the skills experiment).
+  if (packDirs.length && process.env.SWARM_PACK_SKILLS?.trim() !== "off") {
     skills = registerSkills(pi, {
       packDirs,
       agentId: () => agentId,
@@ -2878,6 +3296,8 @@ export default function (pi: ExtensionAPI) {
       release: process.env.SWARM_SKILL_RELEASE?.trim() || undefined,
       // A hand-off that is pending or being compacted (not one that failed and was given up): finished bodies leave with that compaction.
       compactionPending: () => selfCompact?.handoffPending() ?? false,
+      // --skill-cards (docs/usage.md): a note's card with the result of a call to one of its tools, for a seat that does not hold it.
+      cards: process.env.SWARM_SKILL_CARDS?.trim() || undefined,
     });
   }
 
@@ -2950,8 +3370,8 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
       name: manifest.name,
       label: manifest.name,
-      description: `${manifest.description} (forged by ${manifest.by}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${toolTimeoutSeconds(manifest)}s timeout${manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS ? `; when your VM lacks a program or module it needs, it runs again as a job in the ${manifest.pack} pack's image, an output path under work/<your id>/ becoming that job's $OUT` : ""})${manifest.example ? ` Example: ${manifest.example}` : ""}`,
-      promptSnippet: `${manifest.description} — forged by ${manifest.by}`,
+      description: `${manifest.description} (${manifest.pack ? `a tool of the pack ${manifest.pack}` : `forged by ${manifest.by}`}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${toolTimeoutSeconds(manifest)}s timeout${manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS ? `; when your VM lacks a program or module it needs, it runs again as a job in the ${manifest.pack} pack's image, an output path under work/<your id>/ becoming that job's $OUT` : ""})${notForWords(manifest)}${manifest.example ? ` Example: ${manifest.example}` : ""}`,
+      promptSnippet: `${manifest.description} — ${manifest.pack ? `a tool of the pack ${manifest.pack}` : `forged by ${manifest.by}`}`,
       parameters: forgedSchema(manifest),
       async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
         // A forged tool is a subprocess with the same reach as bash, so it
@@ -2967,14 +3387,35 @@ export default function (pi: ExtensionAPI) {
         // was given in the agent's own directories already hold something is
         // taken now, before this attempt can create any, so a rerun reads those
         // where they are and writes the rest to its $OUT.
+        // What an argument plainly is under its declared type is taken as that (forged-args.ts), and said.
+        const typed = coerceArgs(manifest.params as Record<string, { type?: string }>, (params ?? {}) as Record<string, unknown>);
+        params = typed.args as typeof params;
+        // As job_run takes them (scripts/tool-arg-refs.ts directToolArgs): a missing required key refused by name, a job:,
+        // import: or input: reference made the path it names (or refused with where it is), {OUT} the seat's own directory,
+        // and a directory given to a one-file reader run once per file. A script, so reached by a dynamic import: where a
+        // seat is given extensions/ alone the call goes on as it was given.
+        const direct = await import("../scripts/tool-arg-refs.ts").then((m) => m.directToolArgs(toolCtx.cwd, agentId ?? "", manifest.name, (params ?? {}) as Record<string, unknown>, manifest as unknown as Parameters<typeof m.directToolArgs>[4])).catch(() => null);
+        if (direct && !direct.ok) {
+          await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), { ok: false, forged: true, refused: direct.reason }, 0);
+          return { content: [{ type: "text" as const, text: `${manifest.name} refused: ${direct.reason}` }], details: { ok: false, reason: direct.reason }, isError: true };
+        }
+        if (direct?.ok) params = direct.args as typeof params;
+        const eachLib = direct?.ok && direct.each ? await import("../scripts/tool-each.ts").catch(() => null) : null;
+        const refsLib = direct?.ok && direct.resolved.length ? await import("../scripts/tool-arg-refs.ts").catch(() => null) : null;
+        const told = [coercedWords(typed.coerced), refsLib && direct?.ok ? refsLib.argRefsWords(direct.resolved) : "", eachLib && direct?.ok && direct.each ? eachLib.eachDirectWords(direct.each) : ""].filter(Boolean).join(" ");
         const rerunnable = Boolean(manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS);
         const held = rerunnable ? await heldOwnPaths(toolCtx.cwd, (params ?? {}) as Record<string, unknown>, agentId).catch(() => new Set<string>()) : new Set<string>();
-        const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
-          signal: signal as AbortSignal | undefined,
-          agentId,
-          env: secrets,
-          ...(sealed ? { sealed } : {}),
-        });
+        const runOne = (args: Record<string, unknown>, seconds?: number) =>
+          runForgedTool(toolCtx.cwd, seconds ? { ...manifest, timeout_seconds: seconds } : manifest, args, {
+            signal: signal as AbortSignal | undefined,
+            agentId,
+            env: secrets,
+            ...(sealed ? { sealed } : {}),
+          });
+        const run: Awaited<ReturnType<typeof runForgedTool>> =
+          eachLib && direct?.ok && direct.each
+            ? { signal: null, truncated: false, duration_ms: 0, ...(await eachLib.runEachDirect(manifest.name, direct.each, (params ?? {}) as Record<string, unknown>, toolTimeoutSeconds(manifest), runOne)) }
+            : await runOne((params ?? {}) as Record<string, unknown>);
         if (before && agentId) {
           try {
             await new Promise((resolve) => setTimeout(resolve, BASH_SETTLE_MS));
@@ -3053,20 +3494,22 @@ export default function (pi: ExtensionAPI) {
             ...(Object.keys(paths).length ? { paths } : {}),
             ...res.result,
           };
-          await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), redactSecrets({ ok: res.ok, forged: true, ran_as_job: res.job, why: answer.why, state: res.result.state, status: res.result.status }, secrets), Date.now() - started);
+          await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), redactSecrets({ ok: res.ok, forged: true, ran_as_job: res.job, why: answer.why, state: res.result.state, status: res.result.status, sighted: sightingDigest(redactSecrets(answer, secrets)) }, secrets), Date.now() - started);
           const text = redactSecrets(JSON.stringify(answer, null, 1), secrets);
           return res.ok ? okResult(answer) : { content: [{ type: "text" as const, text }], details: answer, isError: true };
         }
+        // What the harness did to the arguments, said after the tool's own answer (and on details).
+        const saidOf = { ...(typed.coerced.length ? { coerced: typed.coerced } : {}), ...(direct?.ok && direct.resolved.length ? { args_resolved: direct.resolved } : {}), ...(direct?.ok && direct.each ? { each: { param: direct.each.param, directory: direct.each.directory, files: direct.each.files.length } } : {}) };
         if (run.ok) {
           return {
-            content: [{ type: "text" as const, text: run.stdout || "(no output)" }],
-            details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}) },
+            content: [{ type: "text" as const, text: `${run.stdout || "(no output)"}${told ? `\n${told}` : ""}` }],
+            details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}), ...saidOf },
           };
         }
         const why = run.timed_out ? `timed out after ${toolTimeoutSeconds(manifest)}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
         return {
-          content: [{ type: "text" as const, text: `${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim() }],
-          details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out },
+          content: [{ type: "text" as const, text: `${`${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim()}${told ? `\n${told}` : ""}` }],
+          details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out, ...saidOf },
           isError: true,
         };
       },
@@ -3174,10 +3617,27 @@ export default function (pi: ExtensionAPI) {
         ),
         timeout_seconds: Type.Optional(Type.Number({ description: `Kill the script after this long (default ${TOOL_TIMEOUT_DEFAULT_SECONDS}, max ${TOOL_TIMEOUT_MAX_SECONDS})` })),
         example: Type.Optional(Type.String({ description: "One example call, shown to peers" })),
+        selftest: Type.Object({ args: Type.Record(Type.String(), Type.Any(), { description: "The arguments of one call whose answer you know" }), expect: Type.String({ description: "Text the tool's output must hold for that call" }) }, { description: "Required: a known-answer test, run before the tool is written or shared; a tool that fails it is not made (a tool that was never run against an answer its author knows returned garbage for hours in three runs)." }),
         requires: Type.Optional(Type.Array(Type.String(), { description: "Programs the script calls (e.g. fls, yara), so a later case knows what its image must hold" })),
       }),
       async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
         const started = Date.now();
+        // The self-test first, on the script as given, before anything is written or shared (forged-args.ts selfTestCandidate):
+        // a call without one, or one whose test fails, is refused and leaves no tool behind.
+        const st = (params as { selftest?: unknown }).selftest;
+        const problem = selfTestProblem(st);
+        const spec = validateToolSpec(params);
+        let selftest: { ran: boolean; ok?: boolean; said: string; coerced?: string[] } | null = null;
+        if (!problem && spec.ok && agentId) {
+          const t = await selfTestCandidate(toolCtx.cwd, agentId, spec.spec, st as SelfTest, (root, m, args, o) => runForgedTool(root, m as unknown as ForgedToolManifest, args, o));
+          selftest = { ran: true, ok: t.passed, said: t.said, ...(t.coerced.length ? { coerced: t.coerced } : {}) };
+          await logEvent(toolCtx.cwd, agentId, "make_tool", { name: spec.spec.name, selftest: true }, { ok: t.passed, exit: t.exit, timed_out: t.timed_out }).catch(() => undefined);
+        }
+        const refusal = problem ? `${problem}; it is run before the tool is written or shared, and a tool whose self-test fails is not made` : selftest && !selftest.ok ? `${selftest.said}: nothing was written or shared. Fix the script, or the expected text, and call make_tool again` : null;
+        if (refusal) {
+          await logEvent(toolCtx.cwd, agentId, "make_tool", { name: params.name, runtime: params.runtime, params: Object.keys(params.params ?? {}).join(","), bytes: Buffer.byteLength(params.script ?? "", "utf8") }, { ok: false, error: refusal }, Date.now() - started);
+          return { content: [{ type: "text" as const, text: `make_tool refused: ${refusal}` }], details: { ok: false, reason: refusal, ...(selftest ? { selftest } : {}) }, isError: true };
+        }
         const result = await forgeTool(ctxFrom(toolCtx.cwd, agentId), params);
         if (!result.ok) {
           // The refusal used to record the name and the runtime only, so a
@@ -3209,33 +3669,34 @@ export default function (pi: ExtensionAPI) {
           Date.now() - started,
         );
         await loadForgedTools(toolCtx.cwd);
+        const tested = selftest ?? { ran: false, said: "no self-test was run" };
         // The board is how peers learn; the harness posts on the author's behalf
         // so a tool never exists without an announcement.
         await postMessage(ctxFrom(toolCtx.cwd, agentId), {
           tag: "result",
           to: "all",
-          body: `Forged tool \`${m.name}\` v${m.version} (${m.runtime}): ${m.description} Params: ${paramSummary(m)}.${m.example ? ` Example: ${m.example}` : ""} It is in your tool list after your next inbox or wait.`,
+          body: `Forged tool \`${m.name}\` v${m.version} (${m.runtime}): ${m.description} Params: ${paramSummary(m)}.${m.example ? ` Example: ${m.example}` : ""} Tested: ${tested.said}. It is in your tool list after your next inbox or wait.`,
         }).catch(() => undefined);
-        return okResult({ ok: true, name: m.name, version: m.version, created: result.created, sha256: shortHash(m.sha256), entry: `${TOOLS_DIR}/${m.name}/${m.entry}` });
+        const made = { ok: true, name: m.name, version: m.version, created: result.created, sha256: shortHash(m.sha256), entry: `${TOOLS_DIR}/${m.name}/${m.entry}`, selftest: tested, ...(selftest?.coerced ? { note: coercedWords(selftest.coerced) } : {}) };
+        return okResult(made);
       },
     });
 
     pi.registerTool({
       name: "tools",
       label: "Tools",
-      description: "List the tools this swarm has forged: name, what it does, its params, who wrote it and which version. Also loads any you have not seen yet.",
-      promptSnippet: "See the tools peers have forged",
-      parameters: Type.Object({}),
-      async execute(_id, _params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      description: "The tools this run has. With no argument: every tool's name and one line on what it does, the packs' tools by pack and the ones forged in this run apart (a short answer). With name: that one tool whole (what it does, its params, an example, how to call it). Also loads any you have not seen yet.",
+      promptSnippet: "See the run's tools (one line each), or one tool whole by name",
+      parameters: Type.Object({ name: Type.Optional(Type.String({ description: "A tool's name, for its parameters, example and how to call it. Leave out for the list." })) }),
+      async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
         const started = Date.now();
         const fresh = await loadForgedTools(toolCtx.cwd);
         const all = await listForgedTools(toolCtx.cwd);
-        await logEvent(toolCtx.cwd, agentId, "tools", {}, { ok: true, n: all.length, loaded: fresh.length }, Date.now() - started);
-        return okResult({
-          forged: all.map((m) => ({ name: m.name, description: m.description, params: paramSummary(m), runtime: m.runtime, by: m.by, version: m.version, ...(m.example ? { example: m.example } : {}), ...(runsAsJob(m) ? { call: `job_run(tool: "${m.name}", args: {...})` } : {}) })),
-          ...newToolsNote(fresh),
-          hint: all.length ? "Call a forged tool by its name, like any other tool." : "Nothing forged yet. make_tool writes one and shares it.",
-        });
+        const rows = all.map((m) => ({ name: m.name, description: m.description, params: paramSummary(m), runtime: m.runtime, by: m.by, version: m.version, pack: (m as { pack?: string | null }).pack ?? null, ...(m.example ? { example: m.example } : {}), ...(runsAsJob(m) ? { call: `job_run(tool: "${m.name}", args: {...})` } : {}) }));
+        const listing = toolsListing(rows, params.name);
+        await logEvent(toolCtx.cwd, agentId, "tools", params.name ? { name: params.name } : {}, { ok: listing.ok, n: all.length, loaded: fresh.length, answer_chars: JSON.stringify(listing).length }, Date.now() - started);
+        if (!listing.ok) return { content: [{ type: "text" as const, text: `tools: ${listing.reason}${listing.nearest ? ` (nearest: ${listing.nearest.join(", ")})` : ""}` }], details: listing, isError: true };
+        return okResult({ ...listing, ...newToolsNote(fresh) });
       },
     });
   }
@@ -3299,32 +3760,20 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "record",
-    label: "Record",
-    description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable; looked_for (the literal strings a hit would contain, which the hub then searches for in every output the run holds) or looked_for_none_why; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
-      "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
-      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is cited in premises [{id: P-<n>, rev, stance: assumed}] when the register holds it (questions view premises), or named in reasoning, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge), parts [{id, part, status: established | open, refs, open_by?}] (required on a partial answer, with at least one open part bounded by R-<n>, L-<n> or E-<seq>), premise_tested {outcome, refs} (a question that presumes an event, its presumes in the register or a person's question framed as a proposition: before answering it, test whether the event happened at all, against the rival \"the question's premise is not supported\"; if the evidence does not support it the answer is premise_not_supported, and a clue that fits the question's frame is a candidate to test against that rival, not an answer), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
-      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
-    promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
-    promptGuidelines: [
-      "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
-      "Record a finding while the artefact is open: value is what you saw, indicates what it means, confidence_why why that confidence, basis observed or inferred; an inferred one lists alternatives or says in alternatives_none_why why none was considered.",
-      "source and evidence are required on every record but an answer: where you saw it, and the command or id that lets somebody else see it too.",
-      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>); one resting on a job that did not succeed says why in qualifies.",
-      "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
-      "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
-      "Name the goal section an entry answers in answers; link an entry that supports or contradicts another with rel.",
-      "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
-      "Before a negative answer (bounded_negative) or a not_determinable one on a material question, record kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace here at all.",
-      "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
-      "The reply to an answer carries the finish line's warnings on its question (warnings): a not_determinable with no acquisition ask and no reason for none, a partial every review holds whole, what the record ties to the question and the answer leaves out, a partial answer to a question that presumes an event with no test of that premise. They hold nothing: weigh each now, and record the answer again if it is right.",
-      "Before answering a question that presumes an event (questions shows its presumes; a person's question is a proposition to test), test whether the event happened at all. If the evidence does not support it, the answer is premise_not_supported. A clue that fits the question's frame is a candidate to test against that rival, not an answer: say what the test showed in premise_tested {outcome, refs}.",
-    ],
-    parameters: Type.Object({
+  // --- record -------------------------------------------------------------------
+  // One tool that takes every kind, and one tool a kind for the kinds the runs
+  // used most (record_finding, record_answer, record_coverage,
+  // record_limitation, record_absence): the same check (recordEntry), the same
+  // row on the trace (tool "record", so custody and the metrics read one
+  // name). `record` carries 57 properties and a 5,900-character description
+  // with every kind's rules, and only kind and value are required by its
+  // schema: on the run sf4406b the open-weight seats had 353 of 776 calls
+  // refused. A kind's tool carries that kind's fields, its real required
+  // list, and its rules only.
+  /** Every field `record` takes, each optional but kind and value: fresh schemas each call, since a kind's tool makes its own of them. */
+  const recordProps = () => ({
       kind: Type.Union(LEDGER_AGENT_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer | coverage" }),
-      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for coverage, the proposition the search tested; for an answer, the answer itself" }),
+      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for coverage, the proposition the search tested; for an answer to a question, the asked string alone, in the format the question asks: its first line is what is graded (what qualifies it goes in qualifier)" }),
       ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
       source: Type.Optional(Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required on every kind but answer." })),
       evidence: Type.Optional(Type.String({ description: "How to check it: command, inode, record id, hash. Required on every kind but answer." })),
@@ -3466,8 +3915,45 @@ export default function (pi: ExtensionAPI) {
           description: "The jobs whose output this entry interprets (j000123): the entry is what the output shows, its kind the disposition. A job's output is interpreted only this way; a bare citation in refs is not an interpretation. When you were handed only part of a job's stdout, give {job, rest}: how the rest was read, or why not.",
         }),
       ),
-    }),
-    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      qualifier: Type.Optional(Type.String({ description: "An answer's: whatever qualifies the asked string in value (a candidate, the part still open, a second reading, the words around it). The format check reads value only." })),
+      value_changed_because: Type.Optional(Type.String({ description: "An answer's revision (supersedes) that changes value after its confidence or result was lowered: why, naming the entry that shows the earlier value wrong (E-<seq>). A doubt or a dispute alone changes confidence, result and parts, never value." })),
+      control: Type.Optional(
+        Type.Union([Type.Object({ ref: Type.String(), found: Type.String() }), Type.Array(Type.Object({ ref: Type.String(), found: Type.String() }))], {
+          description: "A negative's (an absence, or a finding that says what was not found) when it rests on your own script or shell line: the control run, {ref: job:<id>/stdout.log or job:<id>/<path>, found: what it found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value. Required then: a search that could not have matched reads the same as one that found nothing.",
+        }),
+      ),
+      images_read: Type.Optional(Type.Array(Type.String(), { description: "A negative about pictures: the images you read (job:<id>/<file>). The hub fills it from the trace when you leave it out, and names the images of the same job you were never handed: an answer resting on the entry is held until they are read." })),
+      carriers: Type.Optional(
+        Type.Array(Type.Object({ carrier: Type.String(), state: Type.Union(CARRIER_STATES.map((k: string) => Type.Literal(k))), why: Type.String() }), {
+          description: "A finding's carrier table, before choosing among several places a value could be carried in (files, streams, fields): one row each, {carrier, state: decoded | undecodable | not_examined, why}. An answer may not say nothing remains open while a row is not examined.",
+        }),
+      ),
+      candidates: Type.Optional(
+        Type.Array(
+          Type.Object({
+            value: Type.String({ description: "The candidate value, as the asked string would read" }),
+            state: Type.Optional(Type.Union([Type.Literal("open"), Type.Literal("ruled_out"), Type.Literal("decoy")], { description: "open (still weighed; the default), ruled_out (a check excludes it: by), or decoy (the payload declares itself fake, a test or a vendor's sample)" })),
+            why: Type.String({ description: "What reads it so; for ruled_out, what the check showed; for decoy, what in it declares it so" }),
+            by: Type.Optional(Type.String({ description: "With ruled_out: the machine check, job:<id>/<path>, or E-<seq> of an entry resting on a job's result. An argument or another reading rules nothing out" })),
+          }),
+          {
+            description:
+              "An answer's or a finding's: the values still weighed beside value. A revision carries every candidate of the entry it corrects, the readings disputes of it give, and its earlier value when it lowers the confidence or answers an objection; only a row ruled_out with a machine check (by) removes one. \"Nothing remains open\" is refused while a row is open.",
+          },
+        ),
+      ),
+      carrier_names: Type.Optional(Type.Array(Type.String(), { description: "An answer's that chose among several carriers (files, streams, fields, symbols): their names, N of them. It is recorded established, or says nothing remains open, only once the carrier table it cites has a row for each." })),
+      decoy: Type.Optional(Type.String({ description: "A finding's whose payload or artefact declares itself fake, a test or a vendor's sample: what in it says so. It is a decoy candidate, and no answer rests on it alone without decoy_check." })),
+      decoy_check: Type.Optional(Type.Object({ by: Type.String(), why: Type.String() }, { description: "An answer's whose value is a candidate marked decoy, or whose findings for its question are all marked decoy: the machine check (job:<id>/<path>, or E-<seq> of an entry resting on one) that shows it is the answer all the same, and why." })),
+  });
+  /** A field of recordProps as a kind's tool requires it (the optional mark is not copied), with that kind's own words when it has them. */
+  const need = (s: TSchema, description?: string): TSchema => ({ ...s, ...(description ? { description } : {}) }) as TSchema;
+  /** The same, optional. */
+  const may = (s: TSchema, description?: string): TSchema => Object.defineProperty({ ...s, ...(description ? { description } : {}) }, "~optional", { value: true, enumerable: false }) as TSchema;
+  /** What every record tool's reply says of a refusal: the tool's name, then every defect. */
+  async function runRecord(tool: string, given: Record<string, unknown>, toolCtx: ToolCtx) {
+      // The arguments as the model sent them (argsForValidator made them pass Pi's check, so that a missing or misspelt field is answered here, with the entry's other defects, and not by an echo of the whole call).
+      const params = argsAsSent(given) as Record<string, unknown> & { kind?: string; opens?: Array<Record<string, unknown> & { title: string }>; interprets?: Array<string | { job: string; rest?: string }> };
       const started = Date.now();
       // Every field as given: the protocol checks which a kind takes and says which it does not.
       const { kind, opens, interprets, ...rest } = params;
@@ -3480,13 +3966,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.
-        await logEvent(toolCtx.cwd, agentId, "record", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
-        return { content: [{ type: "text" as const, text: `record refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+        await logEvent(toolCtx.cwd, agentId, "record", params as Record<string, unknown>, { ok: false, reason: result.reason, ...(result.defects && result.defects.length > 1 ? { defects: result.defects.length } : {}), ...(tool !== "record" ? { via: tool } : {}) }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: `${tool} refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
       }
       // The entry's hash goes on the trace, which is anchored outside the
       // run: custody holds the ledger to it, so an entry deleted from the
       // tail, or one written into the file without this tool, is named.
-      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), kind: result.entry.kind, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, ...(tool !== "record" ? { via: tool } : {}), seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
       // A correction is said on the trace as itself, so a reader of the
       // record sees which entry stopped standing, when, and by whom.
       if (result.entry.supersedes !== undefined && !result.merged) {
@@ -3507,6 +3993,285 @@ export default function (pi: ExtensionAPI) {
         await logEvent(toolCtx.cwd, agentId, "record_leads", { seq }, { ok: true, ...(leadsOpened.length ? { opened: leadsOpened } : {}), ...(interpreted ? { interprets: interpreted.ok ? interpreted.interprets : [], ...(interpreted.ok ? {} : { refused: interpreted.reason }) } : {}) }).catch(() => undefined);
       }
       return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
+  }
+  const recordSchema = Type.Object(recordProps());
+  pi.registerTool({
+    name: "record",
+    label: "Record",
+    description:
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable; looked_for (the literal strings a hit would contain, which the hub then searches for in every output the run holds) or looked_for_none_why; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
+      "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is cited in premises [{id: P-<n>, rev, stance: assumed}] when the register holds it (questions view premises), or named in reasoning, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge), parts [{id, part, status: established | open, refs, open_by?}] (required on a partial answer, with at least one open part bounded by R-<n>, L-<n> or E-<seq>), premise_tested {outcome, refs} (a question that presumes an event, its presumes in the register or a person's question framed as a proposition: before answering it, test whether the event happened at all, against the rival \"the question's premise is not supported\"; if the evidence does not support it the answer is premise_not_supported, and a clue that fits the question's frame is a candidate to test against that rival, not an answer), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report. A refusal names every defect of the entry at once, each with what to send: fix them all and call once more. An answer's value is the asked string alone (what qualifies it goes in qualifier). Every kind is recorded here, with kind and that kind's fields. When your tool list also has record_finding, record_answer, record_coverage, record_limitation and record_absence, each takes one kind's fields and rules only and writes the same entry. A value for a question you cannot verify yet is record_candidate's (question, value, ref). " +
+      "Each kind's rules beyond its fields are here, not in the prompt. A finding: \"unknown\" is one, a guess is not; before choosing among several places a value could be carried in (files, streams, fields, look-alike payloads), record one finding with carriers [{carrier, state: decoded | undecodable | not_examined, why}], a row each; a payload that calls itself fake, a test or a vendor's sample is a decoy candidate, marked decoy (what in it says so), and no answer rests on it alone unless decoy_check names the machine check that shows it is the answer all the same; a file in a vendor's path with the vendor's timestamps is not case data; to add refs to an entry recorded without them, record it again with its refs. " +
+      "A negative (an absence, or a finding that reports a search's empty result) resting on your own script or shell line (a command job, not a pack tool that reports what it covered) names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value, or it is refused; a search over a compressed or encrypted container is not a search of its content; one about pictures holds for the images you read (images_read: the hub names the images of the same job you were not handed, and an answer resting on it is held until they are read). An absence holds only for its query and scope, and answers a question only when the goal says the question asks whether something exists. " +
+      "A coverage record's looked_for strings are searched in every output the run holds: a hit in an object the record does not name holds the negative until you record what that object showed and record the coverage again with those entries in result_refs; a sweep its budget left partial holds it too, unless the operator accepts the question's limits. " +
+      "An answer's first line of value is what is graded: no sentence, no label, no second candidate. A partial answer with a part open gives in value only the piece of the format that is established, or leaves it empty. A revision that lowers confidence or result keeps value: value changes only with value_changed_because naming the entry (E-<seq>) that shows it wrong. Other readings go in candidates [{value, state: open | ruled_out | decoy, why, by?}]: a revision carries every candidate of the answer it corrects, and one leaves only ruled_out, by the job or entry whose result excludes it. alternatives_open says nothing remains open only when no candidate is open and no carrier table or partial coverage record it cites shows one unexamined; an answer that chose among several carriers names them in carrier_names, and is established only once the carrier table it cites has a row for each.",
+    promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
+    promptGuidelines: [
+      "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
+      "Record a finding while the artefact is open: value is what you saw, indicates what it means, confidence_why why that confidence, basis observed or inferred; an inferred one lists alternatives or says in alternatives_none_why why none was considered.",
+      "source and evidence are required on every record but an answer: where you saw it, and the command or id that lets somebody else see it too.",
+      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>); one resting on a job that did not succeed says why in qualifies.",
+      "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
+      "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
+      "Name the goal section an entry answers in answers; link an entry that supports or contradicts another with rel.",
+      "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
+      "Before a negative answer (bounded_negative) or a not_determinable one on a material question, record kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace here at all.",
+      "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
+      "The reply to an answer carries the finish line's warnings on its question (warnings): a not_determinable with no acquisition ask and no reason for none, a partial every review holds whole, what the record ties to the question and the answer leaves out, a partial answer to a question that presumes an event with no test of that premise. They hold nothing: weigh each now, and record the answer again if it is right.",
+      "Before answering a question that presumes an event (questions shows its presumes; a person's question is a proposition to test), test whether the event happened at all. If the evidence does not support it, the answer is premise_not_supported. A clue that fits the question's frame is a candidate to test against that rival, not an answer: say what the test showed in premise_tested {outcome, refs}.",
+    ],
+    parameters: recordSchema,
+    prepareArguments: (args: unknown) => argsForValidator(recordSchema, args) as never,
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      return runRecord("record", params as Record<string, unknown>, toolCtx);
+    },
+  });
+
+  // A kind's own tool: its fields, its required list as the check has it, its rules and no other kind's.
+  const REFS_WORDS = "The run's objects it rests on, each checked: input:<path>, job:<id>/<path> (a file the shell shows at store/jobs/j000149/out/x is job:j000149/x), import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. A file only in your own work/ is not an object of the run: run the work as a job and cite job:.";
+  const COMMON_WORDS = "A refusal names every defect of the entry at once, each with what to send: fix them all and call once more. To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> and because=<why>.";
+  const P = recordProps;
+  const kindTools: Array<{ kind: (typeof LEDGER_AGENT_KINDS)[number]; label: string; snippet: string; description: string; guidelines: string[]; schema: TSchema }> = [
+    {
+      kind: "finding",
+      label: "Record a finding",
+      snippet: "Record a finding: what you saw, and what it indicates",
+      description:
+        "Record a finding in the swarm's ledger, while the artefact is open: an observation and what you make of it. value is what you saw, fact only, one sentence; source where (a path, a log, a registry key); evidence how a reader re-derives it (the command, the query, the record id, the hash); refs the objects it rests on. basis is observed or inferred; confidence comes with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count); indicates says what the observation means and the step from one to the other, one to three sentences. " +
+        "An inferred finding lists alternatives [{explanation, status: rejected | open, why}], or says in alternatives_none_why why none was considered: never invent one. A ref whose job did not succeed needs qualifies [{ref, why}] (ref may name the job, job:<id>, for every ref of the entry from it), and such bytes never show that something is absent. answers names the question it bears on (\"3\"): an answer can rest only on an entry that names its question. " +
+        "A finding that says what was NOT found (no hit, none, not present) and rests on your own script or shell line names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value. One about pictures holds for the images you read: the hub names the images of the same job you were not handed. Before choosing among several places a value could be carried in, record one finding with carriers [{carrier, state: decoded | undecodable | not_examined, why}], a row each. A payload that declares itself fake, a test or a vendor's sample is marked decoy (what in it says so), and no answer rests on it alone; a file in a vendor's path with the vendor's timestamps is not case data. \"Unknown\" is a finding; a guess recorded as one is not. To add refs to a finding recorded without them, record it again with its refs: it becomes the correction. " +
+        COMMON_WORDS,
+      guidelines: ["Use record_finding for an observation and what it indicates; a dated event is record(kind=event), a search that found nothing record_absence, what could not be examined record_limitation.", "A negative from your own scanner names its control run; a finding names the question it bears on in answers."],
+      schema: Type.Object({
+        value: need(P().value, "What you saw, fact only, in one sentence."),
+        source: need(P().source, "Where it was seen: a path, a log, a plugin, a registry key."),
+        evidence: need(P().evidence, "How a reader re-derives it: the command, the query, the record id, the hash."),
+        basis: need(P().basis, "observed in the evidence, or inferred from it."),
+        confidence: need(P().confidence, "high, medium or low: the quality of the evidence, not a count of it."),
+        confidence_why: need(P().confidence_why, "Why that confidence: where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other."),
+        indicates: need(P().indicates, "What the observation means, and the step from one to the other, in one to three sentences."),
+        refs: may(P().refs, REFS_WORDS),
+        answers: may(P().answers, "The questions it bears on, by id: \"3\", \"Q-19\"."),
+        alternatives: Type.Optional(Type.Array(Type.Object({ explanation: Type.String(), status: Type.Union(LEDGER_ALTERNATIVE_STATUS.map((k) => Type.Literal(k))), why: Type.String(), test_refs: Type.Optional(Type.Array(Type.String())) }), { description: "On an inferred finding: what else could explain it, each rejected (with why) or left open; test_refs the objects that tested it." })),
+        alternatives_none_why: may(P().alternatives_none_why, "On an inferred finding, in place of alternatives: why none was considered. Never invent one."),
+        qualifies: may(P().qualifies, "For each ref whose job did not succeed: {ref, why its kept bytes are still usable}. ref may name the job (job:<id>) for every ref from it."),
+        control: P().control,
+        images_read: P().images_read,
+        carriers: P().carriers,
+        candidates: P().candidates,
+        decoy: P().decoy,
+        significance: P().significance,
+        ts: P().ts,
+        clock: P().clock,
+        precision: P().precision,
+        locators: P().locators,
+        attribution: P().attribution,
+        rel: P().rel,
+        sensitive: P().sensitive,
+        supersedes: P().supersedes,
+        because: P().because,
+        opens: P().opens,
+        interprets: P().interprets,
+      }),
+    },
+    {
+      kind: "answer",
+      label: "Record an answer",
+      snippet: "Record the answer to one question: the asked string in value, the rest in qualifier",
+      description:
+        "Record the swarm's answer to one question of the goal (section question:<id>), written from the ledger, not from memory. value is the asked string alone, in the format the question asks (its Format line): the first line of value is what is graded, so it holds the answer and nothing else, no sentence, no label, no second candidate. qualifier holds whatever qualifies it (a candidate, a second reading, what is open). reasoning says how the cited entries lead to it, citing E-<seq> for every claim; the answer rests on at least one standing entry recorded with answers naming its question. " +
+        "result is established (on findings), partial, bounded_negative or not_determinable (each on a coverage record, worded \"No evidence of <what> was found in <scope>\"), out_of_scope or premise_not_supported. confidence comes with confidence_why; alternatives_open says what else could still explain it (\"nothing remains open\" is refused while a carrier table or a partial coverage record it cites shows one unexamined); would_change says what evidence would change it. A partial answer carries parts [{id, part, status: established | open | limited, refs, open_by?, limited_by?}] with at least one open or limited: then value holds only the piece of the format that is established, or is empty, and nothing is asked for the open part. " +
+        "One answer stands per question: a second one from you is taken as its revision (supersedes). A revision that lowers confidence or result keeps value: a doubt, a dispute or a best_candidate review changes confidence, result and parts, never the asked string; value changes only with value_changed_because naming the entry (E-<seq>) that shows it wrong. Other readings go in candidates [{value, state: open | ruled_out | decoy, why, by?}]: a revision carries them (and its earlier value when it lowers the confidence or answers an objection), and one leaves only as ruled_out with by, the machine check that excludes it. An answer that chose among carriers names them in carrier_names, and is established only once the carrier table it cites has a row for each; a value marked decoy needs decoy_check. A superseded entry is cited only with its correction, and a disputed one or one resting on a failed job only with qualifies [{ref: \"E-<seq>\", why}]. " +
+        "An answer takes no refs, answers, basis or indicates: record the fact first (record_finding with answers: [\"<id>\"]), then this answer citing its E-<seq>. The summary and the narrative are record(kind=answer, section=summary | narrative). " +
+        COMMON_WORDS,
+      guidelines: ["record_answer's value is the asked string alone, as the question's Format line asks it; everything else goes in qualifier and reasoning.", "Lowering your confidence in an answer never changes its value: say the doubt in qualifier, confidence and result."],
+      schema: Type.Object({
+        section: need(P().section, "The question it answers: question:<id> (question:3; a register question Q-19 is question:19)."),
+        value: need(P().value, "The asked string alone, in the format the question asks; its first line is what is graded. Empty only on an answer that is not established and whose qualifier says what is known."),
+        qualifier: may(P().qualifier, "What qualifies value: a candidate, a second reading, the part still open, the words around it."),
+        reasoning: need(P().reasoning, "How the cited entries lead to the answer, citing E-<seq> for every claim."),
+        result: need(P().result, "established | partial | bounded_negative | not_determinable | out_of_scope | premise_not_supported."),
+        confidence: need(P().confidence, "high, medium or low."),
+        confidence_why: need(P().confidence_why, "The quality of the evidence the answer rests on, not a count of it."),
+        alternatives_open: need(P().alternatives_open, "What else could still explain it, or that nothing remains open and why."),
+        would_change: need(P().would_change, "What evidence would change this answer."),
+        parts: P().parts,
+        contrary: P().contrary,
+        contrary_none_why: P().contrary_none_why,
+        limitations: P().limitations,
+        qualifies: may(P().qualifies, "For a cited entry (E-<seq>) that is disputed or rests on a failed job: {ref: \"E-<seq>\", why it still supports the answer}."),
+        premises: P().premises,
+        premise_tested: P().premise_tested,
+        question_rev: P().question_rev,
+        asserts_absence: P().asserts_absence,
+        supersedes: P().supersedes,
+        because: P().because,
+        value_changed_because: P().value_changed_because,
+        candidates: P().candidates,
+        carrier_names: P().carrier_names,
+        decoy_check: P().decoy_check,
+        downgrade: P().downgrade,
+        material: P().material,
+        sensitive: P().sensitive,
+      }),
+    },
+    {
+      kind: "coverage",
+      label: "Record coverage",
+      snippet: "Record what a negative was searched over, before the answer that rests on it",
+      description:
+        "Record what a search covered, before a bounded_negative or not_determinable answer on a material question rests on it (and for a question that asks for a complete set): value is the proposition the search tested; refs the objects it was over (a directory of a job's output or of the evidence counts); answers the questions it is for; time_range, search_method, settings, coverage_actual (what was actually covered), skipped and failures (\"none\", with how that is known); result_refs what the search produced: the entries (E-<seq>: absences, limitations, findings, events; never an answer or another coverage record) and the job outputs (job:<id>[/<path>]); alternatives, in words, what is still open; detection_opportunity {trace_expected: yes | no | unknown, why}: would the event have left a trace in these sources. " +
+        "looked_for is required, or looked_for_none_why: the literal strings a hit would contain (names, identifiers, addresses, keywords); the hub then searches every output the run holds for them, and a hit in an object the record does not name holds a negative until you record what that object showed (a finding, an event or a limitation naming it, or one absence listing several) and record the coverage again with those entries in result_refs: naming the object in refs alone does not clear it, and a sweep its budget left partial holds it too, unless the operator accepts the question's limits. areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable. The hub adds whether the jobs behind it were given every object it names (complete or partial). Another seat reviews it (attest with review) before a negative resting on it may stand. " +
+        COMMON_WORDS,
+      guidelines: ["Before a negative answer or a not_determinable one on a material question, record_coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace."],
+      schema: Type.Object({
+        value: need(P().value, "The proposition the search tested, in one sentence."),
+        refs: need(P().refs, `The objects the search was over. ${REFS_WORDS}`),
+        answers: need(P().answers, "The questions the search was for, by id: \"3\", \"Q-19\"."),
+        time_range: need(P().time_range),
+        search_method: need(P().search_method),
+        settings: need(P().settings),
+        coverage_actual: need(P().coverage_actual),
+        skipped: need(P().skipped),
+        failures: need(P().failures),
+        result_refs: need(P().result_refs),
+        alternatives: Type.String({ description: "In words: the explanations or routes still open, or none and why." }),
+        detection_opportunity: need(P().detection_opportunity),
+        looked_for: P().looked_for,
+        looked_for_none_why: P().looked_for_none_why,
+        areas: P().areas,
+        acquisition_ask: P().acquisition_ask,
+        acquisition_none_why: P().acquisition_none_why,
+        source: P().source,
+        evidence: P().evidence,
+        supersedes: P().supersedes,
+        because: P().because,
+        sensitive: P().sensitive,
+      }),
+    },
+    {
+      kind: "limitation",
+      label: "Record a limitation",
+      snippet: "Record what the examination could not establish, and why",
+      description:
+        "Record what the examination could not establish, or could only partly: value says what, in one sentence; source what could not be examined (the object, volume, artefact or scope); evidence what was tried and why it could not be done (the command, the error, the missing key or tool); reason is not_examined, unavailable (the evidence that would settle it was not collected or no longer exists), failed, partial or excluded (the case leaves it out). refs names the objects it concerns, a failed job's output among them (no qualifies: a limitation rests on what could not be done). answers names the question it bounds: an answer cites it in limitations, or holds a part open or limited by it. A limitation is not a finding, and it never shows that something is absent. " +
+        COMMON_WORDS,
+      guidelines: ["Record what you could not examine, or could only partly, with record_limitation and its reason; a limitation that bounds a question names it in answers."],
+      schema: Type.Object({
+        value: need(P().value, "What the examination could not establish, in one sentence."),
+        source: need(P().source, "What could not be examined: the object, volume, artefact or scope."),
+        evidence: need(P().evidence, "What was tried and why it could not be done: the command, the error, the missing key or tool."),
+        reason: need(P().reason, "not_examined | unavailable | failed | partial | excluded."),
+        refs: may(P().refs, REFS_WORDS),
+        answers: may(P().answers, "The questions it bounds, by id: \"3\", \"Q-19\"."),
+        confidence: P().confidence,
+        rel: P().rel,
+        sensitive: P().sensitive,
+        supersedes: P().supersedes,
+        because: P().because,
+        opens: P().opens,
+        interprets: P().interprets,
+      }),
+    },
+    {
+      kind: "absence",
+      label: "Record an absence",
+      snippet: "Record a search that found nothing, with what it was over and its control",
+      description:
+        "Record a search that found nothing, when that matters to the case (an empty grep on the way to something else is not an entry): value is what was looked for and not found, one sentence; source what was searched (the path, image, log or artefact: \"not found\" is only ever \"not found there\"); evidence the query, the tool and its version, and the scope (allocated files only, or unallocated space and slack too, and the time range); refs the objects searched and the job that searched them; completion how far the search got (complete, partial, failed). " +
+        "An absence that rests on your own script or shell line (a command job, not a pack tool that reports what it covered) names its control: control {ref, found}, a job in which the same scanner, with the same pattern and layout, found a planted or known value (plant one in a copy, or run it over a file known to hold one); a search that could not have matched reads the same as one that found nothing. A search over a compressed or encrypted container is not a search of its content. One about pictures holds for the images you read: the hub names the images of the same job you were not handed, and an answer resting on the entry is held until they are read. The output of a job that did not succeed cannot show an absence: record it with completion partial or failed, and what was not reached with record_limitation. An absence answers a question only when the goal says the question asks whether something exists; for any other it documents the search, and an answer resting on it alone is examination-limited. " +
+        COMMON_WORDS,
+      guidelines: ["An absence holds for the query and the scope it names, and one from your own scanner names the control run that shows the scanner could have matched."],
+      schema: Type.Object({
+        value: need(P().value, "What was looked for and not found, in one sentence."),
+        source: need(P().source, "What was searched: the path, image, log or artefact the search ran over."),
+        evidence: need(P().evidence, "The query, the tool and its version, and the scope searched."),
+        refs: may(P().refs, `The objects searched and the output of the job that searched them. ${REFS_WORDS}`),
+        completion: may(P().completion, "How far the search got: complete, partial or failed."),
+        control: P().control,
+        images_read: P().images_read,
+        answers: may(P().answers, "The questions it bears on, by id: \"3\", \"Q-19\"."),
+        confidence: P().confidence,
+        confidence_why: P().confidence_why,
+        basis: P().basis,
+        ts: P().ts,
+        rel: P().rel,
+        sensitive: P().sensitive,
+        supersedes: P().supersedes,
+        because: P().because,
+        opens: P().opens,
+        interprets: P().interprets,
+      }),
+    },
+  ];
+  for (const t of kindTools) {
+    pi.registerTool({
+      name: `record_${t.kind}`,
+      label: t.label,
+      description: t.description,
+      promptSnippet: t.snippet,
+      promptGuidelines: t.guidelines,
+      parameters: t.schema,
+      prepareArguments: (args: unknown) => argsForValidator(t.schema, args) as never,
+      async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+        return runRecord(`record_${t.kind}`, { ...(params as Record<string, unknown>), kind: t.kind }, toolCtx);
+      },
+    });
+  }
+
+  // The kinds' own tools are the weak class's (B2): a seat of another class is declared `record` alone, whose description
+  // carries every kind's rules, and not five more definitions of about 47 KB. Decided on the seat's model when the
+  // session starts and again when the model changes; the trace says which and why (record_tools).
+  // Only the kinds' tools the session's allowlist (--tools) keeps are ever put back: Pi's configured tools are those, read
+  // at every apply. They were read once from the active set, and a strong seat relaunched had its tool set restored
+  // without them, so a later switch to a weak model had nothing to put back. An older Pi without getAllTools: the kinds'
+  // tools ever seen active.
+  const kindSeen = new Set<string>();
+  const isKindTool = (n: string) => (KIND_TOOL_NAMES as readonly string[]).includes(n);
+  const applyKindTools = async (model: { provider?: string; id?: string } | undefined, cwd: string | undefined) => {
+    const decision = recordKindToolsFor(model);
+    try {
+      const active = pi.getActiveTools();
+      for (const n of active.filter(isKindTool)) kindSeen.add(n);
+      const all: unknown = typeof pi.getAllTools === "function" ? pi.getAllTools() : null;
+      const configured = Array.isArray(all) ? (all as Array<{ name?: unknown }>).map((t) => String(t?.name ?? "")).filter(isKindTool) : null;
+      const kindAllowed = configured?.length ? configured : [...kindSeen];
+      const next = decision.offer ? [...new Set([...active, ...kindAllowed])] : active.filter((n) => !isKindTool(n));
+      if (next.length !== active.length || next.some((n, i) => n !== active[i])) pi.setActiveTools(next);
+    } catch {
+      // an older Pi without the active-tool calls keeps whatever --tools gave it
+    }
+    if (cwd && agentId) await logEvent(cwd, agentId, "record_tools", { model: model?.id ? `${model.provider ?? ""}/${model.id}` : null }, { ok: true, kind_tools: decision.offer, why: decision.why }).catch(() => undefined);
+  };
+  pi.on("session_start", async (_event, ctx) => applyKindTools((ctx as { model?: { provider?: string; id?: string } }).model, (ctx as { cwd?: string }).cwd));
+  pi.on("model_select", async (event, ctx) => applyKindTools((event as { model?: { provider?: string; id?: string } }).model, (ctx as { cwd?: string }).cwd));
+
+  // A candidate in one call (B5): a value for one question that is not verified yet, and the object it was read from.
+  // It is a hypothesis about that question (ledger-rules.ts CandidateMark), named in every header and counted by nothing
+  // at the finish: what a seat holds is on the ledger at once, not left in its context for the lead's holder to write.
+  const candidateSchema = Type.Object({
+    question: Type.String({ description: "The question the value may answer: its number, or question:<n>" }),
+    value: Type.String({ description: "The value as read, alone, in the form the question asks" }),
+    ref: Type.String({ description: "The object it was read from: job:<id>/<path>, input:<path>, import:<id>/<path>, member:<gen>#<n> or sha256:<hex>" }),
+    why: Type.Optional(Type.String({ description: "What is still open: why it is not an answer yet" })),
+  });
+  pi.registerTool({
+    name: "record_candidate",
+    label: "Record a candidate",
+    description:
+      "Record, in one call, a value you hold for a question and cannot stand behind yet: the question, the value, and the object it was read from (ref). It goes on the ledger as a candidate (a hypothesis about that question, status open), every seat's header names it, and the finish counts it for nothing: the answer is still to be recorded, by the lead's holder or by you, once it is verified. Record it the moment you hold the value rather than keeping it in your context: a value that is not on the ledger when the run ends is lost.",
+    promptSnippet: "Record a value for a question that is not verified yet: question, value, ref",
+    promptGuidelines: ["A value for a question you hold and cannot verify yet goes on the ledger at once with record_candidate (question, value, ref); the answer follows once it is verified."],
+    parameters: candidateSchema,
+    prepareArguments: (args: unknown) => argsForValidator(candidateSchema, args) as never,
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const p = params as { question?: unknown; value?: unknown; ref?: unknown; why?: unknown };
+      const q = String(p.question ?? "").trim().replace(/^question:/i, "");
+      const ref = String(p.ref ?? "").trim();
+      const why = typeof p.why === "string" && p.why.trim() ? `; still open: ${p.why.trim()}` : "";
+      return runRecord("record_candidate", { kind: "hypothesis", status: "open", candidate: true, value: p.value, answers: q ? [q] : [], refs: ref ? [ref] : [], source: ref || undefined, evidence: `a candidate value for question:${q}, as read at ${ref}${why}` }, toolCtx);
     },
   });
 
@@ -3565,25 +4330,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "attest",
-    label: "Attest",
-    description:
-      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement. Review an answer source-first: the question and its original sources before the answer's conclusion, and the strongest rival reading of them.",
-    promptSnippet: "Record that you re-derived a peer's entry, and how",
-    promptGuidelines: [
-      "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
-      "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
-      "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
-      "Review source-first: read the question as asked, its scope and the original sources it rests on before the answer's conclusion, and weigh the strongest rival reading of those sources (another time, entity, mechanism or activity, or the premise not holding). A review offer leads with them and links the answer by its seq.",
-      "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives you weighed, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
-      "An established attest of an answer that claims established, on a material question, also names answer_review.discriminator {rival, test, favours_if, outcome, refs}: the strongest rival, the test that separates it from the answer, the result that would favour each, what it showed, and the E-<seq> or job:<id>/<path> it rests on; and, where a value the answer or an entry it rests on states is in the bytes, says where it read it, answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer or that entry states it; the hub reads those bytes, in UTF-8 and UTF-16LE), or, for a derived value (a converted time, a decoded field), answer_review.derivation {job, inputs}. Without a discriminator, or with a locator that does not verify (its bytes at the offset, its value among the words of the answer or of an entry it rests on) or a derivation that does not resolve, it is recorded best_candidate, and the reply says how to fix it; with neither a locator nor a derivation it is warned, never capped (an answer that is an inference over several entries stands on its discriminator). Bytes at an offset prove the value is there, not that it answers the question: that is the discriminator's.",
-      "A question that presumes an event (its presumes in the register, or a person's question framed as a proposition) is reviewed against the premise itself: name the rival \"the question's premise is not supported\" and say what the test showed, answer_review.premise_tested {outcome, refs} (the observation or job it rests on, never the answer under review). If the evidence does not support the premise, the answer is premise_not_supported: dispute an answer that says otherwise. A clue that fits the question's frame is a candidate to test against that rival, not an answer. An established attest of an answer that claims established, on a material question that presumes an event, without that test is recorded best_candidate, and the reply says how to fix it; a partial answer without it is warned (premise_untested), never held.",
-      "\"Best candidate\" concerns only an answer that claims established. Partial is a disposition: a review of a partial answer checks the parts the answer claims, those it says are established and those it declares open. A part it declares open is held established: false with declared_open naming the limitation or coverage record the answer cites for it; that part, and the answer's confidence, do not cap your review, and a partial answer never holds the run as a best candidate.",
-      "Before you attest an answer established, name at least one alternative explanation you weighed, why the evidence rules it out, and the entries that show it: answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none, or only placeholders, is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
-      "The reply carries the finish line's warnings on what you attested (warnings): a partial answer you hold whole, what the record ties to the question and the answer leaves out, a not_determinable with no acquisition ask. They hold nothing: tell the answer's author on the board, or say in your review which part is open.",
-    ],
-    parameters: Type.Object({
+  const attestSchema = Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
       how: Type.String({ description: "What you re-derived, from which sealed object, and what you only read." }),
       refs: Type.Optional(Type.Array(Type.String(), { description: "The objects you re-derived from: input:<path>, job:<id>/<path>, member:<gen>#<n>, sha256:<hex>." })),
@@ -3608,6 +4355,7 @@ export default function (pi: ExtensionAPI) {
           {
             reproduced: Type.String({ description: "What you re-derived yourself, from which sealed objects" }),
             read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
+            link: Type.String({ description: "What ties the artefact the answer cites to what the question asks, apart from the value re-deriving from it: whose it is, where it sits, when it was written, why this one and not another carrier of the same kind. A value that re-derives from the wrong artefact re-derives all the same" }),
             parts: Type.Array(
               Type.Object({
                 id: Type.Optional(Type.String({ description: "The answer's part this row weighs, by its id, when the answer carries parts: weigh each of them; a row the answer holds open needs no declared_open" })),
@@ -3671,8 +4419,32 @@ export default function (pi: ExtensionAPI) {
           { description: "Required with strength on an answer to a question: the review part by part, source-first." },
         ),
       ),
-    }),
-    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+    });
+  pi.registerTool({
+    name: "attest",
+    label: "Attest",
+    description:
+      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement. Review an answer source-first: the question and its original sources before the answer's conclusion, and the strongest rival reading of them.",
+    promptSnippet: "Record that you re-derived a peer's entry, and how",
+    promptGuidelines: [
+      "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
+      "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
+      "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
+      "Reviewing an answer, compare the first line of its value with the question's Format line: the asked string alone, in that form. A right value in another form, or a sentence around it, is said to its author (a dispute, or a best_candidate attest); a doubt of yours changes the answer's confidence, result and parts, never its value, and a reading you dispute gains your candidate beside the author's until a check rules one out.",
+      "Say in answer_review.link what ties the cited artefact to the question, apart from the value re-deriving: a decoy re-derives too. A payload that calls itself fake, test or decoy is a decoy candidate; a file in a vendor's path with the vendor's timestamps is not case data; a value saved by a form's autofill is a lead, not \"the password noted down\".",
+      "Review source-first: read the question as asked, its scope and the original sources it rests on before the answer's conclusion, and weigh the strongest rival reading of those sources (another time, entity, mechanism or activity, or the premise not holding). A review offer leads with them and links the answer by its seq.",
+      "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, what links the cited artefact to the question (link), each part the question asks and whether it is established, the inference, the alternatives you weighed, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
+      "An established attest of an answer that claims established, on a material question, also names answer_review.discriminator {rival, test, favours_if, outcome, refs}: the strongest rival, the test that separates it from the answer, the result that would favour each, what it showed, and the E-<seq> or job:<id>/<path> it rests on; and, where a value the answer or an entry it rests on states is in the bytes, says where it read it, answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer or that entry states it; the hub reads those bytes, in UTF-8 and UTF-16LE), or, for a derived value (a converted time, a decoded field), answer_review.derivation {job, inputs}. Without a discriminator, or with a locator that does not verify (its bytes at the offset, its value among the words of the answer or of an entry it rests on) or a derivation that does not resolve, it is recorded best_candidate, and the reply says how to fix it; with neither a locator nor a derivation it is warned, never capped (an answer that is an inference over several entries stands on its discriminator). Bytes at an offset prove the value is there, not that it answers the question: that is the discriminator's.",
+      "A question that presumes an event (its presumes in the register, or a person's question framed as a proposition) is reviewed against the premise itself: name the rival \"the question's premise is not supported\" and say what the test showed, answer_review.premise_tested {outcome, refs} (the observation or job it rests on, never the answer under review). If the evidence does not support the premise, the answer is premise_not_supported: dispute an answer that says otherwise. A clue that fits the question's frame is a candidate to test against that rival, not an answer. An established attest of an answer that claims established, on a material question that presumes an event, without that test is recorded best_candidate, and the reply says how to fix it; a partial answer without it is warned (premise_untested), never held.",
+      "\"Best candidate\" concerns only an answer that claims established. Partial is a disposition: a review of a partial answer checks the parts the answer claims, those it says are established and those it declares open. A part it declares open is held established: false with declared_open naming the limitation or coverage record the answer cites for it; that part, and the answer's confidence, do not cap your review, and a partial answer never holds the run as a best candidate.",
+      "Before you attest an answer established, name at least one alternative explanation you weighed, why the evidence rules it out, and the entries that show it: answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none, or only placeholders, is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
+      "The reply carries the finish line's warnings on what you attested (warnings): a partial answer you hold whole, what the record ties to the question and the answer leaves out, a not_determinable with no acquisition ask. They hold nothing: tell the answer's author on the board, or say in your review which part is open.",
+    ],
+    parameters: attestSchema,
+    // A review left short of a required field, or with a value its schema would not take, is answered by the attest's own check, which names every defect at once (argsForValidator): Pi's answer was the whole call echoed back, 30 times on the run sf4406b for "reproduced, read, alternatives".
+    prepareArguments: (args: unknown) => argsForValidator(attestSchema, args) as never,
+    async execute(_id, given, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const params = argsAsSent(given as Record<string, unknown>) as typeof given;
       const started = Date.now();
       const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}), ...(params.strength ? { strength: params.strength } : {}), ...(params.answer_review ? { answer_review: params.answer_review } : {}), ...(params.second_review_why ? { second_review_why: params.second_review_why } : {}) });
       if (!result.ok) {
@@ -3693,7 +4465,7 @@ export default function (pi: ExtensionAPI) {
     name: "dispute",
     label: "Dispute",
     description:
-      "Say why a ledger entry somebody else recorded does not hold (a finding, an answer, any kind), with the objects that show it in refs; or, with withdraw: true, take back your own dispute and say why. The harness writes it, chained, into ledger/disputes.jsonl. An answer resting on a disputed entry stops standing until its author records it again with the dispute answered; to correct your own entry, record the correction with supersedes instead.",
+      "Say why a ledger entry somebody else recorded does not hold (a finding, an answer, any kind), with the objects that show it in refs; or, with withdraw: true, take back your own dispute and say why. The harness writes it, chained, into ledger/disputes.jsonl. An answer resting on a disputed entry stops standing until its author records it again with the dispute answered; to correct your own entry, record the correction with supersedes instead. A dispute about a reading (a transcription, a glyph, a look-alike character) adds a candidate: say yours in reading, and it stands beside the entry's value (its candidates), never in its place, until a check rules one out; a dispute about how sure an answer is changes its confidence or result, never the asked string in its value.",
     promptSnippet: "Record why a peer's entry does not hold",
     promptGuidelines: ["dispute says what does not hold and what shows it; a wrong entry of your own is corrected with record(supersedes), never disputed."],
     parameters: Type.Object({
@@ -3701,10 +4473,11 @@ export default function (pi: ExtensionAPI) {
       why: Type.String({ description: "What does not hold and what shows it; with withdraw, why the dispute no longer stands." }),
       refs: Type.Optional(Type.Array(Type.String(), { description: "The objects that show it." })),
       withdraw: Type.Optional(Type.Boolean({ description: "Take back your own standing dispute of this entry." })),
+      reading: Type.Optional(Type.String({ description: "A dispute about a reading of an answer's or a finding's value (a transcription, a glyph, a look-alike character): the value as you read it. It becomes a candidate beside the entry's value, which it never replaces; the next revision carries it until a check rules one out." })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await disputeEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, why: params.why, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.withdraw ? { withdraw: true } : {}) });
+      const result = await disputeEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, why: params.why, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.withdraw ? { withdraw: true } : {}), ...(params.reading ? { reading: params.reading } : {}) });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `dispute refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
@@ -3994,8 +4767,9 @@ export default function (pi: ExtensionAPI) {
       const r = (await finishAct(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
       // What the trace keeps of the act: its codes and counts, never its words.
       const counts = {
-        ...(params.action === "status" ? { ready: r.ready } : {}),
-        ...(params.action === "prepare" ? { mine: r.mine !== false, ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}), ...(typeof r.generation === "number" ? { generation: r.generation } : {}), ...(r.readiness && typeof r.readiness === "object" ? { ready: (r.readiness as { ready?: unknown }).ready === true } : {}) } : {}),
+        // Readiness: ready, how many items hold it and the codes that hold sections (sweep_hits: 2, no_critic_act: 1, …).
+        ...(params.action === "status" ? readinessCounts(r) : {}),
+        ...(params.action === "prepare" ? { mine: r.mine !== false, ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}), ...(typeof r.generation === "number" ? { generation: r.generation } : {}), ...(r.readiness && typeof r.readiness === "object" ? readinessCounts(r.readiness as Record<string, unknown>) : {}) } : {}),
         ...(params.action === "ack" && Array.isArray(r.sections) ? { sections: (r.sections as unknown[]).length, whole: r.whole === true } : {}),
         ...(params.action === "resolve" && Array.isArray(params.items) ? { items: params.items.length, ...(typeof r.resolved === "number" ? { resolved: r.resolved } : {}), ...(r.replayed ? { replayed: true } : {}), ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}) } : {}),
         ...(typeof r.seq === "number" ? { seq: r.seq } : {}),
@@ -4326,6 +5100,8 @@ export default function (pi: ExtensionAPI) {
         }).catch(() => undefined);
         if (!verdict.proceed) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: verdict.reason }).catch(() => undefined);
+          // A seat the gate holds the done for, for work it has not recorded, is asked for what it holds: once a hold (B5).
+          await askUnrecorded(toolCtx.cwd, agentId, run?.gate?.defects ?? [], (a) => systemPost(toolCtx.cwd, a)).catch(() => []);
           return {
             content: [{ type: "text" as const, text: verdict.reason }],
             details: { ok: false, reason: verdict.reason, failing: verdict.failing, passed: run?.passed ?? 0, total: run?.total ?? 0 },
@@ -4474,7 +5250,6 @@ export default function (pi: ExtensionAPI) {
       spentUsd: status?.this_agent?.spent_usd ?? 0,
       capUsd: status?.budget.cap_per_agent_usd ?? undefined,
       ...(leads ? { leads: leads.text } : {}),
-      ...(skills?.handoffLine() ? { skills: skills.handoffLine() } : {}),
       // What the prompt of the run a hand-off starts cannot say, because it changes: a cap that was hit, the tools forged so far.
       ...(status?.over_budget ? { capHit: capHitLine(status) } : {}),
       // Told to stop: the sentinel stands, or a cap-stop run's cap was hit. The header's last paragraph says "work on" otherwise.
@@ -4489,6 +5264,8 @@ export default function (pi: ExtensionAPI) {
       agentId: () => agentId,
       trace: (cwd, tool, args, result) => logEvent(cwd, agentId, tool, args, result),
       handoffFacts,
+      // Built by the seat itself, not read with the hub's facts: a late hub does not take the cards with it.
+      handoffSkills: skills ? (max) => skills!.handoffLine(max) : undefined,
       summaryInput: skills ? (history, turnPrefix) => skills!.summaryInput(history, turnPrefix) : undefined,
       promptsDir: join(dirname(fileURLToPath(import.meta.url)), "..", "prompts"),
       summaryPromptPath: process.env.SWARM_COMPACT_PROMPT?.trim() || undefined,

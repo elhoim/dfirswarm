@@ -3,6 +3,7 @@ id: identify/acquisition-mode
 title: Live, mounted, snapshot or earlier: what was read
 when: Time, consistency or collector contamination of a file matters.
 needs: []
+card: collection_id {"root": "<collection dir>"} gives no per-item copy times: read the copy log's time columns. The mode (live, mounted image, snapshot, earlier collection) comes from the records and the operator, not file names. Keep source, snapshot, collection and processing times apart, each with its zone; a collector footprint stays a hypothesis. Does not show: why two files disagree.
 tools: [collection_id]
 requires_host: []
 ---

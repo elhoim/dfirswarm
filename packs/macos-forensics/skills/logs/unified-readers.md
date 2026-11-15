@@ -3,6 +3,7 @@ id: logs/unified-readers
 title: Unified log readers, staging and retention levels
 when: unified_log fails or is partial, or the choice of reader or its version is in question.
 needs: []
+card: unified_log runs Apple's log on macOS and the pinned unifiedlog_iterator elsewhere (version in reader). Staging a directory (Linux) refuses predicate, start and end: search the JSONL afterwards, keeping the query. timeout_seconds (default 900, at most 1100) covers staging, census and reader. Does not show: an entry never persisted, removed by retention or redacted, or what another reader decodes.
 tools: [unified_log]
 requires_host: [unifiedlog_iterator, log]
 ---

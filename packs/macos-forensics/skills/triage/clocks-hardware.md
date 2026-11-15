@@ -3,6 +3,7 @@ id: triage/clocks-hardware
 title: Zone, epochs and hardware generation of the Mac
 when: Convert a local time, or say which Mac hardware generation the evidence shows.
 needs: []
+card: plist_read on SystemConfiguration preferences gives hardware identifiers: report a serial number only when its source identifies this Mac. APFS times and plist dates are already UTC-based: apply the /etc/localtime zone only to local civil time, after checking its history for the date. Does not show: the zone at an earlier event, or the subject's hardware from the worker's.
 tools: [plist_read]
 requires_host: []
 ---

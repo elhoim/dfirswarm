@@ -75,8 +75,9 @@
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { appendFileSync, chmodSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import v8 from "node:v8";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { jsonlLines } from "../extensions/jsonl-lines.ts";
@@ -93,7 +94,11 @@ import { similarView } from "./job-reuse.ts";
 import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
 import { readCasePolicy } from "./case-policy.ts";
 import { resolveScope, scopeKindOf } from "./job-scope.ts";
-import { commandNames, libraryHint } from "./library-hint.ts";
+import { commandNames, freshCoverage, libraryHint, seatLibraryHint, type CoverageHint, type ShortHint } from "./library-hint.ts";
+import { boundRpcAnswer, ledgerPage } from "../extensions/reply-bound.ts";
+import { sweepsHeld } from "../extensions/store-sweep.ts";
+import { jobsListing, storeFind } from "./store-find.ts";
+import { diskSpeed, healthEveryMs, loopMonitor, memoryPressure, recycleDue, sampleHealth, snapshotAt, snapshotDue } from "./hub-health.ts";
 import { sensitiveIndex } from "./output-hygiene.ts";
 import { ACCESS_RULES, apiPageHit, classifyTraceRow, type AccessHit } from "./sensitive-access.ts";
 
@@ -103,10 +108,13 @@ import { ACCESS_RULES, apiPageHit, classifyTraceRow, type AccessHit } from "./se
  * run's library whose manifest `use` (or description) matches the files the
  * job declared, the ones its command already runs left out (library-hint.ts).
  */
-async function admissionHint(S: string, spec: JobSpec): Promise<Awaited<ReturnType<typeof libraryHint>>> {
+/** The overlap items each seat was last told of, by run and seat (freshCoverage). */
+const hintSeen = new Map<string, Map<string, number>>();
+/** A tool is named to a seat once a compaction cycle, and what was named is kept in the hub's directory (seatLibraryHint). */
+async function admissionHint(S: string, spec: JobSpec, who = "", dir?: string): Promise<ShortHint | null> {
   const r = await resolveScope(S, spec.inputs, {});
   if (!r.ok) return null;
-  return libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) });
+  return seatLibraryHint(S, who, await libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) }), { dir });
 }
 
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
@@ -189,6 +197,20 @@ const FILE_FNS = new Set(["publishFile", "recordFileVersion", "fileDiff"]);
 const TRANSFER_SEAT_BYTES = 96 * 1024 * 1024;
 const TRANSFER_SEAT_COUNT = 4;
 const TRANSFER_IDLE_MS = 5 * 60_000;
+/** How long a health sample's disk and memory probes may take (Hub.healthProbeMs): a probe of 1 MB and one fsync takes well under a second on a disk that works. */
+const HEALTH_PROBE_MS = 10_000;
+/** What the disk probe says (hub-health.ts diskSpeed). */
+type DiskProbe = Awaited<ReturnType<typeof diskSpeed>>;
+
+/** `p`'s value, or `late()`'s once `ms` have passed without it; the timer does not hold the process. */
+function within<T>(p: Promise<T>, ms: number, late: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(late()), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, bound]).finally(() => clearTimeout(timer));
+}
 /** The states a seat reports (the extension's), and how much text may go with one. */
 const SEAT_STATES = new Set(["idle", "working", "blocked", "unknown"]);
 const STATE_DETAIL_MAX = 200;
@@ -410,6 +432,12 @@ type HubState = {
   history_bytes?: Record<string, number>;
 };
 
+/** The hub process's memory, in MB: what status.json and hub_memory_high say. */
+export function hubMemory(): { rss_mb: number; heap_used_mb: number; heap_limit_mb: number } {
+  const mb = (x: number) => Math.round(x / 2 ** 20);
+  return { rss_mb: mb(process.memoryUsage.rss()), heap_used_mb: mb(process.memoryUsage().heapUsed), heap_limit_mb: mb(v8.getHeapStatistics().heap_size_limit) };
+}
+
 /**
  * A Unix socket path the kernel will take: 104 bytes on macOS. The collector
  * binds inside the sandbox's traces/, which under a long home is past that
@@ -611,7 +639,7 @@ export function boardTable(hub: {
   // job's output (a page of stdout, the tail of stderr), a note of that for
   // the access record. Whether the job is sensitive is for the hub to say.
   const shown = async (who: string, fn: string, job: Parameters<typeof jobView>[1], stdout?: { offset: number; bytes: number; total: number; path: string }) => {
-    const view = await jobView(S, job);
+    const view = await jobView(S, job, { waiting: hub.jobs?.()?.waitWords(job) });
     if (hub.accessed) {
       if (stdout) await hub.accessed(who, { fn, job: job.id, part: "stdout", path: stdout.path, offset: stdout.offset, bytes: stdout.bytes, total: stdout.total }).catch(() => undefined);
       const err = view.stderr as { tail?: string; bytes?: number } | undefined;
@@ -702,7 +730,14 @@ export function boardTable(hub: {
     listClaims: () => P.listClaims(S),
     listFileHistory: (_who, a) => P.listFileHistory(S, String(a[1] ?? "")),
     listForgedTools: () => P.listForgedTools(S),
-    listLedger: (_who, a) => P.listLedger(S, (a[1] as { kind?: string; limit?: number }) ?? {}),
+    listLedger: async (_who, a) => {
+      // The window the seat asked for (a kind, the newest `limit`, `from` a seq, exact `ids`), answered within the wall: past it, in
+      // pages of whole entries (reply-bound.ts ledgerPage), the next one asked with the cursor {from: <seq>} as the third argument.
+      const filter = (isObject(a[1]) ? a[1] : {}) as Parameters<typeof P.listLedger>[1] & object;
+      const at = isObject(a[2]) && Number.isInteger(a[2].from) ? (a[2].from as number) : undefined;
+      const window = await P.listLedger(S, at === undefined || filter.ids ? filter : { ...filter, from: at });
+      return ledgerPage(at === undefined ? window : window.filter((e) => e.seq >= at));
+    },
     listTeam: (who) => P.listTeam(as(who)),
     teamView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
@@ -916,6 +951,8 @@ export function boardTable(hub: {
         ...(raw.independent === true ? { independent: true } : {}),
         // Every output sensitive at seal time (docs/adr/0016); anything but a boolean is refused by the service.
         ...(raw.secret_output !== undefined ? { secret_output: raw.secret_output as boolean } : {}),
+        // Supplied programs the job runs (job-service.ts programLines); the service checks each.
+        ...(raw.programs !== undefined ? { programs: (Array.isArray(raw.programs) ? raw.programs.map(String) : raw.programs) as string[] } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.
@@ -930,19 +967,39 @@ export function boardTable(hub: {
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
       // The coverage hint at admission (A1): who else works these questions or these objects now.
-      const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      const coverageAll = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      // Said once to a seat, not with every job (library-hint.ts freshCoverage).
+      const coverageKey = `${S}\u0000cov\u0000${who}`;
+      const coverageSeen = hintSeen.get(coverageKey) ?? new Map<string, number>();
+      hintSeen.set(coverageKey, coverageSeen);
+      const coverage = freshCoverage(coverageAll as CoverageHint | null, coverageSeen);
       // Library visibility (docs/adr/0016): a command job that declared what it
       // reads is told which library tools say they read that kind of file. A hint.
-      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec).catch(() => null) : null;
+      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec, who, hub.dir).catch(() => null) : null;
       return {
         ok: true,
         job: await shown(who, "jobSubmit", r.job),
+        // An identical whole-object call was joined to a job that runs or is committed: say whose it is and why the id is not new.
+        ...((r as { joined?: unknown }).joined ? { joined: (r as { joined?: unknown }).joined } : {}),
         ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}),
         ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}),
         // The reuse hint (ADR 0017): other seats' same operation over the same objects, under way or committed.
         ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true, r.similar_recorded !== false),
         ...(library ? { library } : {}),
       };
+    },
+    // Which job holds a file, by name or content hash, from the manifests (store-find.ts): never a grep over the store.
+    storeFind: async (_who, a) => {
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return storeFind(S, { name: typeof raw.name === "string" ? raw.name : undefined, sha256: typeof raw.sha256 === "string" ? raw.sha256 : undefined, limit: typeof raw.limit === "number" ? raw.limit : undefined, job: typeof raw.job === "string" ? raw.job : undefined });
+    },
+    // The run's jobs for a seat (its own, a lead's, all), the open ones first with why each waits.
+    jobsList: async (who, a) => {
+      const svc = hub.jobs?.();
+      if (!svc) return { ok: false, reason: NO_JOBS };
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      const snap = await L.leadsSnapshot(S).catch(() => null);
+      return jobsListing([...svc.jobs.values()], { who, scope: typeof raw.scope === "string" ? raw.scope : undefined, lead: typeof raw.lead === "string" ? raw.lead : undefined, limit: typeof raw.limit === "number" ? raw.limit : undefined, leadOf: (id) => snap?.state.jobLead.get(id), waitWords: (j) => svc.waitWords(j as never) });
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -1022,6 +1079,8 @@ export class Hub {
   private told = new Set<string>();
   private lastWrite = new Map<string, { who: string; at: number }>();
   private inFlight = new Map<string, number>();
+  /** Set once the hub has decided to end for its keeper to restart it (hub-health.ts recycleDue). */
+  private recycling = false;
   private queue = new Map<string, Array<() => void>>();
   /** Per seat: connections open, and bytes buffered across them. */
   private conns = new Map<string, number>();
@@ -1057,6 +1116,17 @@ export class Hub {
   /** Uploads and downloads in progress, by seat, kind and id. */
   private transfers = new Map<string, Transfer>();
   private transferTimer: ReturnType<typeof setInterval> | null = null;
+  /** Its own memory, read each minute: written to status.json, and said once on the trace past three quarters of the heap's limit. */
+  private memoryTimer: ReturnType<typeof setInterval> | null = null;
+  private healthTimer?: ReturnType<typeof setInterval>;
+  private snapshotTaken = false;
+  /** The disk probe of a health sample (hub-health.ts diskSpeed); a test gives one that never ends. */
+  diskProbe: (dir: string) => Promise<DiskProbe> = diskSpeed;
+  /** How long a sample's disk and memory probes may take before the sample is taken without them (HEALTH_PROBE_MS; a test shortens it). */
+  healthProbeMs = HEALTH_PROBE_MS;
+  /** A disk probe that has not ended, and since when: no other is started on a disk that hangs. */
+  private diskProbing: { since: number } | null = null;
+  private memoryHigh = false;
   /** The sockets a seat's VM holds, and whose: every line written on one is checked against P.WIRE_LINE_MAX. */
   private seatSockets = new WeakMap<Socket, string>();
   private table: ReturnType<typeof boardTable>;
@@ -1238,12 +1308,25 @@ export class Hub {
    * harness trace this hub registered), its board post the harness's.
    */
   private async rereadSweeps(): Promise<void> {
+    // The sweeps recorded under older rules are read again in a process of its own, in the background: a record searched
+    // again lists the store and reads its objects, which the hub's loop must not hold. What it leaves to a next pass is
+    // swept once it answers.
+    void import("../extensions/store-sweep.ts")
+      .then((SW) =>
+        SW.execRereadSweeps(this.cfg.sandbox).then(async (r) => {
+          if (!r.records.length) return;
+          this.log(`store sweeps: ${r.records.length} read again under the sweep's rules version ${r.rules}; ${r.cleared.length} hold(s) cleared, ${r.added.length} added`);
+          await SW.reconcileSweepsAtStart(this.cfg.sandbox);
+        }),
+      )
+      .catch((err) => this.log(`store sweeps read again: ${(err as Error).message}`));
+    // A coverage record whose sweep a crash lost is swept now, not when the finish gate first asks (on the run s082123
+    // four such sweeps ran 85 to 89 minutes after their records, during the finish, while finish status said ready).
     try {
       const SW = await import("../extensions/store-sweep.ts");
-      const r = await SW.rereadSweeps(this.cfg.sandbox);
-      if (r.records.length) this.log(`store sweeps: ${r.records.length} read again under the sweep's rules version ${r.rules}; ${r.cleared.length} hold(s) cleared, ${r.added.length} added`);
+      await SW.reconcileSweepsAtStart(this.cfg.sandbox);
     } catch (err) {
-      this.log(`store sweeps read again: ${(err as Error).message}`);
+      this.log(`store sweeps reconciled at start: ${(err as Error).message}`);
     }
   }
 
@@ -1359,6 +1442,20 @@ export class Hub {
   async start(): Promise<void> {
     this.transferTimer = setInterval(() => this.sweepTransfers(), Math.max(1_000, Math.min(60_000, Math.floor((this.cfg.transferIdleMs ?? TRANSFER_IDLE_MS) / 2))));
     this.transferTimer.unref();
+    // The run s082123's hub ran out of heap after 90 minutes with nothing said before it died (several store sweeps at once, each holding
+    // the store's object list): what it holds is now in status.json, a crossing of three quarters of the limit is on the trace, and the
+    // launchers start it with --heapsnapshot-near-heap-limit, so a hub that dies of it leaves a snapshot in its own directory.
+    this.memoryTimer = setInterval(() => void this.checkMemory(), 60_000);
+    this.memoryTimer.unref();
+    // Each minute, what the hub and the host look like, on the trace (hub-health.ts); and one heap snapshot while it can still be written.
+    const loop = loopMonitor();
+    let sampling = false;
+    this.healthTimer = setInterval(() => {
+      if (sampling) return;
+      sampling = true;
+      void this.healthTick(loop).finally(() => (sampling = false));
+    }, healthEveryMs());
+    this.healthTimer.unref();
     // A Unix socket path the kernel takes is 103 bytes and its NUL (104 on
     // macOS): past it `listen` fails with a bare EINVAL, which said nothing
     // about why (measured: a 3-byte run id under macOS's TMPDIR made 105).
@@ -1532,6 +1629,8 @@ export class Hub {
     await this.jobService?.stop("the hub is stopping").catch((err: Error) => this.log(`jobs: stop: ${err.message}`));
     if (this.backstopTimer) clearInterval(this.backstopTimer);
     if (this.transferTimer) clearInterval(this.transferTimer);
+    if (this.memoryTimer) clearInterval(this.memoryTimer);
+    if (this.healthTimer) clearInterval(this.healthTimer);
     for (const key of [...this.transfers.keys()]) this.dropTransfer(key, false);
     await this.flushRefusals().catch(() => undefined);
     // Its link to the collector closes below: a harness line written after it goes the CLI's way.
@@ -1986,7 +2085,12 @@ export class Hub {
             return;
           }
           try {
-            const result = await this.callOnce(agent, String(msg.fn ?? ""), args, controller.signal, msg.rid);
+            const fn = String(msg.fn ?? "");
+            const raw = await this.callOnce(agent, fn, args, controller.signal, msg.rid);
+            // The wall behind every bounded source (extensions/reply-bound.ts): an answer past it is cut to the bound, and the
+            // whole kept among the seat's own kept outputs, which its VM reads (tool-output/<seat>/), and named.
+            const { answer: result, cut } = await boundRpcAnswer(fn, raw, (text) => keepAnswer(this.cfg.sandbox, agent, fn, text));
+            if (cut) void this.refused(agent, "answer_too_large", `${cut.fn}: ${cut.bytes} bytes over ${cut.max}${cut.kept ? `, kept at ${cut.kept}` : ""}`);
             this.replyRpc(agent, socket, id, result);
           } finally {
             running.delete(id);
@@ -2572,10 +2676,103 @@ export class Hub {
     return Object.fromEntries(this.status);
   }
 
+  /**
+   * The sizes of what the hub holds (Plan 2, G2): each large structure's
+   * count and, where it holds bytes, its bytes. A health line that counted
+   * only transfers and jobs could not say which structure filled a heap.
+   */
+  holdsNow(): Record<string, number> {
+    let transferBytes = 0;
+    for (const t of this.transfers.values()) transferBytes += t.data?.length ?? t.got;
+    let promptBytes = 0;
+    let prompts = 0;
+    for (const q of this.queued.values()) {
+      prompts += q.length;
+      for (const p of q) promptBytes += Buffer.byteLength(String((p as { text?: unknown }).text ?? ""));
+    }
+    const sweeps = sweepsHeld();
+    const kept = P.appendOnlyHeldSize();
+    return {
+      seats_linked: [...this.status.values()].filter((a) => a.connected).length,
+      calls_in_flight: [...this.inFlight.values()].reduce((a, n) => a + n, 0),
+      call_args_bytes: [...this.held.values()].reduce((a, n) => a + n, 0),
+      transfers: this.transfers.size,
+      transfers_bytes: transferBytes,
+      replies_kept: this.replies.size,
+      queued_prompts: prompts,
+      queued_prompts_bytes: promptBytes,
+      sweeps_lines: sweeps.lines,
+      sweeps_bytes: sweeps.bytes,
+      sweeps_hit_rows: sweeps.hit_rows,
+      sweeps_hit_bytes: sweeps.hit_bytes,
+      ledger_kept_bytes: kept.bytes,
+      jobs: this.jobService?.jobs.size ?? 0,
+    };
+  }
+
+  /**
+   * One health sample: on the trace, the snapshot when it is due, and the restart a keeper makes when the heap is past its line at
+   * a quiet moment. The disk's and the memory's probes are bounded (healthProbeMs): an fsync that never returned held the sample,
+   * and with it every later sample, the 60% heap snapshot and the 85% restart (the timer starts none while one runs). A probe past
+   * its bound is said slow or hung in the sample, and the heap is read and acted on all the same.
+   */
+  async healthTick(loop: { read(): { p50: number; p99: number; max: number } }): Promise<void> {
+    const [pressure, disk] = await Promise.all([within(memoryPressure().catch(() => undefined), this.healthProbeMs, () => undefined), this.probeDisk()]);
+    const h = sampleHealth(loop.read(), this.holdsNow(), { pressure, disk });
+    await this.event("hub_health", {}, { ok: true, ...h }).catch(() => undefined);
+    if (snapshotDue(h, this.snapshotTaken)) {
+      this.snapshotTaken = true;
+      try {
+        const file = v8.writeHeapSnapshot(join(this.cfg.dir, `Heap.at-${Math.round(snapshotAt() * 100)}pct.${process.pid}.heapsnapshot`));
+        const bytes = statSync(file).size;
+        await this.event("hub_heap_snapshot", {}, { ok: true, file, bytes, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb }).catch(() => undefined);
+        this.log(`memory: heap snapshot written at ${h.heap_used_mb} of ${h.heap_limit_mb} MB: ${file} (${bytes} bytes)`);
+      } catch (err) {
+        await this.event("hub_heap_snapshot", {}, { ok: false, reason: (err as Error).message }).catch(() => undefined);
+      }
+    }
+    // Past the recycle line, at a quiet moment, a supervised hub ends so that its keeper starts it again with --resume.
+    const busyJobs = [...(this.jobService?.jobs.values() ?? [])].filter((j) => j.state === "running" || j.state === "fenced" || j.state === "finished").length;
+    const calls = [...this.inFlight.values()].reduce((a, n) => a + n, 0);
+    const recycle = recycleDue(h, { supervised: process.env.SWARM_HUB_SUPERVISED === "1", callsInFlight: calls, jobsBusy: busyJobs });
+    if (recycle.due && !this.recycling) {
+      this.recycling = true;
+      this.log(`memory: ending for a restart by the keeper: ${recycle.why}`);
+      void this.event("hub_recycled", {}, { ok: true, why: recycle.why, heap_used_mb: h.heap_used_mb, heap_limit_mb: h.heap_limit_mb })
+        .catch(() => undefined)
+        .then(() => this.flushRefusals().catch(() => undefined))
+        .then(() => process.exit(75));
+    }
+  }
+
+  /** The disk's speed for a health sample, within healthProbeMs; a probe that does not end is said so, and none other is started while it hangs. */
+  private async probeDisk(): Promise<DiskProbe> {
+    const unknown = (why: string): DiskProbe => ({ disk_write_mb_s: null, disk_fsync_ms: null, disk_error: why });
+    if (this.diskProbing) return unknown(`the disk probe started ${Math.round((Date.now() - this.diskProbing.since) / 1000)} s ago has not ended: the disk under ${this.cfg.dir} is slow or hung`);
+    const probing = { since: Date.now() };
+    this.diskProbing = probing;
+    const probe = this.diskProbe(this.cfg.dir)
+      .catch((err: Error) => unknown(String(err?.message ?? err).slice(0, 200)))
+      .finally(() => {
+        if (this.diskProbing === probing) this.diskProbing = null;
+      });
+    return within(probe, this.healthProbeMs, () => unknown(`the disk probe did not end within ${this.healthProbeMs} ms: the disk under ${this.cfg.dir} is slow or hung`));
+  }
+
+  /** Said once each time the heap passes three quarters of its limit, and again after it has gone back under two thirds. */
+  async checkMemory(m = hubMemory()): Promise<void> {
+    this.writeStatus();
+    if (!this.memoryHigh && m.heap_used_mb > 0.75 * m.heap_limit_mb) {
+      this.memoryHigh = true;
+      await this.event("hub_memory_high", {}, { ok: true, ...m }).catch(() => undefined);
+      this.log(`memory: ${m.heap_used_mb} MB of a ${m.heap_limit_mb} MB heap in use (rss ${m.rss_mb} MB)`);
+    } else if (this.memoryHigh && m.heap_used_mb < (2 / 3) * m.heap_limit_mb) this.memoryHigh = false;
+  }
+
   private writeStatus(): void {
     try {
       const tmp = `${this.statusFile()}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, agents: this.statusSnapshot(), finished: this.finished, finish_done: this.finishDone }, null, 2)}\n`);
+      writeFileSync(tmp, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, memory: hubMemory(), agents: this.statusSnapshot(), finished: this.finished, finish_done: this.finishDone }, null, 2)}\n`);
       renameSync(tmp, this.statusFile());
     } catch {
       // the admin socket answers the same question
@@ -2598,12 +2795,16 @@ export class Hub {
             this.reply(socket, { ok: false, error: "not in this run" }, true);
             return false;
           }
+          const kind = typeof msg.kind === "string" ? msg.kind : undefined;
           const delivered = this.prompt(agent, String(msg.text ?? ""), {
             deliver: msg.deliver === "steer" ? "steer" : "followUp",
-            kind: typeof msg.kind === "string" ? msg.kind : undefined,
+            kind,
             queue: msg.queue === true,
           });
-          this.reply(socket, { ok: delivered, delivered }, true);
+          // The hub's own reason when it did not put the words on a link: the watchdog logs it and counts nothing (A5).
+          const paused = Boolean(this.pausedAt) && !["stop_steer", "resume", "paused"].includes(kind ?? "");
+          const queued = !delivered && !paused && msg.queue === true;
+          this.reply(socket, { ok: delivered || queued, delivered, ...(queued ? { queued: true } : {}), ...(delivered || queued ? {} : { reason: paused ? "the run is paused: its seats take no prompt until it goes on" : `${agent} is not linked to the hub (its process ended, or its link is down)` }) }, true);
           return false;
         }
         case "status":
@@ -3285,7 +3486,7 @@ export function msbDbOutcomes(stdout: string): Array<{ agent: string; name: stri
   return [];
 }
 
-const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT", "SWARM_HISTORY_QUOTA_MB", "SWARM_TRANSFER_PART_BYTES"];
+const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_LEAD_MAX_QUESTIONS", "SWARM_RPC_ANSWER_MAX_BYTES", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT", "SWARM_HISTORY_QUOTA_MB", "SWARM_TRANSFER_PART_BYTES"];
 
 /**
  * Bytes of file history one seat may have stored: SWARM_HISTORY_QUOTA_MB, else
@@ -3306,7 +3507,96 @@ export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number 
   return Number.isInteger(n) && n > 0 ? n : 14400;
 }
 
+/**
+ * An answer too large to send, kept whole for the seat it was for, under its
+ * own kept outputs (tool-output/<seat>/), which its VM mounts: a name with a
+ * random part, created only if nothing is there (a seat that put a link in
+ * its directory does not have the hub write through it).
+ */
+export async function keepAnswer(sandbox: string, agent: string, fn: string, text: string): Promise<{ path: string; bytes: number; sha256: string } | { write_error: string }> {
+  const rel = P.toolOutputRel(agent, `answer-${fn}`, "text");
+  const bytes = Buffer.from(text, "utf8");
+  try {
+    await mkdir(dirname(join(sandbox, rel)), { recursive: true });
+    await writeFile(join(sandbox, rel), bytes, { flag: "wx", mode: 0o644 });
+    return { path: rel, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } catch (err) {
+    return { write_error: (err as Error).message };
+  }
+}
+
+/**
+ * Each line the hub writes to its log through its streams (traces/vm-hub.log
+ * takes its stdout and stderr: its own lines, Node's warnings, an error it
+ * reports) begins with when, in UTC, as the watchdog's do (Plan 2, 0.13): the
+ * log of the runs s17fdfe and s5d814f could not be laid beside the trace. A
+ * chunk that ends mid-line leaves the next chunk to go on with it, unstamped.
+ * Not every line of the log is stamped: what the runtime writes past these
+ * streams is not. A crash's report is (Node prints an uncaught exception's
+ * stack itself), so stampCrashes writes a stamped copy of it first; the text
+ * of a fatal out-of-memory, and anything Node says before the hub's main()
+ * has run (a module that does not load), stay as Node writes them. Returns a
+ * function that puts the stream back.
+ */
+export function stampLines(stream: { write: (...a: never[]) => boolean }, now: () => string = () => new Date().toISOString()): () => void {
+  const write = stream.write;
+  let atStart = true;
+  const stamped = function (this: unknown, chunk: unknown, ...rest: unknown[]): boolean {
+    const text = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? Buffer.from(chunk).toString(typeof rest[0] === "string" ? (rest[0] as BufferEncoding) : "utf8") : String(chunk);
+    let out = "";
+    for (let i = 0; i < text.length; ) {
+      if (atStart) {
+        out += `${now()} `;
+        atStart = false;
+      }
+      const nl = text.indexOf("\n", i);
+      if (nl < 0) {
+        out += text.slice(i);
+        break;
+      }
+      out += text.slice(i, nl + 1);
+      i = nl + 1;
+      atStart = true;
+    }
+    const tail = rest.filter((x) => typeof x === "function");
+    return (write as (...a: unknown[]) => boolean).call(stream, out, "utf8", ...tail);
+  };
+  stream.write = stamped as unknown as typeof stream.write;
+  return () => {
+    stream.write = write;
+  };
+}
+
+/**
+ * A crash's report with its time: an uncaught exception, or a rejection
+ * nothing handled (which Node raises as one), is printed by Node itself past
+ * process.stderr.write, so its stack stood in the log with no time. Before
+ * Node prints it and exits as it always has (code 1), the same error is
+ * written through `stream`, stamped by stampLines. It listens on
+ * uncaughtExceptionMonitor, which changes nothing of what follows. Node's own
+ * report follows it, unstamped; a fatal out-of-memory has no such event and
+ * is not stamped. Returns a function that stops listening.
+ */
+export function stampCrashes(stream: { write: (text: string) => boolean } = process.stderr): () => void {
+  const said = (err: unknown, origin: string) => {
+    try {
+      const what = origin === "unhandledRejection" ? "a rejection nothing handled" : "an uncaught exception";
+      stream.write(`vm-hub: ${what} ends the hub (Node's own report of it follows, without times): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    } catch {
+      // Node's own report still follows.
+    }
+  };
+  process.on("uncaughtExceptionMonitor", said);
+  return () => void process.off("uncaughtExceptionMonitor", said);
+}
+
 async function main(): Promise<void> {
+  // SWARM_LOG_TS=0 leaves the lines as they are.
+  if (process.env.SWARM_LOG_TS !== "0") {
+    stampLines(process.stdout);
+    stampLines(process.stderr);
+    stampCrashes();
+  }
   const args = process.argv.slice(2);
   const opt = (name: string) => {
     const i = args.indexOf(name);

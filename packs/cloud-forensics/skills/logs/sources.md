@@ -3,6 +3,7 @@ id: logs/sources
 title: Cloud source families to inventory
 when: You must list which logs to expect or ask for in a cloud case.
 needs: [logs/what-exists]
+card: List each family: supplied, not supplied, disabled or unknown, with the evidence; ask for one not supplied, never fetch it. Read a family no tool here reads in a recorded job and say so. cloud_timeline_export {"path": "<normalised.jsonl>"} orders rows in UTC, leaves a row with no usable time unsorted and deduplicates nothing. Does not show: that a listed family existed or an unlisted one did not.
 tools: [cloudtrail_parse, signin_analyse, ual_parse, cloud_normalise, cloud_timeline_export]
 requires_host: []
 ---

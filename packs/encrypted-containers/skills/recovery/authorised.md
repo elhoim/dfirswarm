@@ -3,6 +3,7 @@ id: recovery/authorised
 title: Authorising and running password_recover
 when: The case contract authorises an attempt to recover a password from evidence or an extracted hash.
 needs: []
+card: password_recover only when the case contract authorises it; record the authority, scope and stopping condition first. Only in a job with secret_output: true: {"source": "<protected file>", "format": "zip", "candidates": "<file, one candidate per line>"}. Cite the sealed pot file, never a password, hash, salt or length. Does not show: that finding nothing means no password exists.
 tools: [password_recover]
 requires_host: [john]
 ---

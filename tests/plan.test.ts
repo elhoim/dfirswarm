@@ -324,7 +324,10 @@ test("a forged tool's writes are attributed by what its arguments name, like a s
   assert.ok(isPeersScratch("work/extracted/a01/MICROSOFTEDGE.pf", "a00", new Set(["a00", "a01"])));
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../extensions/agent-swarm.ts", import.meta.url), "utf8");
-  const forged = source.slice(source.indexOf("function registerForged("), source.indexOf("function registerForged(") + 4000);
+  // The whole function: from its line to the closing brace at its own indentation.
+  const start = source.indexOf("function registerForged(");
+  const forged = source.slice(start, source.indexOf("\n  }\n", start));
+  assert.ok(forged.length > 0 && forged.length < 40_000, "registerForged is read whole");
   assert.match(forged, /attributeToThisCall\(/, "the forged-tool path filters its diff the way bash does");
   assert.doesNotMatch(source, /reason: `bash write to \$\{report\.path\}/, "a violation names the tool that made it, not always bash");
 });
