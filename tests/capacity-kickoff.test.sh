@@ -96,7 +96,8 @@ out="$(other_runs_load "")"
 pass "three starts launched together: the second counts the first, the third both, while none has a record or a hub"
 
 # Two starts on one runs directory from two shells: another TMPDIR, another TZ, and the directory named another way
-# (through a link, with a dot and a trailing slash). Each counts the other.
+# (through a link, with a dot and a trailing slash). Each counts the other. A shell's answer is renamed into place
+# whole, so the wait below never reads a file the redirection has made but not yet filled.
 rm -rf "$RUNS_DIR" "$KD"; mkdir -p "$RUNS_DIR"; echo '{"runs": []}' > "$REGISTRY"
 ln -s "$RUNS_DIR" "$TMP/runs-link"
 mkdir -p "$TMP/tmpA" "$TMP/tmpB"
@@ -108,7 +109,7 @@ for spec in "$TMP/tmpA|America/Los_Angeles|$TMP/runs-link" "$TMP/tmpB|Asia/Tokyo
     eval "$(sed -n "$4" "$1/scripts/swarm.sh")"
     RUNS_DIR="$2"; REGISTRY="$2/registry.json"
     kickoff_claim 2 2 4096 2 2 8192
-    other_runs_load "" > "$3"
+    other_runs_load "" > "$3.part" && mv "$3.part" "$3"
     exec sleep 300' _ "$ROOT" "$rdir" "$TMP/shell$i.out" "$FUNCS" >/dev/null 2>&1 </dev/null &
   PIDS+=("$!")
   for _ in $(seq 1 50); do [[ -e "$TMP/shell$i.out" ]] && break; sleep 0.1; done
@@ -126,8 +127,10 @@ other_runs_load "" >/dev/null
 [[ ! -e "$DFIRSWARM_HOME/kickoffs/123456789/$LAST.json" ]] || fail "an ended launcher's claim for another runs directory was left"
 pass "an ended launcher's claim for another runs directory is removed by the next start that counts"
 
-# The kickoff writes its launcher into the run's record, and claims before it asks vm.ts capacity.
-grep -q 'kickoff: {pid: \$kickoff_pid, started: \$kickoff_started}' "$ROOT/scripts/swarm.sh" || fail "the run's record does not name its launcher"
+# The kickoff writes its launcher into the run's record (a prepared run, which starts no agents, names none), and claims
+# before it asks vm.ts capacity.
+grep -qF 'kickoff: (if $kickoff_pid == null then null else {pid: $kickoff_pid, started: $kickoff_started} end)' "$ROOT/scripts/swarm.sh" || fail "the run's record does not name its launcher"
+grep -qF -- '--argjson kickoff_pid "$([[ "$start_agents" -eq 1 ]] && echo "$$" || echo null)"' "$ROOT/scripts/swarm.sh" || fail "a started run's record does not name its launcher's pid"
 body="$(sed -n '/This start.s own claim first/,/vm_cli capacity --n/p' "$ROOT/scripts/swarm.sh")"
 grep -q 'kickoff_claim "\$n"' <<<"$body" && grep -q 'other_runs_load' <<<"$body" || fail "the start does not claim before it counts the others: $body"
 pass "a start names its launcher in its record and claims before it counts the others"
