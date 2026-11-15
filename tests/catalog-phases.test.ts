@@ -78,6 +78,8 @@ test("a recipe that declares the listing phase is run twice at kickoff: the list
   const { S, svc, posts } = await boxRun(["listing"]);
   await svc.start();
   await eventually(() => svc.jobs.size === 2 && [...svc.jobs.values()].every(done), "both kickoff jobs catalogued");
+  // A generation is on the job before its job.json is written, and the post follows that write: wait for both posts.
+  await eventually(() => [...svc.jobs.values()].every((j) => posts.some(([to, b]) => to === "all" && b.includes(j.generation!))), "both catalogues said to everyone");
   const jobs = [...svc.jobs.values()].sort((a, b) => a.id.localeCompare(b.id));
   assert.deepEqual(jobs.map((j) => j.spec.phase ?? "whole"), ["listing", "whole"], "the listing is submitted first");
   const seen = (j: JobRecord) => (JSON.parse(readFileSync(join(S, "catalog", "gen", j.generation!, "coverage.json"), "utf8")) as { phase_seen: string }).phase_seen;
@@ -158,7 +160,9 @@ test(`the listing of a ${ITEMS}-item AD1 is committed through the job service at
     assert.deepEqual([cov.phase, cov.items, cov.files], ["listing complete; digests pending", ITEMS + ITEMS / 1000, ITEMS]);
     const rows = readFileSync(join(S, "catalog", "gen", job.generation!, "members.tsv"), "utf8").trimEnd().split("\n").length - 1;
     assert.equal(rows, ITEMS + ITEMS / 1000, "every item is listed");
-    // Said to everyone as the listing, with what follows.
+    // Said to everyone as the listing, with what follows (the post follows the job.json write, so it is waited for).
+    const said = () => posts.some(([to, b]) => to === "all" && b.includes(job.generation!));
+    await eventually(said, "the listing said to everyone", 60_000).catch(() => undefined);
     assert.ok(posts.some(([to, b]) => to === "all" && b.includes(job.generation!) && /the listing \(every member's path, size and times/.test(b)), JSON.stringify(posts.map(([to, b]) => [to, b.slice(0, 160)])));
     const bar = Math.max((60_000 * ITEMS) / 400_000, 10_000);
     t.diagnostic(`${ITEMS} items (an image of ${image.length} bytes): the listing committed ${ms} ms after the census began (the plan's rate allows ${Math.round(bar)} ms)`);

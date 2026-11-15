@@ -34,10 +34,18 @@ const procs: ChildProcess[] = [];
 const hubs: Hub[] = [];
 after(async () => {
   for (const h of hubs) await h.stop().catch(() => undefined);
-  for (const p of procs) p.kill("SIGTERM");
+  // A process or a render still finishing writes into a directory while it is removed: each is waited for (a moment at most), and
+  // the removal is retried on a directory that filled again (ENOTEMPTY) under it.
+  await Promise.all(
+    procs.map((p) => (p.exitCode !== null || p.signalCode !== null ? undefined : new Promise<void>((r) => {
+      const t = setTimeout(r, 3000);
+      p.once("exit", () => (clearTimeout(t), r()));
+      p.kill("SIGTERM");
+    }))),
+  );
   for (const d of dirs) {
     spawnSync("chmod", ["-R", "u+w", d]);
-    await rm(d, { recursive: true, force: true });
+    await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
