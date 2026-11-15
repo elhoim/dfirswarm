@@ -134,7 +134,10 @@ test("a slot is free from job_fenced: with two workers and a seal of three secon
   const lines = journal(S);
   for (const j of [a, b, c]) ordered(lines, j.job.id);
   const committed = lines.filter((l) => l.type === "job_committed").map((l) => l.job);
-  assert.deepEqual(committed, [b.job.id, c.job.id, a.job.id].sort((x, y) => (x === a.job.id ? 1 : y === a.job.id ? -1 : 0)).filter((x) => committed.includes(x)), "the small commits passed the long seal");
+  // The two small jobs run on two workers at once: either may commit first. What the slot freed at the fence buys is that both
+  // commit before the long seal does.
+  assert.equal(committed.length, 3, JSON.stringify(committed));
+  assert.deepEqual(committed.slice(0, 2).sort(), [b.job.id, c.job.id].sort(), "the small commits passed the long seal");
   assert.equal(committed.at(-1), a.job.id);
   assert.equal(lines.filter((l) => l.type === "job_started").length, 3, "nothing started is lost");
   await svc.stop("over");
