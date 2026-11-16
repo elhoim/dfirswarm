@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
 import { agentDeadPath, agentDonePath, appendEvent, claimName, createContext, diffWatchedPaths, finishLineVerdict, postMessage, runFinishLine, teamView, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
+import { adminCall } from "../scripts/supply-probe.ts";
 import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, stampLines, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -253,6 +254,23 @@ test("a nudge reaches the peer's link as a prompt, once, and only for a kind the
   await until(() => prompts.length >= 1, "the one nudge arrives");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /SWARM_DONE/);
+});
+
+test("the admin socket's call answers in an envelope, and adminCall takes it off: the board function's own answer, or the hub's reason", async () => {
+  // supply-probe.ts and image-capabilities.ts read a board function's answer through this socket. Read with the
+  // envelope on, a job the hub accepted looked refused with no reason, and a supplied ffmpeg whose test passed was
+  // posted to every seat as not working.
+  const { hub, sandbox } = await setup();
+  const raw = await exchange(hub.adminSocket(), { op: "call", fn: "systemPost", args: [sandbox, { tag: "result", to: "all", body: "envelope check one" }] });
+  assert.equal(raw.ok, true);
+  assert.equal(typeof raw.result, "object", "the board function's answer is under result");
+  const call = adminCall(hub.adminSocket(), sandbox);
+  const posted = await call("systemPost", { tag: "result", to: "all", body: "envelope check two" });
+  assert.equal(posted.result, undefined, "the envelope is off");
+  assert.deepEqual(Object.keys(posted).sort(), Object.keys(raw.result as Record<string, unknown>).sort(), "the same answer a board function gives, not its wrapper");
+  const refused = await call("noSuchBoardFunction", {});
+  assert.equal(refused.ok, false);
+  assert.match(String(refused.reason), /not a board function/, "a refusal carries the hub's reason");
 });
 
 test("the admin socket prompts an agent, reports who is working, and knows nobody outside the run", async () => {

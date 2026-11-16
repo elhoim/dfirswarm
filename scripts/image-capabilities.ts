@@ -24,10 +24,9 @@
  * is known, and the answer goes on the board and into job-capabilities.json.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeQrBase64, PROBE_PAYLOAD, type HubCall } from "./supply-probe.ts";
+import { adminCall, probeQrBase64, PROBE_PAYLOAD, type HubCall } from "./supply-probe.ts";
 
 /**
  * One capability of an image: `ok` when the known answer was read; `untested` (and not ok) when the probe could not
@@ -262,17 +261,7 @@ async function main(argv: string[]): Promise<number> {
     console.error("usage: image-capabilities.ts <sandbox> --hub-admin SOCKET --profiles NAME[,NAME] [--images JSON] [--digests JSON] [--cache DIR]\n       image-capabilities.ts <sandbox> --seed --images JSON [--digests JSON] [--cache DIR]");
     return 2;
   }
-  const call: HubCall = (fn, arg) =>
-    new Promise((resolve, reject) => {
-      let answer = "";
-      const socket = connect(admin);
-      socket.setTimeout(60_000, () => { socket.destroy(); reject(new Error("the hub did not answer")); });
-      socket.setEncoding("utf8");
-      socket.on("error", reject);
-      socket.on("data", (c) => (answer += c));
-      socket.on("close", () => { try { resolve(JSON.parse(answer.trim().split("\n")[0] ?? "{}") as Record<string, unknown>); } catch (err) { reject(err as Error); } });
-      socket.on("connect", () => socket.write(`${JSON.stringify({ op: "call", fn, args: [sandbox, arg] })}\n`));
-    });
+  const call: HubCall = adminCall(admin, sandbox);
   const raw = await probeImages(call, profiles, { runRoot: sandbox });
   const result = withPackTools(raw);
   // This run's own result replaces the seed (pending, and an earlier run's lines) whole.

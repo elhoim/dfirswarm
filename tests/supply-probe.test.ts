@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { applySupply, applyUntested, decide, PROBE_PAYLOAD, probeFor, probePost, probeQrBase64, runProbes, untestedPost, type HubCall } from "../scripts/supply-probe.ts";
+import { adminCall, applySupply, applyUntested, decide, PROBE_PAYLOAD, probeFor, probePost, probeQrBase64, runProbes, untestedPost, type HubCall } from "../scripts/supply-probe.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const QRGEN = join(ROOT, "scripts", "lib", "qrgen.py");
@@ -125,7 +125,8 @@ async function fakeHub(dir: string, stdoutOf: (command: string) => string): Prom
       } else if (req.fn === "jobStatus") {
         answer = { ok: true, job: { job: arg.job_id, state: "committed", status: "ok" }, stdout: { text: stdoutOf(jobs.get(String(arg.job_id)) ?? "") } };
       } else if (req.fn === "systemPost") posts.push(arg);
-      c.end(`${JSON.stringify(answer)}\n`);
+      // As the hub answers an admin "call" (vm-hub.ts `call`): the board function's answer under `result`.
+      c.end(`${JSON.stringify({ ok: true, result: answer })}\n`);
     });
   });
   await new Promise<void>((r) => server.listen(socket, r));
@@ -200,4 +201,34 @@ test("a real zbarimg decodes the probe's PNG with the probe's own command, where
   }
   const r = decide(p, { id: "local", state: "committed", status }, stdout, stderr);
   assert.equal(r.ok, true, `this host's zbarimg did not read the probe: ${r.said}`);
+});
+
+test("adminCall takes the hub's envelope off: an accepted job keeps its id, a refusal keeps the hub's reason", async () => {
+  const { unwrapAdmin } = await import("../scripts/supply-probe.ts");
+  assert.deepEqual(unwrapAdmin({ ok: true, result: { ok: true, job: { job: "j000006" } } }), { ok: true, job: { job: "j000006" } });
+  assert.deepEqual(unwrapAdmin({ ok: false, error: "jobSubmit is not a board function" }), { ok: false, reason: "jobSubmit is not a board function" });
+  assert.equal(unwrapAdmin({ ok: false }).ok, false);
+  assert.deepEqual(unwrapAdmin({ ok: true, result: null }), { ok: true, value: null });
+  // Over a socket that answers as the hub does, a passing ffmpeg test reads as passed (it read as "not accepted").
+  const dir = mkdtempSync(join(tmpdir(), "sp-env-"));
+  const socket = join(dir, "admin.sock");
+  const server = createServer((c) => {
+    let buf = "";
+    c.setEncoding("utf8");
+    c.on("data", (d) => {
+      buf += d;
+      if (!buf.includes("\n")) return;
+      const req = JSON.parse(buf.split("\n")[0]!) as { fn: string; args: [string, Record<string, unknown>] };
+      const result = req.fn === "jobSubmit" ? { ok: true, job: { job: "j000006", state: "accepted" } } : { ok: true, job: { job: "j000006", state: "committed", status: "ok" }, stdout: { text: "frames=5\n" } };
+      c.end(`${JSON.stringify({ ok: true, result })}\n`);
+    });
+  });
+  await new Promise<void>((r) => server.listen(socket, r));
+  try {
+    const out = await runProbes(adminCall(socket, dir), "mat-0001", ["video-decode"], { sleep: async () => undefined });
+    assert.equal(out.ok, true, JSON.stringify(out.probes));
+    assert.equal(out.probes[0]!.job, "j000006");
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
