@@ -93,6 +93,35 @@ export function decide(p: Probe, job: { id?: string; state?: string; status?: st
 
 export type HubCall = (fn: string, arg: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
+/**
+ * What a board function returned, out of the admin socket's envelope. The hub answers an admin "call" with
+ * `{ ok, result }` when the function ran and `{ ok: false, error }` when it did not (vm-hub.ts `call`); the
+ * function's own answer (`{ ok, job, reason, ... }`) is `result`. Read without this, a job the hub accepted
+ * looked refused with no reason, and a supplied program that passed its test was posted to the seats as broken.
+ */
+export function unwrapAdmin(answer: Record<string, unknown>): Record<string, unknown> {
+  if (answer.ok !== true) return { ok: false, reason: String(answer.error ?? answer.reason ?? "the hub refused the call without a reason") };
+  const r = answer.result;
+  return r !== null && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : { ok: true, value: r ?? null };
+}
+
+/** The hub's admin "call" as `system`, over its admin socket, with the envelope taken off (unwrapAdmin). */
+export function adminCall(admin: string, sandbox: string, timeoutMs = 60_000): HubCall {
+  return (fn, arg) =>
+    new Promise((resolve, reject) => {
+      let answer = "";
+      const socket = connect(admin);
+      socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error("the hub did not answer")); });
+      socket.setEncoding("utf8");
+      socket.on("error", reject);
+      socket.on("data", (c) => (answer += c));
+      socket.on("close", () => {
+        try { resolve(unwrapAdmin(JSON.parse(answer.trim().split("\n")[0] || "{}") as Record<string, unknown>)); } catch (err) { reject(err as Error); }
+      });
+      socket.on("connect", () => socket.write(`${JSON.stringify({ op: "call", fn, args: [sandbox, arg] })}\n`));
+    });
+}
+
 /** Run each capability's test as a job and decide it. `call` is the hub's admin "call" (as system). */
 export async function runProbes(call: HubCall, importId: string, capabilities: string[], o: { qr?: string; timeoutS?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<{ ok: boolean; import: string; probes: ProbeResult[] }> {
   const qr = o.qr ?? probeQrBase64();
@@ -200,20 +229,7 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
   // The hub's board functions take the run root first: the admin socket's "call" is given it here.
-  const call: HubCall = (fn, arg) =>
-    new Promise((resolve, reject) => {
-      let answer = "";
-      if (!admin) return reject(new Error("no hub admin socket"));
-      const socket = connect(admin);
-      socket.setTimeout(60_000, () => { socket.destroy(); reject(new Error("the hub did not answer")); });
-      socket.setEncoding("utf8");
-      socket.on("error", reject);
-      socket.on("data", (c) => (answer += c));
-      socket.on("close", () => {
-        try { resolve(JSON.parse(answer.trim().split("\n")[0] ?? "{}") as Record<string, unknown>); } catch (err) { reject(err as Error); }
-      });
-      socket.on("connect", () => socket.write(`${JSON.stringify({ op: "call", fn, args: [sandbox, arg] })}\n`));
-    });
+  const call: HubCall = (fn, arg) => (admin ? adminCall(admin, sandbox)(fn, arg) : Promise.reject(new Error("no hub admin socket")));
   const tb = join(sandbox, "toolbox.json");
   if (untested !== undefined) {
     // Sealed and not tested: said so in the run's records and to the seats, never left to read as working.
